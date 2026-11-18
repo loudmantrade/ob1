@@ -326,6 +326,7 @@ music::MusicalPosition musicalPosition;
 music::ClipRecorder recorder;
 std::unique_ptr<RecordingRequest> recordingDestination;
 bool recordingAutoplay = false;
+bool recordingClockPrimed = false;
 constexpr uint32_t completionCapacity = 16;
 struct Completion { ov_seq_clip clip {}; uint32_t result = 0; uint64_t epoch = 0, revision = 0; };
 std::array<Completion, completionCapacity> completions;
@@ -564,8 +565,11 @@ void observeInput(uint32_t slot, const music::Event& event)
 {
     if (recorder.running && recorder.slot == slot && recorder.waiting &&
         event.kind == music::Kind::NoteOn && event.source.kind != music::SourceKind::Pattern) {
-        alignRecordingClock();
-        recorder.firstNote(musicalPosition.value);
+        if (!recordingClockPrimed) {
+            alignRecordingClock();
+            recordingClockPrimed = true;
+        }
+        if (!recorder.output) recorder.firstNote(musicalPosition.value);
     }
     if (recorder.running && !recorder.output && recorder.slot == slot &&
         !recorder.capture(event, musicalPosition.value)) { error.store(1); panic.store(1); }
@@ -573,6 +577,9 @@ void observeInput(uint32_t slot, const music::Event& event)
 bool observeOutput(void* context, const music::Event& event) noexcept
 {
     const auto slot = *static_cast<const uint32_t*>(context);
+    if (recorder.running && recorder.output && recorder.slot == slot && recorder.waiting &&
+        event.kind == music::Kind::NoteOn && event.source.kind != music::SourceKind::Pattern)
+        recorder.firstNote(musicalPosition.value);
     if (recorder.running && recorder.output && recorder.slot == slot &&
         !recorder.capture(event, musicalPosition.value)) { error.store(1); panic.store(1); return false; }
     return true;
@@ -853,6 +860,7 @@ void apply(const Command& c)
         bool playing = clock.external;
         for (const auto& player : players) playing |= player.row >= 0 || player.pendingRow >= 0;
         recordingDestination.reset(request);
+        recordingClockPrimed = false;
         recordingAutoplay = !request->legacy;
         const auto& settings = clips[c.slot][c.a] ? clips[c.slot][c.a]->pattern.data() : request->pattern.data();
         if (request->legacy)

@@ -167,6 +167,11 @@ success-shaped partial take. Scheduling is at 16-sample control resolution,
 not per-sample voice synthesis. No UI timer schedules or records events.
 
 `WaitForNote` arms without a deadline until the first routed live Note On;
+in Output mode it instead waits for the first actual emitted Note On (direct
+or generated ARP). The first live input primes the stopped master clock only
+once, but ARP grid/latency wait is not captured as leading silence or deducted
+from the take's ending. The first output defines tick zero and the full capture
+deadline; later chord inputs never re-anchor the clock while waiting for ARP.
 `Immediate` starts on arm when stopped. During scene playback both join the
 next bar, recording the pre-boundary region as intro. `CountIn` counts 4 or 8
 quarter-note clicks; on a playing scene counting starts at its next bar and

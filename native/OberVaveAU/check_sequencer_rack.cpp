@@ -581,7 +581,50 @@ static void checkEditRaces()
     std::puts("PASS edit races: stopped audio, bounded ack capacity, rapid stale commands, changed content, confirmation revision, scene invalidation, same-column MOVE; render has no ordinary C++ allocation/deallocation");
 }
 
+static void checkOutputFirstNoteOrigin()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config(rack::A_UP)};
+    scene->slots[0].config.parameters[rack::P_ARP_LATCH] = 1;
+    scene->slots[0].config.parameters[rack::P_ARP_GATE] = 127;
+    auto result = std::make_unique<ov_seq_clip>();
+    assert(ov_rack_load(scene.get())); render();
+    ov_set_arp_audio_latency_ms(20);
+    for (uint32_t beats : {4u, 0u}) {
+        assert(ov_seq_arm(0, 0, 0, 1, beats, 1)); render();
+        ov_note_on(60, 100); render();
+        assert(rack::recorder.waiting && rack::recorder.stopAt == INT64_MAX);
+        const auto anchor = rack::sequencerAnchor;
+        ov_note_on(64, 100); render();
+        assert(rack::sequencerAnchor == anchor); // Chord input must not keep restarting the grid.
+        while (!rack::recorder.started) render();
+        // Output Wait-for-note means the first emitted sound, not the earlier held key.
+        const auto firstOutput = rack::musicalPosition.value;
+        assert(rack::recorder.origin == firstOutput);
+        if (!beats) {
+            render(2048);
+            assert(ov_seq_finish_record()); render();
+            assert(ov_seq_record_phase() == 5);
+        }
+        const auto end = rack::recorder.stopAt;
+        assert(end == firstOutput + 3840 * music::tickUnit);
+        while (rack::recorder.running) render();
+        assert(ov_seq_read_record(result.get()) && result->count && result->notes[0].start == 0);
+        int64_t lastEnd = 0;
+        for (uint32_t i = 0; i < result->count; ++i) {
+            assert(result->notes[i].output);
+            lastEnd = std::max(lastEnd, result->notes[i].start + result->notes[i].duration);
+        }
+        assert(lastEnd >= result->length - 1);
+        assert(ov_seq_active(0) == 0 && rack::players[0].origin == end);
+        assert(ov_rack_stop_all()); render();
+    }
+    ov_set_arp_audio_latency_ms(0);
+    assert(!ov_rack_take_error());
+    std::puts("PASS Output Wait-for-note: compensated ARP first emitted onset defines zero, full bar capture and final held gate reach endpoint, audio-owned loop handover");
+}
+
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); ov_rack_collect();
 }
