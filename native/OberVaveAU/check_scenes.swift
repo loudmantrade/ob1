@@ -148,6 +148,33 @@ struct SceneChecks {
 
     static func main() throws {
         checkCircularLayout()
+        var gesture = PatternCellGesture()
+        func down(_ time: Double) {
+            precondition(gesture.down(at: time, editable: true, dragAllowed: true).isEmpty)
+        }
+        down(0); precondition(gesture.up(at: 0.05).isEmpty)
+        precondition(gesture.tick(at: 0.30) == [.tap])
+        down(1); precondition(gesture.move(distance: 10, at: 1.05) == [.beginDrag(copy: false)])
+        precondition(gesture.up(at: 1.10) == [.drop])
+        down(2); _ = gesture.up(at: 2.05); down(2.15)
+        precondition(gesture.move(distance: 10, at: 2.20) == [.beginDrag(copy: true)])
+        precondition(gesture.up(at: 2.25) == [.drop])
+        down(3); precondition(gesture.tick(at: 3.46) == [.copyReady])
+        precondition(gesture.move(distance: 10, at: 3.50) == [.beginDrag(copy: true)])
+        _ = gesture.up(at: 3.55)
+        down(4); _ = gesture.up(at: 4.05); down(4.15)
+        precondition(gesture.tick(at: 4.61) == [.copyReady])
+        precondition(gesture.up(at: 4.65) == [.delete])
+        down(5); _ = gesture.up(at: 5.05); down(5.15)
+        precondition(gesture.up(at: 5.20) == [.edit] && gesture.tick(at: 6).isEmpty)
+        _ = gesture.down(at: 7, editable: true, dragAllowed: false)
+        precondition(gesture.move(distance: 10, at: 7.1) == [.scroll])
+        precondition(gesture.up(at: 7.2).isEmpty)
+        down(8); _ = gesture.up(at: 8.1); gesture.cancel()
+        precondition(gesture.tick(at: 9).isEmpty)
+        _ = gesture.down(at: 10, editable: false, dragAllowed: false)
+        precondition(gesture.up(at: 10.1) == [.tap])
+        print("PASS gesture state machine: delayed single tap, direct MOVE, both COPY prefixes, stationary DELETE, double EDIT, scroll and cancellation without premature musical actions")
         var sourcePattern = SequencerPattern(slot: 0, row: 0, name: "Move")
         sourcePattern.notes = [SequencerNote(id: 1, start: 120, duration: 500, pitch: 60, velocity: 100)]
         let move = PatternTransfer(source: sourcePattern, destination: PatternCell(slot: 1, row: 2),

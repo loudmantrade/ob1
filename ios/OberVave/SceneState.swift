@@ -289,6 +289,73 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
     }
 }
 
+struct PatternCellGesture {
+    static let tapWindow = 0.24
+    static let holdTime = 0.45
+    static let dragDistance = 8.0
+    enum Effect: Equatable {
+        case tap, edit, copyReady, beginDrag(copy: Bool), drag, drop, delete, menu, scroll
+    }
+    private var pendingTap: Double?
+    private var pressedAt: Double?
+    private var prefix = false
+    private var editable = false
+    private var dragAllowed = false
+    private var dragging = false
+    private var held = false
+    private var scrolling = false
+
+    mutating func down(at time: Double, editable: Bool, dragAllowed: Bool) -> [Effect] {
+        let effects = tick(at: time)
+        prefix = pendingTap != nil
+        pendingTap = nil
+        pressedAt = time
+        self.editable = editable
+        self.dragAllowed = dragAllowed
+        dragging = false; held = false; scrolling = false
+        return effects
+    }
+
+    mutating func tick(at time: Double) -> [Effect] {
+        if let pendingTap, time - pendingTap >= Self.tapWindow {
+            self.pendingTap = nil
+            return [.tap]
+        }
+        if let pressedAt, editable, !held, !dragging, !scrolling, time - pressedAt >= Self.holdTime {
+            held = true
+            return [.copyReady]
+        }
+        return []
+    }
+
+    mutating func move(distance: Double, at time: Double) -> [Effect] {
+        guard pressedAt != nil, !scrolling else { return [] }
+        if dragging { return [.drag] }
+        guard distance >= Self.dragDistance else { return tick(at: time) }
+        guard editable && dragAllowed else {
+            scrolling = true; pendingTap = nil
+            return [.scroll]
+        }
+        let copying = prefix || held || time - (pressedAt ?? time) >= Self.holdTime
+        dragging = true
+        return [.beginDrag(copy: copying)]
+    }
+
+    mutating func up(at time: Double) -> [Effect] {
+        guard let pressedAt else { return [] }
+        self.pressedAt = nil
+        if scrolling { return [] }
+        if dragging { return [.drop] }
+        if editable && (held || time - pressedAt >= Self.holdTime) { return [prefix ? .delete : .menu] }
+        if editable && prefix { return [.edit] }
+        if editable { pendingTap = time; return [] }
+        if time - pressedAt >= Self.holdTime { return [] }
+        return [.tap]
+    }
+
+    mutating func cancel() { self = Self() }
+}
+
 struct PatternCell: Hashable {
     var slot: Int
     var row: Int
