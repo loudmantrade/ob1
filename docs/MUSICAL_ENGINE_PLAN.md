@@ -163,6 +163,8 @@ standalone event-routing boundary are complete. See
 [the event contract and integration limits](MUSICAL_EVENTS.md). Source context
 now survives the existing queue and logical destination selection is explicit.
 The existing per-channel/pitch activity remains; new per-source ownership and
-output-stage routing are not enabled. The existing synthesizer remains the production reference. Shared
-arpeggiation, pattern playback/recording, pattern UI and external MIDI output
-are planned, not implemented by this document.
+output-stage routing are not enabled. The independent
+[arpeggiator core](ARPEGGIATOR.md) and legacy event-comparison tests are
+implemented; production still uses the original DSP arpeggiator.
+DSP bypass and live extraction, pattern playback/recording, pattern UI and
+external MIDI output are not yet implemented.

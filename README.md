@@ -35,7 +35,7 @@ xcodebuild -project ios/OberVave/OberVave.xcodeproj \
 ### macOS Audio Unit
 
 Requires macOS 13+, Xcode command-line tools, CMake 3.21+ and Ninja.
-Build and run all six native test suites without replacing an installed AU:
+Build and run all seven native test suites without replacing an installed AU:
 
 ```sh
 NO_INSTALL=1 ARCH=x86_64 tools/build_obervave_au.sh
@@ -52,9 +52,10 @@ Rust, Cargo and the old FM-1 plugin build are not required.
 
 - `ios/OberVave/`: standalone app, scene rack and shared SwiftUI controls.
 - `native/OberVave/`: shared native engine adapter.
-- `native/Musical/`: portable musical event types and regression tests;
+- `native/Musical/`: portable musical events, extracted arpeggiator and tests;
   see the [event contract](docs/MUSICAL_EVENTS.md) and
-  [incremental architecture plan](docs/MUSICAL_ENGINE_PLAN.md).
+  [arpeggiator compatibility gate](docs/ARPEGGIATOR.md).
+  Development follows the [incremental architecture plan](docs/MUSICAL_ENGINE_PLAN.md).
 - `native/OberVaveAU/`: AU wrapper, editor bridge and regression tests.
 - `fw/obervave/`: required OberVave DSP headers, factory patches, generated
   tables and upstream attribution; hardware firmware code is not included.
