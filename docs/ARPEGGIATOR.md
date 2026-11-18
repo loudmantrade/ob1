@@ -206,10 +206,42 @@ Start/Continue/Clock interpretation remains with the platform transport.
   clears processor ownership and permits recovery. The caller must surface
   these failures; this experimental class has no platform UI notification.
 
-This adapter is internal-DSP-only: it does not yet publish generated events
-to the shared output bus/recorder, bind logical rack destinations or distinguish
-multiple sources holding the same pitch. It preserves legacy pitch-based held
-semantics, not complete source-note ownership. Integrate and test those surfaces,
+`attach(instrument, channel, sourceID, sink, context)` optionally connects a
+synchronous generated-event receiver. Instrument/channel are validated and
+pinned for the adapter lifetime; reattachment or destination replacement is
+rejected even after Stop. `sourceID` must identify this processor lifetime
+uniquely within the caller's routing domain, not merely its current slot.
+Together with nonzero note IDs it distinguishes output ownership across
+processor instances. The adapter does not generate global lifetime IDs itself.
+The existing no-argument attach remains an internal-only path.
+
+The receiver gets actual generated On/Off events with `Stage::Output`, the
+pinned instrument mask/channel, `SourceKind::Arpeggiator`, the supplied source
+ID and matching note IDs. Common Hold Legato notes retain identity. Direct
+Off-mode physical notes are deliberately not mislabeled as ARP output.
+Events keep scheduler emission order/time, including synchronous cleanup from
+input, parameter edits and Stop. No speculative future gate deadlines are sent.
+The same-time ordering rules remain those documented for live Hold input.
+
+The receiver must be bounded, allocation-free and non-blocking in production.
+Returning `false` means **no side effects/acceptance** for that event; it must
+not partially fan out and then reject. The receiver reserves/accepts its output
+before the adapter applies the validated event to local DSP, and must not also
+dispatch it to the same DSP. Local synthesis still occurs exactly once.
+This synchronous acceptance boundary is not a queue or a complete rack bus;
+recording/output backends will supply their own bounded transaction policy.
+
+On rejection the processor retains only accepted On ownership and unaccepted
+Offs, the adapter faults and releases local gates. Stop retries outstanding
+Offs with their original destination/source/note identity and current stop
+time. It stays faulted if any receiver rejects again. The caller must retain
+the adapter and receiver context until cleanup succeeds, or explicitly panic
+and reconcile the destination before retiring them. There is no success-shaped
+fallback or implicit dropping of pending external ownership.
+
+This adapter does not yet distinguish multiple physical input sources holding
+the same pitch. It preserves legacy pitch-based held semantics, not complete
+source-note ownership. Integrate and test those surfaces,
 scene swaps, endpoint identity, keyboard key locks and the independent AU
 before enabling the extracted scheduler in production.
 
@@ -280,3 +312,8 @@ render bounds and conflicting attachment are tested separately.
 The adapter comparisons cover 75,000 stereo control blocks in the main
 scenario matrices, including maximum-size/multi-tick render buffers over
 32-bit DSP counter wrap with Master Sync and signed latency changes.
+They now also compare every emitted output On/Off against the legacy recording
+trace, checking order, pitch/velocity, monotonic 64-bit time, pinned destination,
+source lifetime ID and matching note ownership. Failure tests reject part of
+a chord and then reject its cleanup Off, verifying retained ownership,
+repeatable Stop cleanup, local gate release, immutable destination and recovery.

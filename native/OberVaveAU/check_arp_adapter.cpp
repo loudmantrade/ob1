@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <vector>
 
 using namespace obervave;
 namespace music = ob1::music;
@@ -13,11 +14,33 @@ struct Comparison {
     std::unique_ptr<Engine> external = std::make_unique<Engine>();
     ArpeggiatorAdapter adapter {*external};
     uint64_t frame = 0, blocks = 0, nonzero = 0;
+    uint64_t lastOutputFrame = 0;
+    std::vector<music::Event> output;
+    std::array<music::NoteID, 128> sounding {};
+    static bool receive(void* context, const music::Event& event) noexcept
+    {
+        auto& self = *static_cast<Comparison*>(context);
+        assert(music::validate(event) == music::EventError::None);
+        assert(event.routing.stage == music::Stage::Output);
+        assert(event.routing.target == music::Target::Instruments && event.routing.instruments == (1u << 7));
+        assert(event.channel == 9 && event.source.kind == music::SourceKind::Arpeggiator &&
+               event.source.id == 42 && event.note);
+        auto& owner = self.sounding[event.data1];
+        if (event.kind == music::Kind::NoteOn) {
+            assert(!owner);
+            owner = event.note;
+        } else {
+            assert(event.kind == music::Kind::NoteOff && owner == event.note);
+            owner = 0;
+        }
+        self.output.push_back(event);
+        return true;
+    }
     Comparison()
     {
         legacy->initialize();
         external->initialize();
-        assert(adapter.attach());
+        assert(adapter.attach(7, 9, 42, receive, this));
         assert(!adapter.attach());
     }
     void parameter(uint32_t p, uint8_t value)
@@ -35,7 +58,7 @@ struct Comparison {
         assert(adapter.input(event, fixed));
         compareState();
     }
-    void compareState()
+    void compareState(uint32_t renderedFrames = 0)
     {
         if (legacy->vseq != external->vseq) {
             std::fprintf(stderr, "Voice triggers differ frame=%llu mode=%u (%u != %u)\n",
@@ -55,7 +78,19 @@ struct Comparison {
             assert(legacy->vc[v].fe.level == external->vc[v].fe.level);
             assert(legacy->vc[v].target16 == external->vc[v].target16);
         }
-        legacy->arp_qr = legacy->arp_qw;
+        assert(output.size() == legacy->arp_qw - legacy->arp_qr);
+        for (const auto& event : output) {
+            const auto& expected = legacy->arp_q[legacy->arp_qr++ % AQ];
+            assert(event.kind == (expected.on ? music::Kind::NoteOn : music::Kind::NoteOff));
+            assert(event.data1 == expected.note && event.data2 == expected.vel);
+            assert(event.time.frame <= frame && event.time.frame >= lastOutputFrame);
+            if (renderedFrames) {
+                assert(event.time.frame > frame - renderedFrames);
+                assert((event.time.frame - (frame - renderedFrames)) % CTL == 0);
+            } else assert(event.time.frame == frame);
+            lastOutputFrame = event.time.frame;
+        }
+        output.clear();
     }
     void render(uint32_t count = 1)
     {
@@ -77,7 +112,7 @@ struct Comparison {
                 legacy->live_p[0].v[P_MODE]);
             std::abort();
         }
-        compareState();
+        compareState(frames);
         blocks += frames / CTL;
     }
     void stop()
@@ -95,8 +130,62 @@ struct Comparison {
     }
 };
 
+static void checkOutputFailure()
+{
+    struct Sink {
+        std::array<music::NoteID, 128> notes {};
+        uint32_t calls = 0, rejectAt = 2, accepted = 0;
+        static bool receive(void* context, const music::Event& event) noexcept
+        {
+            auto& sink = *static_cast<Sink*>(context);
+            if (++sink.calls == sink.rejectAt) return false;
+            auto& note = sink.notes[event.data1];
+            if (event.kind == music::Kind::NoteOn) {
+                assert(!note);
+                note = event.note;
+            } else {
+                assert(note == event.note);
+                note = 0;
+            }
+            ++sink.accepted;
+            return true;
+        }
+    } sink;
+    auto engine = std::make_unique<Engine>();
+    engine->initialize();
+    ArpeggiatorAdapter adapter {*engine};
+    assert(!adapter.attach(16) && !engine->externalArpeggiator[0]);
+    assert(!adapter.attach(0, 16) && !engine->externalArpeggiator[0]);
+    assert(!adapter.attach(0, 0, 0, nullptr, &sink));
+    assert(adapter.attach(15, 15, 123, Sink::receive, &sink));
+    assert(adapter.parameter(P_ARP_MODE, A_CHORD, {}));
+    const auto input = [&](uint32_t pitch) {
+        music::Event event {};
+        assert(music::decodeMIDI(0x90, pitch, 100, {}, {}, event) == music::EventError::None);
+        assert(adapter.input(event));
+    };
+    input(60); input(64); input(67);
+    int32_t audio[CTL * 2] {};
+    assert(!adapter.render(audio, CTL, {}) && adapter.faulted());
+    assert(sink.accepted == 1 && sink.notes[60] && adapter.processor().activeCount() == 1);
+    for (const auto& voice : engine->vc) assert(!voice.gate);
+    assert(!adapter.attach()); // Cannot replace the destination while releases are pending.
+    sink.rejectAt = sink.calls + 1;
+    assert(!adapter.stop({16}) && adapter.faulted());
+    assert(sink.notes[60] && adapter.processor().activeCount() == 1);
+    sink.rejectAt = 0;
+    assert(adapter.stop({16}) && !adapter.faulted());
+    assert(!sink.notes[60] && !adapter.processor().activeCount());
+    input(72);
+    assert(adapter.render(audio, CTL, {16}));
+    assert(sink.notes[72]);
+    assert(adapter.stop({32}) && !sink.notes[72]);
+    std::puts("PASS generated-output rejection: accepted-note ownership retained, failed Note Off retried, DSP gates released, destination immutable and Stop recovery");
+}
+
 int main()
 {
+    checkOutputFailure();
     {
         Comparison c;
         music::Event invalid {};
@@ -254,6 +343,7 @@ int main()
     for (uint8_t mode = 1; mode < NARPMODE; ++mode) {
         Comparison c;
         c.frame = uint64_t(UINT32_MAX) - 31;
+        c.lastOutputFrame = c.frame;
         c.parameter(P_ARP_MODE, mode);
         c.parameter(P_ARP_LATCH, 2);
         c.parameter(P_ARP_DIV, 6);

@@ -175,7 +175,11 @@ native MIDI adapter now preserves input-time/render-time settings, sequential
 VALUE/MOD controller handling, logical Sustain/OVERRIDE, direct/generated
 handovers, pressure, restart, Panic and Stop/rearm in legacy audio comparisons.
 Its direct Off-mode entry uses the portable held list for Mono/Unison fallback.
-Neither platform instantiates it yet. Shared generated-output routing and
-source ownership, rack/key-lock/scene integration and the independent AU
-remain production gates. Pattern playback/recording, pattern UI and external
-MIDI output are not yet implemented.
+Neither platform instantiates it yet. The adapter now publishes accepted
+generated output to an optional synchronous receiver with a pinned logical
+instrument/channel, explicit processor-lifetime source ID and matching note
+IDs. Receiver rejection retains outstanding ownership for Stop retries and
+faults/releases local DSP gates. Connecting that boundary to the rack and
+implementing physical-input source ownership, key-lock/scene integration and
+the independent AU remain production gates. Pattern playback/recording,
+pattern UI and external MIDI output are not yet implemented.

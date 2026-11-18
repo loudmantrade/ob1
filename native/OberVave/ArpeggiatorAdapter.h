@@ -7,16 +7,23 @@ namespace obervave {
 // Experimental single-native-part adapter. All operations belong to the audio owner.
 class ArpeggiatorAdapter {
 public:
+    using EventSink = bool (*)(void*, const ob1::music::Event&) noexcept;
     explicit ArpeggiatorAdapter(Engine& engine) : engine_(engine) {}
     ArpeggiatorAdapter(const ArpeggiatorAdapter&) = delete;
     ArpeggiatorAdapter& operator=(const ArpeggiatorAdapter&) = delete;
 
-    bool attach()
+    bool attach(uint32_t instrument = 0, uint32_t channel = 0, uint32_t sourceID = 0,
+                EventSink sink = nullptr, void* context = nullptr)
     {
-        if (attached_ || std::any_of(std::begin(engine_.externalArpeggiator),
+        if (attached_ || (context && !sink) || instrument >= ob1::music::instrumentCapacity ||
+            channel > 15 || std::any_of(std::begin(engine_.externalArpeggiator),
                                     std::end(engine_.externalArpeggiator),
                                     [](bool external) { return external; })) return false;
+        if (processor_.destination(instrument, channel) != ob1::music::ArpResult::Ok) return false;
         if (!engine_.set_external_arpeggiator(0, true)) return false;
+        outputSourceID_ = sourceID;
+        eventSink_ = sink;
+        eventContext_ = context;
         attached_ = true;
         return view() || fail();
     }
@@ -114,6 +121,9 @@ private:
     ob1::music::ArpSettings previousEffective_ {};
     bool attached_ = false, fault_ = false, sustain_ = false, wasOn_ = false;
     bool performanceMod_ = false, restart_ = false, panic_ = false;
+    uint32_t outputSourceID_ = 0;
+    EventSink eventSink_ = nullptr;
+    void* eventContext_ = nullptr;
 
     bool ready() const { return attached_ && !fault_ && engine_.externalArpeggiator[0]; }
     bool isHold() const { return processor_.settings().mode >= ob1::music::ArpMode::HoldRetrigger; }
@@ -127,6 +137,10 @@ private:
         ArpeggiatorAdapter& adapter;
         bool operator()(const ob1::music::Event& event)
         {
+            if (!adapter.engine_.externalArpeggiator[0]) return false;
+            auto routed = event;
+            routed.source.id = adapter.outputSourceID_;
+            if (adapter.eventSink_ && !adapter.eventSink_(adapter.eventContext_, routed)) return false;
             return adapter.engine_.external_note(0, event.data1,
                 event.kind == ob1::music::Kind::NoteOn ? event.data2 : 0);
         }
