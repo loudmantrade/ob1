@@ -40,6 +40,8 @@ void ov_midi_message_at(uint32_t status, uint32_t data1, uint32_t data2, uint32_
 void ov_midi_byte_at(uint32_t byte, uint32_t frame);
 void ov_midi_byte(uint32_t byte);
 uint32_t ov_midi_source_open(void);
+/* Invalidates ingress immediately; queues captured-key/pedal release and scheduled-MIDI
+   cancellation. Failure still invalidates ingress and requests overflow/Panic cleanup. */
 uint32_t ov_midi_source_close(uint32_t source);
 uint32_t ov_midi_source_byte_at(uint32_t source, uint32_t byte, uint32_t frame);
 uint32_t ov_midi_source_message_at(uint32_t source, uint32_t status, uint32_t data1, uint32_t data2, uint32_t frame);

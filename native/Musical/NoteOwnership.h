@@ -21,6 +21,27 @@ public:
 
     void clear() { entries_ = {}; }
 
+    bool contains(const Event& event) const
+    {
+        for (const auto& entry : entries_)
+            if (entry.used && entry.on.data1 == event.data1 && entry.on.source == event.source &&
+                entry.on.channel == event.channel && entry.on.note == event.note) return true;
+        return false;
+    }
+
+    bool containsPitch(uint8_t channel, uint8_t pitch) const
+    {
+        for (const auto& entry : entries_)
+            if (entry.used && entry.on.channel == channel && entry.on.data1 == pitch) return true;
+        return false;
+    }
+
+    template<class Visitor>
+    void visit(Visitor& visitor) const
+    {
+        for (const auto& entry : entries_) if (entry.used) visitor(entry.on);
+    }
+
     template<class Sink>
     OwnershipResult input(const Event& event, Sink& sink)
     {

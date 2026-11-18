@@ -116,16 +116,17 @@ static void checkEventBoundary()
     assert(!ov_midi_source_message_at(sourceA, 0x90, 53, 100, deadline));
     assert(ov_midi_source_byte_at(sourceC, 100, deadline));
     render();
-    assert(sinks[0]->count == start + 2);
+    assert(sinks[0]->count == start + 3);
+    assert(sinks[0]->received[start + 2].kind == music::Kind::NoteOff &&
+           sinks[0]->received[start + 2].source.id == sourceA);
     const auto later = ov_audio_frame() + 64;
     assert(ov_midi_source_message_at(sourceB, 0x90, 53, 90, later));
     assert(ov_midi_source_close(sourceB) && ov_midi_source_close(sourceC));
     render();
-    assert(sinks[0]->count == start + 3 && sinks[0]->received[start + 2].source.id == sourceB);
-    assert(sinks[0]->received[start + 2].data1 == 53);
-    // Legacy path still owns release behavior until source-aware rack routing is enabled.
-    ov_midi_message(0x80, 51, 0); ov_midi_message(0x80, 52, 0);
-    ov_midi_message(0x80, 53, 0); render();
+    assert(sinks[0]->count == start + 4 && sinks[0]->received[start + 3].source.id == sourceB);
+    assert(sinks[0]->received[start + 3].data1 == 52 &&
+           sinks[0]->received[start + 3].kind == music::Kind::NoteOff);
+    assert(!rack::scheduledCount);
     sinks[0]->count = start;
 
     music::Event targeted {};
@@ -139,8 +140,10 @@ static void checkEventBoundary()
     assert(received.source == targeted.source && received.note == 77 && received.time.tick == 960);
     assert(received.channel == 0 && received.routing.instruments == 4);
     targeted.kind = music::Kind::NoteOff;
+    targeted.routing.instruments = 1;
     rack::routeEvent(targeted);
     assert(sinks[2]->count == 3);
+    assert(sinks[2]->received[2].routing.instruments == 4);
     targeted.routing.stage = music::Stage::Output;
     rack::routeEvent(targeted);
     assert(ov_rack_take_error() == 2 && sinks[2]->count == 3);
@@ -457,6 +460,120 @@ static void checkControllers()
     assert(polyEnergy[0] == 0 && polyEnergy[1] > 0);
     std::puts("PASS Controllers: every CC/target, exact min/max/inversion, 14-bit bend, pressure, signed offsets, slot16, overrides, base preservation, per-note poly and reset");
 }
+static void checkSourceRouting()
+{
+    namespace music = ob1::music;
+    ov_scene_config scene {};
+    scene.tempo = 120;
+    scene.slots[0] = {1, config(1)};
+    scene.slots[1] = {1, config(1, 60, 72)};
+    for (auto& slot : scene.slots) slot.config.parameters[rack::P_ARP_LATCH] = 0;
+    const auto a = ov_midi_source_open(), b = ov_midi_source_open();
+    assert(a && b);
+    auto send = [&](uint32_t source, uint32_t status, uint32_t d1, uint32_t d2, uint32_t delay = 0) {
+        assert(ov_midi_source_message_at(source, status, d1, d2, ov_audio_frame() + delay));
+    };
+    for (uint32_t mode = 0; mode <= 8; ++mode) {
+        for (auto& slot : scene.slots) slot.config.parameters[rack::P_ARP_MODE] = mode;
+        assert(ov_rack_load(&scene)); render();
+        send(a, 0x90, 60, 100); send(b, 0x90, 60, 90); render();
+        assert(dsp(0).nheld[0] == 1 && dsp(1).nheld[0] == 1);
+        send(a, 0x80, 60, 0); render();
+        assert(dsp(0).nheld[0] == 1 && dsp(1).nheld[0] == 1);
+        assert(rack::scene->slots[0]->noteOwners.count() == 1);
+        send(a, 0x80, 60, 0); render();
+        assert(dsp(0).nheld[0] == 1);
+        send(b, 0x90, 60, 0); render();
+        assert(!dsp(0).nheld[0] && !dsp(1).nheld[0]);
+    }
+    // Both touch and external MIDI own the pitch; neither may release the other's key.
+    send(a, 0x90, 60, 100); ov_keyboard_note_on(60, 100, 1); render();
+    ov_keyboard_note_off(60, 1); render();
+    assert(dsp(0).nheld[0] == 1);
+    // Routing edits preserve held notes and let new inputs use the new route immediately.
+    assert(ov_rack_configure(0, 2, 70, 90, 0, 0, 0)); render();
+    assert(dsp(0).nheld[0] == 1);
+    send(b, 0x91, 75, 100); render();
+    assert(dsp(0).nheld[0] == 2);
+    send(a, 0x80, 60, 0); render();
+    assert(dsp(0).nheld[0] == 1 && dsp(0).held[0][0].note == 75 && !dsp(1).nheld[0]);
+    // Captured routing also isolates equal pitches arriving on different channels.
+    send(b, 0x91, 75, 0); render();
+    send(a, 0x91, 75, 100); render();
+    assert(ov_rack_configure(0, 3, 0, 127, 0, 0, 0)); render();
+    send(b, 0x92, 75, 90); render();
+    send(a, 0x81, 75, 0); render();
+    assert(dsp(0).nheld[0] == 1);
+    send(b, 0x82, 75, 0); render();
+    assert(!dsp(0).nheld[0]);
+
+    assert(ov_rack_load(&scene)); render();
+    send(a, 0x90, 60, 100); send(b, 0x90, 62, 100);
+    send(a, 0xB0, 64, 127); send(b, 0xB0, 64, 127);
+    send(a, 0x80, 60, 0); send(b, 0x80, 62, 0); render();
+    assert(dsp(0).ctl_sustain && dsp(0).nheld[0] == 2);
+    send(a, 0xB0, 64, 0); render();
+    assert(dsp(0).ctl_sustain && ov_sustain_down_channels() == 1);
+    // Last pedal owner disconnects after routing changed: release the captured instruments.
+    assert(ov_rack_configure(0, 4, 80, 100, 0, 0, 0)); render();
+    send(a, 0x90, 63, 100, 512);
+    send(b, 0x90, 65, 100, 256);
+    assert(ov_midi_source_close(b)); render();
+    assert(!dsp(0).ctl_sustain && !dsp(0).nheld[0] && !dsp(1).nheld[0]);
+    assert(rack::scheduledCount == 1 && !ov_sustain_down_channels());
+    render(1024);
+    assert(!dsp(0).nheld[0] && dsp(1).nheld[0] == 1 && dsp(1).held[0][0].note == 63);
+    assert(ov_midi_source_close(a)); render();
+    assert(!dsp(1).nheld[0] && !rack::scheduledCount);
+    assert(!ov_midi_source_message_at(b, 0x90, 65, 100, ov_audio_frame()));
+
+    // Slot and scene replacement discard their old ownership, never transfer it.
+    const auto c = ov_midi_source_open();
+    assert(c);
+    assert(ov_rack_load(&scene)); render();
+    send(c, 0x90, 60, 100); render();
+    assert(ov_rack_add(0, &scene.slots[0].config)); render();
+    send(c, 0x80, 60, 0); render();
+    assert(!dsp(0).nheld[0] && !dsp(1).nheld[0]);
+    send(c, 0x90, 60, 100); render();
+    assert(ov_rack_load(&scene)); render();
+    send(c, 0x80, 60, 0); render();
+    assert(!dsp(0).nheld[0] && !dsp(1).nheld[0]);
+    // Latch intentionally survives a physical-key disconnect, not Panic or scene replacement.
+    ov_rack_select(0); ov_set_parameter(rack::P_ARP_LATCH, 1); render();
+    send(c, 0x90, 60, 100); render();
+    assert(ov_midi_source_close(c)); render();
+    assert(!rack::scene->slots[0]->noteOwners.count() && dsp(0).nheld[0] == 1);
+    assert(!dsp(1).nheld[0]);
+
+    assert(ov_rack_load(&scene)); render();
+    music::Event on {};
+    assert(music::decodeMIDI(0x90, 60, 100, {music::SourceKind::Pattern, 1},
+        {rack::processedFrames}, on) == music::EventError::None);
+    on.routing = {music::Target::Instruments, 1, music::Stage::Input};
+    for (uint32_t i = 0; i < music::NoteOwnership::capacity; ++i) {
+        on.note = i + 1;
+        rack::routeEvent(on);
+    }
+    assert(rack::scene->slots[0]->noteOwners.count() == music::NoteOwnership::capacity);
+    on.note++;
+    rack::routeEvent(on);
+    assert(ov_rack_take_error() == 1);
+    render();
+    assert(!rack::scene->slots[0]->noteOwners.count() && !dsp(0).nheld[0]);
+    // A close that cannot enter a full queue still invalidates callbacks and requests Panic.
+    const auto d = ov_midi_source_open();
+    assert(d);
+    send(d, 0x90, 60, 100); render();
+    for (uint32_t i = 0; i < rack::queueSize; ++i) ov_set_parameter(rack::P_CUTOFF, 64);
+    assert(!ov_midi_source_close(d) && ov_rack_take_error() == 1);
+    assert(!ov_midi_source_message_at(d, 0x90, 61, 100, ov_audio_frame()));
+    render();
+    assert(!dsp(0).nheld[0] && !rack::scene->slots[0]->noteOwners.count());
+    assert(ov_rack_take_error() == 0);
+    std::puts("PASS production source-owned notes across all 9 ARP modes, touch/port/channel overlap, captured routes/pedals, disconnect cancellation, slot/scene replacement, intentional Latch and bounded-overflow cleanup");
+}
+
 int main()
 {
     checkEventAdapter();
@@ -784,8 +901,11 @@ int main()
     assert(dsp(1).ui_arp_step - steps1 > dsp(0).ui_arp_step - steps0);
     assert(ov_rack_configure(0, 2, 0, 127, -6, -1, 0));
     render();
-    assert(!dsp(0).nheld[0] && dsp(1).nheld[0]);
-    std::puts("PASS overlapping zones layer notes, per-instance divisions run independently, rerouting releases notes");
+    assert(dsp(0).nheld[0] == 2 && dsp(1).nheld[0] == 2);
+    ov_midi_message(0x80, 50, 0); ov_midi_message(0x80, 60, 0); ov_midi_message(0x80, 80, 0);
+    render();
+    assert(!rack::scene->slots[0]->noteOwners.count() && !rack::scene->slots[1]->noteOwners.count());
+    std::puts("PASS overlapping zones layer notes, per-instance divisions run independently, rerouting preserves voices and captured releases");
 
     ov_all_notes_off(); render();
     ov_keyboard_channels(3);
@@ -930,4 +1050,6 @@ int main()
     assert(ov_rack_take_error() == 0);
     ov_rack_collect();
     checkEventBoundary();
+    checkSourceRouting();
+    ov_rack_collect();
 }

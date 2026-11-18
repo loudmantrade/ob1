@@ -80,12 +80,15 @@ source kind and connection-lifetime ID. At dispatch it decodes to an `Event`; `r
 event and selects destinations through `Routing.h`. Channel targets preserve
 splits/layers and only filter Note On by zone. Explicit instrument masks bypass
 channel/zone selection and pin each delivered event to its logical slot.
-Note Off still requires that slot's existing active-note entry.
+Note On captures each delivered logical instrument in that instrument's
+bounded ownership ledger. Note Off uses the captured destinations, independent
+of current channel, zone, selection or incoming target-mask edits.
 
 The rack's `SynthEngine::event` boundary carries source, pinned destination,
 note ID and timing to adapters; the OberVave adapter converts to its unchanged
-MIDI/DSP interface. Raw controllers, legacy CC maps and sustain interpretation
-retain their existing handling. Keyboard Off and wheels now retain keyboard
+MIDI/DSP interface. Raw controllers and legacy CC maps retain their existing handling. Sustain
+retains polarity/hysteresis but aggregates independent source/channel pedals;
+one device's pedal-up cannot clear another device's pressed pedal. Keyboard Off and wheels now retain keyboard
 source identity rather than being relabeled as external MIDI.
 
 `processedFrames` extends the existing render/control counter to 64 bits; it
@@ -103,14 +106,21 @@ them twice. Invalid/unsupported events report the rack's existing invalid-input
 error. A failed engine delivery reports an error and requests the existing
 bounded panic cleanup rather than leaving a possibly half-delivered layer held.
 
-This is not yet a full note-ownership router. The existing per-slot/channel/
-pitch activity and Key-Lock destination capture are retained. The model
-transports nonzero note IDs but does not yet allocate or match them. Distinct
-external endpoints now have independent connection IDs/parsers as described
-below. Per-source overlapping-note ownership in live rack routing, destination
-generations and feedback protection
-must be completed with arpeggiator/output integration before external routing
-is exposed. No new public MIDI output or pattern UI is enabled here.
+Live standalone note ownership now distinguishes source kind/ID, input channel,
+pitch and nonzero note ID (zero retains ordinary MIDI retrigger semantics).
+Each accepted On still retriggers; only the final pitch owner's Off reaches the
+engine, and unmatched/duplicate Off is ignored. The ledger has 256 keys per
+instrument; overflow uses the visible rack capacity error and Panic cleanup.
+Channel/zone edits affect new notes immediately without stopping held voices.
+The existing Key-Lock channel capture remains intact.
+
+Ownership belongs to the actual instrument instance: Stop, program replacement,
+slot removal/replacement and scene replacement clear it before retirement.
+No pointers or old ownership transfer to a replacement in the same slot.
+MIDI 1.0 does not identify separate repeated same-key presses from one source;
+clients needing that distinction must preserve nonzero note IDs. There is no
+new public MIDI output, feedback loop or pattern UI here. The extracted
+arpeggiator's output bus/platform integration remains a separate gate.
 
 Additional rack tests compare event-adapter audio bit-for-bit with direct
 legacy MIDI in all ARP/Latch modes. A mock engine verifies split/layer dispatch,
@@ -144,16 +154,27 @@ rendering. Musical scheduling, MIDI Clock selection and timestamp-to-deadline
 conversion are unchanged. Legacy C APIs continue with source ID zero and an
 independent legacy parser for compatibility.
 
-Closing a source discards only its ingress/parser state and rejects future
-submissions; already queued messages retain their ID and timing. It does
-**not** yet cancel scheduled notes or release that source's sounding notes.
-Source-specific audio-owner disconnect cleanup must be wired with captured
-rack destinations and the ownership ledger before claiming complete endpoint
-disconnect safety. Closing on CoreMIDI disconnect, BLE disconnect/setup failure
-or Bluetooth shutdown prevents stale parser state from leaking on reconnect.
+Closing a source invalidates its ingress/parser state immediately and enqueues
+an ordered audio-owner close command through the existing FIFO. That command
+cancels this source's pending scheduled MIDI (including future Note Ons),
+releases its captured physical keys and removes its pressed pedals. Other
+sources' queued messages, notes and pedals remain intact. Pedal-up follows the
+original captured instruments even after route edits. Note/pedal storage is
+bounded, and cleanup performs no allocation or locking in render.
+
+Disconnect is physical-key/pedal release, **not** global Panic: intentional
+Latch remains latched; another connected pedal may keep Sustain active. If
+enqueueing close fails, ingress is still closed and the existing explicit
+overflow/Panic path stops notes and clears scheduled input on the next audio
+boundary. CoreMIDI disconnect, BLE disconnect/setup failure and Bluetooth
+shutdown all use this path. Physical endpoint/callback timing still requires
+hardware validation; this does not add endpoint-specific MIDI Clock ownership.
 
 The `midi_ingress` suite covers interleaved streams, running status, partial
 messages, realtime/SysEx, single-byte channel messages, unknown/stale IDs,
 reconnect reset, capacity and sink rejection. Rack tests verify IDs, FIFO
-and parser isolation through the actual scheduled queue. Physical multi-device
+and parser isolation through the actual scheduled queue, all nine ARP modes,
+same-pitch touch/device/channel overlap, explicit-mask and channel/zone edits,
+captured pedal release, scheduled-input cancellation, scene/slot replacement,
+intentional Latch, note capacity and queue-overflow disconnect cleanup. Physical multi-device
 MIDI/BLE testing remains a separate hardware validation step.

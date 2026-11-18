@@ -163,8 +163,8 @@ Baseline inspection, the portable event representation/tests and the first
 standalone event-routing boundary are complete. See
 [the event contract and integration limits](MUSICAL_EVENTS.md). Source context
 now survives the existing queue and logical destination selection is explicit.
-The existing per-channel/pitch activity remains; new per-source ownership and
-output-stage routing are not enabled. The independent
+Standalone source-owned captured note routing and ordered disconnect cleanup
+are enabled; output-stage routing is not yet enabled. The independent
 [arpeggiator core](ARPEGGIATOR.md) and legacy event-comparison tests are
 implemented; production still uses the original DSP arpeggiator.
 The reversible native DSP bypass is implemented and compared against the
@@ -186,7 +186,14 @@ An opt-in bounded physical-input ownership ledger now isolates same-pitch
 source/channel/note IDs, retains the final owner and supports captured source
 release and explicit overflow/rejection cleanup. Standalone connection IDs
 and independent ingress parsers are wired through the existing queue.
-Audio-owner disconnect cleanup and rack-wide captured destination wiring are
-still pending; neither platform
-enables this ledger or the new adapter yet. Pattern playback/recording,
+The live standalone rack now enables this ledger independently of the new
+arpeggiator adapter: channel/zone edits preserve held notes, final-owner Off
+uses the captured instrument, disconnect cancels that source's scheduled MIDI
+and releases its captured keys/pedals without stopping other sources.
+Sustain aggregates independent pedals and survives routing edits; intentional
+Latch is retained on physical-source release. Slot/scene/program replacement
+clears instance-local ownership. Capacity and queue failure use visible
+error/Panic cleanup. Actual-rack regressions cover all nine ARP modes,
+same-pitch sources/channels, route edits, scheduled cancellation, replacement
+and overflow. Neither platform enables the new adapter yet. Pattern playback/recording,
 pattern UI and external MIDI output are not yet implemented.

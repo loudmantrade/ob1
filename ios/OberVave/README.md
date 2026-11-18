@@ -25,10 +25,19 @@ and have been removed. The original emulator's MIT notice is preserved in
 CoreMIDI ports and custom Bluetooth MIDI peripherals have separate runtime
 connection IDs. CoreMIDI running status and incomplete messages are parsed
 independently per connection, so interleaved inputs cannot complete one another's
-messages. Reconnecting creates a fresh ID/parser; legacy synth/ARP routing and
-clock behavior remain unchanged. Source-specific sounding-note cleanup on
-disconnect is still a pending event-routing integration step; closing a port
-currently rejects new input without cancelling accepted scheduled messages.
+messages. Reconnecting creates a fresh ID/parser. A disconnected source's
+pending scheduled MIDI is cancelled and its captured physical keys/pedals are
+released on the audio thread, without stopping other sources. Equal pitches
+from different devices or the screen keyboard remain held until the final
+owner releases. Pedals are independently aggregated, retaining the existing
+polarity/hysteresis. Intentional Latch and other connected pedals can keep
+notes sounding after a source disconnect; this is not global Panic.
+
+Channel/zone edits apply immediately to new notes without cutting held notes:
+their releases and pedal-up return to the original instruments. Scene, program
+and slot replacement clear old ownership instead of transferring it to a new
+instrument. Runtime ownership is bounded; overflow reports an error and stops
+notes safely. The existing synth/ARP scheduler and MIDI Clock are unchanged.
 
 LFO Rate displays Hz to two decimal places, calculated from the DSP phase
 increment table and the 44.1 kHz / 16-sample control rate. The parameter's

@@ -3,6 +3,7 @@
 #include "../../native/OberVave/Engine.h"
 #include "../../native/Musical/Routing.h"
 #include "../../native/Musical/MIDIIngress.h"
+#include "../../native/Musical/NoteOwnership.h"
 #include <array>
 #include <atomic>
 #include <memory>
@@ -187,6 +188,7 @@ struct Instrument final : Retired {
     uint8_t bankMSB = 0, bankLSB = 0;
     int32_t learn = -1;
     uint8_t activeNotes[16][128] {};
+    music::NoteOwnership noteOwners;
     float leftGain = 1, rightGain = 1;
     explicit Instrument(const ov_instrument_config& c) : engine(engineType(c.engine)->create()), config(c)
     {
@@ -201,6 +203,7 @@ struct Instrument final : Retired {
     {
         engine->stop();
         std::memset(activeNotes, 0, sizeof(activeNotes));
+        noteOwners.clear();
     }
 };
 struct Scene final : Retired {
@@ -234,8 +237,32 @@ std::atomic<uint32_t> controllerLearnSlot {0}, controllerLearned {0};
 std::atomic<uint32_t> sustainInverted {0}, sustainInput {0};
 std::atomic<uint32_t> sustainDownChannels {0};
 std::mutex parserMutex;
+struct PedalOwner {
+    music::Source source {};
+    uint16_t destinations = 0;
+    uint8_t channel = 0;
+    bool down = false;
+};
+std::array<PedalOwner, 128> pedalOwners {};
 
-enum class Kind { MIDI, Parameter, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
+void publishPedals()
+{
+    uint32_t channels = 0;
+    for (const auto& pedal : pedalOwners) if (pedal.down) channels |= 1u << pedal.channel;
+    sustainDownChannels.store(channels);
+}
+bool pedalDown(uint32_t slot)
+{
+    for (const auto& pedal : pedalOwners)
+        if (pedal.down && (pedal.destinations & (1u << slot))) return true;
+    return false;
+}
+void forgetPedals(uint32_t slot)
+{
+    for (auto& pedal : pedalOwners) pedal.destinations &= ~(1u << slot);
+}
+
+enum class Kind { MIDI, SourceClose, Parameter, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
 struct Command {
     Kind kind = Kind::MIDI;
     uint32_t slot = 0, a = 0, b = 0, c = 0, due = 0;
@@ -298,6 +325,7 @@ void setProgram(uint32_t slot, uint32_t index)
 {
     auto& inst = *scene->slots[slot];
     inst.stop();
+    forgetPedals(slot);
     patch_t patch {};
     patch_from_factory(&patch, program(index));
     inst.config.program = index;
@@ -310,12 +338,21 @@ void setProgram(uint32_t slot, uint32_t index)
 void stopAll()
 {
     for (auto& inst : scene->slots) if (inst) inst->stop();
+    pedalOwners = {};
     sustainDownChannels.store(0);
     stopGeneration.fetch_add(1, std::memory_order_relaxed);
 }
-void deliver(Instrument& instrument, const music::Event& event)
+bool deliver(Instrument& instrument, const music::Event& event)
 {
-    if (!instrument.engine->event(event)) { error.store(2); panic.store(1); }
+    if (instrument.engine->event(event)) return true;
+    error.store(2); panic.store(1);
+    return false;
+}
+void refreshActiveNotes(Instrument& instrument)
+{
+    std::memset(instrument.activeNotes, 0, sizeof(instrument.activeNotes));
+    auto active = [&](const music::Event& on) { instrument.activeNotes[on.channel][on.data1] = 1; };
+    instrument.noteOwners.visit(active);
 }
 void routeEvent(const music::Event& event)
 {
@@ -337,18 +374,40 @@ void routeEvent(const music::Event& event)
         return;
     }
     const uint32_t channel = status & 15, kind = status & 0xF0;
-    uint32_t pedalValue = d2;
+    uint16_t pedalDestinations = 0;
     if (kind == 0xB0 && d1 == 64) {
         const uint32_t value = sustainInverted.load() ? 127 - d2 : d2;
-        const uint32_t bit = 1u << channel;
-        if (value >= 96) sustainDownChannels.fetch_or(bit);
-        else if (value <= 31) sustainDownChannels.fetch_and(~bit);
-        pedalValue = sustainDownChannels.load() & bit ? 127 : 0;
+        PedalOwner* owner = nullptr;
+        PedalOwner* available = nullptr;
+        for (auto& pedal : pedalOwners) {
+            if (pedal.down && pedal.source == event.source && pedal.channel == channel) owner = &pedal;
+            if (!pedal.down && !available) available = &pedal;
+        }
+        if (!owner && value >= 96) {
+            if (!available) { error.store(1); panic.store(1); return; }
+            owner = available;
+            *owner = {event.source, 0, uint8_t(channel), true};
+        }
+        if (owner) {
+            pedalDestinations = owner->destinations;
+            if (value <= 31) owner->down = false;
+            else {
+                for (uint32_t slot = 0; slot < capacity; ++slot) {
+                    const auto* inst = scene->slots[slot].get();
+                    if (inst && music::matches(event, slot, {uint8_t(inst->config.channel - 1), 0, 127}))
+                        owner->destinations |= 1u << slot;
+                }
+                pedalDestinations |= owner->destinations;
+            }
+        }
+        publishPedals();
     }
     for (uint32_t slot = 0; slot < capacity; ++slot) {
         auto* inst = scene->slots[slot].get();
-        if (!inst || !music::matches(event, slot,
-            {uint8_t(inst->config.channel - 1), uint8_t(inst->config.low_note), uint8_t(inst->config.high_note)}))
+        const bool capturedOff = inst && event.kind == music::Kind::NoteOff &&
+            inst->noteOwners.contains(event);
+        if (!inst || (!capturedOff && !(pedalDestinations & (1u << slot)) && !music::matches(event, slot,
+            {uint8_t(inst->config.channel - 1), uint8_t(inst->config.low_note), uint8_t(inst->config.high_note)})))
             continue;
         const auto routed = music::forInstrument(event, slot);
         const auto source = Engine::controller_source(status, d1);
@@ -361,15 +420,14 @@ void routeEvent(const music::Event& event)
                 inst->config.parameters[p] = inst->engine->parameter(p);
         }
         if (kind == 0x80 || kind == 0x90) {
-            auto& held = inst->activeNotes[channel][d1];
-            const bool on = kind == 0x90 && d2;
-            if (on) {
-                held = 1;
-            } else {
-                if (!held) continue;
-                held = 0;
+            auto sink = [&](const music::Event& note) { return deliver(*inst, note); };
+            const auto result = inst->noteOwners.input(routed, sink);
+            if (result == music::OwnershipResult::Full ||
+                result == music::OwnershipResult::InvalidInput) {
+                error.store(result == music::OwnershipResult::Full ? 1 : 2);
+                panic.store(1);
             }
-            deliver(*inst, routed);
+            inst->activeNotes[channel][d1] = inst->noteOwners.containsPitch(channel, d1);
         } else if (kind == 0xC0) {
             const auto index = (inst->bankMSB * 128u + inst->bankLSB) * 128u + d1;
             if (index < 768) setProgram(slot, index);
@@ -383,10 +441,13 @@ void routeEvent(const music::Event& event)
             if (d1 == 32 && !overridden) inst->bankLSB = d2;
             // Handle performance controllers once; the per-patch map is applied below.
             if (d1 == 1 || d1 == 7 || d1 == 64 || d1 == 120 || d1 == 121 || d1 == 123) {
-                if ((d1 == 120 || d1 == 123) && !overridden) inst->stop();
+                if ((d1 == 120 || d1 == 123) && !overridden) {
+                    inst->stop();
+                    forgetPedals(slot);
+                }
                 else {
                     auto interpreted = routed;
-                    if (d1 == 64) interpreted.data2 = uint8_t(pedalValue);
+                    if (d1 == 64) interpreted.data2 = pedalDown(slot) ? 127 : 0;
                     deliver(*inst, interpreted);
                 }
             }
@@ -404,6 +465,38 @@ void routeEvent(const music::Event& event)
 }
 void apply(const Command& c)
 {
+    if (c.kind == Kind::SourceClose) {
+        uint32_t retained = 0;
+        for (uint32_t i = 0; i < scheduledCount; ++i)
+            if (!(scheduled[i].kind == Kind::MIDI && scheduled[i].source == c.source))
+                scheduled[retained++] = scheduled[i];
+        scheduledCount = retained;
+        uint16_t pedalDestinations = 0;
+        for (auto& pedal : pedalOwners) if (pedal.down && pedal.source == c.source) {
+            pedalDestinations |= pedal.destinations;
+            pedal.down = false;
+        }
+        publishPedals();
+        for (uint32_t slot = 0; slot < capacity; ++slot) {
+            auto* inst = scene->slots[slot].get();
+            if (!inst) continue;
+            auto sink = [&](const music::Event& off) { return deliver(*inst, off); };
+            if (inst->noteOwners.releaseSource(c.source, {processedFrames}, sink) ==
+                music::OwnershipResult::OutputRejected) panic.store(1);
+            refreshActiveNotes(*inst);
+            if (pedalDestinations & (1u << slot)) {
+                music::Event pedal {};
+                pedal.kind = music::Kind::ControlChange;
+                pedal.channel = inst->config.channel - 1;
+                pedal.data1 = 64;
+                pedal.data2 = pedalDown(slot) ? 127 : 0;
+                pedal.source = c.source;
+                pedal.time.frame = processedFrames;
+                deliver(*inst, music::forInstrument(pedal, slot));
+            }
+        }
+        return;
+    }
     if (c.kind == Kind::Capture) {
         capturedScene = {};
         capturedScene.tempo = tempo.load();
@@ -415,7 +508,7 @@ void apply(const Command& c)
         return;
     }
     if (c.kind == Kind::Scene) {
-        stopGeneration.fetch_add(1, std::memory_order_relaxed);
+        stopAll();
         retire(scene.release());
         scene.reset(static_cast<Scene*>(c.object));
         scheduledCount = 0;
@@ -437,6 +530,8 @@ void apply(const Command& c)
     if (c.slot >= capacity) return;
     auto& pointer = scene->slots[c.slot];
     if (c.kind == Kind::Add || c.kind == Kind::Remove) {
+        if (pointer) pointer->stop();
+        forgetPedals(c.slot);
         snapshots[c.slot].peak.store(0);
         retire(pointer.release());
         if (c.kind == Kind::Add) pointer.reset(static_cast<Instrument*>(c.object));
@@ -465,8 +560,6 @@ void apply(const Command& c)
         inst.engine->sync(inst.config.sync, c.a);
         break;
     case Kind::Route:
-        if (inst.config.channel != c.config.channel || inst.config.low_note != c.config.low_note ||
-            inst.config.high_note != c.config.high_note) inst.stop();
         inst.config.channel = c.config.channel;
         inst.config.low_note = c.config.low_note;
         inst.config.high_note = c.config.high_note;
@@ -829,7 +922,11 @@ uint32_t ov_midi_source_open(void)
 uint32_t ov_midi_source_close(uint32_t source)
 {
     std::lock_guard<std::mutex> lock(rack::parserMutex);
-    return rack::midiIngress.close(source);
+    if (!rack::midiIngress.close(source)) return 0;
+    rack::Command command;
+    command.kind = rack::Kind::SourceClose;
+    command.source = {rack::music::SourceKind::ExternalMIDI, source};
+    return rack::enqueue(command);
 }
 uint32_t ov_midi_source_byte_at(uint32_t source, uint32_t byte, uint32_t frame)
 {

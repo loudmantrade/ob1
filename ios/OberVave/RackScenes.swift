@@ -131,7 +131,7 @@ extension OberVaveModel {
         ov_rack_collect()
         let failure = ov_rack_take_error()
         if failure != 0 {
-            errorMessage = failure == 1 ? "The MIDI/control queue overflowed. Notes were stopped to prevent stuck notes."
+            errorMessage = failure == 1 ? "The MIDI/control queue or note ownership capacity overflowed. Notes were stopped to prevent stuck notes."
                 : failure == 3 ? "Not enough memory to create the requested instruments."
                 : "The audio rack rejected an invalid configuration."
         }

@@ -34,6 +34,14 @@ int main()
     assert(owners.input(a, sink) == OwnershipResult::Forwarded);
     assert(owners.input(a, sink) == OwnershipResult::Forwarded && owners.count() == 1);
     assert(owners.input(b, sink) == OwnershipResult::Forwarded && owners.count() == 2);
+    assert(owners.contains(a) && owners.contains(b) && owners.containsPitch(0, 60));
+    auto otherChannel = a;
+    otherChannel.channel = 1;
+    assert(!owners.contains(otherChannel) && !owners.containsPitch(1, 60));
+    uint32_t visited = 0;
+    auto visit = [&](const Event& on) { assert(on.kind == Kind::NoteOn && on.data1 == 60); ++visited; };
+    owners.visit(visit);
+    assert(visited == 2);
     a.kind = Kind::NoteOff;
     a.data2 = 0;
     assert(owners.input(a, sink) == OwnershipResult::Retained && owners.count() == 1);
