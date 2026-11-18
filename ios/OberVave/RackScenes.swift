@@ -141,26 +141,18 @@ extension OberVaveModel {
                 }
             }
         }
-        let recordingSlot = Int(ov_seq_recording_slot())
-        let recordingRow = Int(ov_seq_recording_row())
-        recordingPattern = recordingSlot >= 0 && recordingRow >= 0 ? recordingSlot * 8 + recordingRow : nil
+        let state = ov_seq_record_state()
+        recordingPattern = state == 0 ? nil : Int(state >> 3) - 1
+        recordingPhase = state & 7
         var editResult = ov_seq_edit_result()
         while ov_seq_read_edit(&editResult) != 0 {
             if let pending = pendingPatternTransfer, pending.token == editResult.token {
                 defer { pendingPatternTransfer = nil }
                 if editResult.success != 0 && pending.transfer.epoch == ov_seq_scene_epoch() {
                     let transfer = pending.transfer
-                    var updated = patterns
-                    if !transfer.copying && editResult.source_revision == ov_seq_cell_revision(UInt32(transfer.source.slot), UInt32(transfer.source.row)) {
-                        updated.removeAll { $0.id == transfer.source.id }
-                    }
-                    if !transfer.deleting && editResult.target_revision == ov_seq_cell_revision(UInt32(transfer.destination.slot), UInt32(transfer.destination.row)) {
-                        var destination = transfer.source
-                        destination.slot = transfer.destination.slot; destination.row = transfer.destination.row
-                        updated.removeAll { $0.id == destination.id }
-                        updated.append(destination)
-                    }
-                    patterns = updated
+                    patterns = transfer.acknowledged(in: patterns,
+                        sourceUnchanged: editResult.source_revision == ov_seq_cell_revision(UInt32(transfer.source.slot), UInt32(transfer.source.row)),
+                        destinationUnchanged: editResult.target_revision == ov_seq_cell_revision(UInt32(transfer.destination.slot), UInt32(transfer.destination.row)))
                 } else {
                     errorMessage = "The pattern edit was rejected because a cell, scene or recording changed. No patterns were modified."
                 }
@@ -178,7 +170,7 @@ extension OberVaveModel {
             if ov_seq_recording_slot() < 0 && ov_seq_record_ready() == 0 { recordingPattern = nil }
             errorMessage = failure == 1 ? "The MIDI/control queue or note ownership capacity overflowed. Notes were stopped to prevent stuck notes."
                 : failure == 3 ? "Not enough memory to create the requested instruments."
-                : failure == 4 ? "Recording was not started: completed takes are waiting to be synchronized. Try again."
+                : failure == 4 ? "The sequencer result queue is full. Let synchronization finish, then retry the operation."
                 : "The audio rack rejected an invalid configuration."
         }
         var captured = ov_scene_config()
@@ -449,9 +441,14 @@ extension OberVaveModel {
         guard pendingSceneName == nil, pendingPatternTransfer == nil else {
             errorMessage = "Wait for the pending scene or pattern operation."; return false
         }
-        guard recordingPattern == nil else { errorMessage = "Finish recording before editing patterns."; return false }
+        guard ov_seq_record_state() == 0 else {
+            errorMessage = "Finish the pending recording before editing patterns."; return false
+        }
         do {
             try pattern.validate()
+            guard ov_seq_pad_pending(UInt32(pattern.slot), UInt32(pattern.row)) == 0 else {
+                throw SceneError.invalid("Wait for the pending pad action before editing.")
+            }
             var clip = pattern.coreClip()
             guard ov_seq_set_clip(&clip) != 0 else { throw SceneError.invalid("Could not publish pattern to the audio engine.") }
             patterns.removeAll { $0.id == pattern.id }
@@ -526,6 +523,7 @@ extension OberVaveModel {
         }
     }
     func recordPattern(slot: Int, row: Int) {
+        syncRackState()
         guard recordingPattern == nil else { errorMessage = "Finish the current recording first."; return }
         guard let instrument = instruments.first(where: { $0.slot == slot }) else {
             errorMessage = "The recording instrument is unavailable."; return
@@ -939,7 +937,7 @@ struct SequencerView: View {
         let queued = Int(ov_seq_pending(UInt32(instrument.slot))) == row
         let recording = model.recordingPattern == instrument.slot * 8 + row
         let stopping = active && ov_seq_stopping(UInt32(instrument.slot)) != 0
-        let phase = ov_seq_record_phase()
+        let phase = model.recordingPhase
         let color = MIDIChannelColors.color(instrument.channel)
         let cell = PatternCell(slot: instrument.slot, row: row)
         let commandPending = ov_seq_pad_pending(UInt32(instrument.slot), UInt32(row)) != 0
@@ -969,6 +967,7 @@ struct SequencerView: View {
         let interactive = visual
             .overlay {
                 SequencerTouchSurface(editable: pattern != nil && !recording, epoch: model.sequencerInteractionEpoch,
+                                      revision: ov_seq_cell_revision(UInt32(instrument.slot), UInt32(row)),
                                       onDown: { heldSource = pattern.map(transferSource) },
                                       onEffect: { effect, point in handleGesture(effect, cell: cell, point: point) },
                                       onCancel: { cancelGesture() })
@@ -997,63 +996,64 @@ struct SequencerView: View {
         }
     }
 
-        private func transferSource(_ pattern: SequencerPattern) -> PatternTransfer {
-            let revision = ov_seq_cell_revision(UInt32(pattern.slot), UInt32(pattern.row))
-            return PatternTransfer(source: pattern, destination: PatternCell(slot: pattern.slot, row: pattern.row),
-                                   sourceRevision: revision, targetRevision: revision, epoch: ov_seq_scene_epoch())
-        }
+    private func transferSource(_ pattern: SequencerPattern) -> PatternTransfer {
+        let revision = ov_seq_cell_revision(UInt32(pattern.slot), UInt32(pattern.row))
+        return PatternTransfer(source: pattern, destination: PatternCell(slot: pattern.slot, row: pattern.row),
+                               sourceRevision: revision, targetRevision: revision, epoch: ov_seq_scene_epoch())
+    }
 
-        private func cancelGesture() {
-            drag = nil; heldSource = nil; copyHint = nil
-        }
+    private func cancelGesture() {
+        drag = nil; heldSource = nil; copyHint = nil
+    }
 
-        private func target(at point: CGPoint) -> PatternCell? {
-            guard gridFrame.contains(point), cellViewport.contains(point) else { return nil }
-            return frames.first(where: { $0.value.contains(point) })?.key
-        }
+    private func target(at point: CGPoint) -> PatternCell? {
+        guard gridFrame.contains(point), cellViewport.contains(point) else { return nil }
+        return frames.first(where: { $0.value.contains(point) && model.recordingPattern != $0.key.id })?.key
+    }
 
-        private func handleGesture(_ effect: PatternCellGesture.Effect, cell: PatternCell, point: CGPoint) {
-            switch effect {
-            case .tap:
-                copyHint = nil
-                model.tapPattern(slot: cell.slot, row: cell.row)
-            case .copyReady:
-                copyHint = cell.id
-            case .beginDrag(let copying):
-                guard var source = heldSource, source.source.id == cell.id,
-                      model.recordingPattern != cell.id, model.pendingPatternTransfer == nil else {
-                    model.errorMessage = "The pattern is not available for editing."; cancelGesture(); return
-                }
-                source.copying = copying
-                drag = SequencerCellDrag(transfer: source, point: point, target: target(at: point))
-            case .drag:
-                guard gridFrame.contains(point), cellViewport.contains(point) else { cancelGesture(); return }
-                drag?.point = point
-                drag?.target = target(at: point)
-            case .drop:
-                defer { cancelGesture() }
-                guard let drag, let target = target(at: point), target.id != drag.transfer.source.id else { return }
-                guard model.recordingPattern != target.id else {
-                    model.errorMessage = "The destination is recording. No patterns were modified."; return
-                }
-                var transfer = drag.transfer
-                transfer.destination = target
-                transfer.targetRevision = ov_seq_cell_revision(UInt32(target.slot), UInt32(target.row))
-                transfer.expectedDestination = model.pattern(slot: target.slot, row: target.row)
-                if transfer.expectedDestination != nil { replacement = transfer }
-                else if transfer.copying { model.copyPattern(transfer) }
-                else { model.movePattern(transfer) }
-            case .delete:
-                deleting = heldSource; cancelGesture()
-            case .edit:
-                if let pattern = model.pattern(slot: cell.slot, row: cell.row) { pianoRoll = pattern }
-                cancelGesture()
-            case .menu:
-                menuPattern = model.pattern(slot: cell.slot, row: cell.row); cancelGesture()
-            case .scroll:
-                cancelGesture()
+    private func handleGesture(_ effect: PatternCellGesture.Effect, cell: PatternCell, point: CGPoint) {
+        switch effect {
+        case .tap:
+            copyHint = nil
+            model.tapPattern(slot: cell.slot, row: cell.row)
+        case .copyReady:
+            copyHint = cell.id
+        case .beginDrag(let copying):
+            guard var source = heldSource, source.source.id == cell.id,
+                  model.recordingPattern != cell.id, model.pendingPatternTransfer == nil else {
+                model.errorMessage = "The pattern is not available for editing."; cancelGesture(); return
             }
+            source.copying = copying
+            drag = SequencerCellDrag(transfer: source, point: point, target: target(at: point))
+        case .drag:
+            guard gridFrame.contains(point), cellViewport.contains(point) else { cancelGesture(); return }
+            drag?.point = point
+            drag?.target = target(at: point)
+        case .drop:
+            defer { cancelGesture() }
+            guard let drag, let target = target(at: point), target.id != drag.transfer.source.id else { return }
+            var transfer = drag.transfer
+            transfer.destination = target
+            transfer.targetRevision = ov_seq_cell_revision(UInt32(target.slot), UInt32(target.row))
+            transfer.expectedDestination = model.pattern(slot: target.slot, row: target.row)
+            if transfer.expectedDestination != nil { replacement = transfer }
+            else if transfer.copying { model.copyPattern(transfer) }
+            else { model.movePattern(transfer) }
+        case .delete:
+            deleting = heldSource; cancelGesture()
+        case .edit:
+            if let pattern = model.pattern(slot: cell.slot, row: cell.row) { pianoRoll = pattern }
+            cancelGesture()
+        case .menu:
+            if model.recordingPattern != cell.id {
+                if let pattern = model.pattern(slot: cell.slot, row: cell.row) { menuPattern = pattern }
+                else { editing = SequencerPattern(slot: cell.slot, row: cell.row, name: "Pattern \(cell.row + 1)") }
+            }
+            cancelGesture()
+        case .scroll:
+            cancelGesture()
         }
+    }
 
     private func mixer(_ instrument: RackInstrument) -> some View {
         VStack(spacing: 5) {

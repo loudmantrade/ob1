@@ -174,6 +174,8 @@ struct SceneChecks {
         precondition(gesture.tick(at: 9).isEmpty)
         _ = gesture.down(at: 10, editable: false, dragAllowed: false)
         precondition(gesture.up(at: 10.1) == [.tap])
+        _ = gesture.down(at: 11, editable: false, dragAllowed: false)
+        precondition(gesture.hasInteraction && gesture.up(at: 11.6) == [.menu] && !gesture.hasInteraction)
         print("PASS gesture state machine: delayed single tap, direct MOVE, both COPY prefixes, stationary DELETE, double EDIT, scroll and cancellation without premature musical actions")
         var sourcePattern = SequencerPattern(slot: 0, row: 0, name: "Move")
         sourcePattern.notes = [SequencerNote(id: 1, start: 120, duration: 500, pitch: 60, velocity: 100)]
@@ -196,6 +198,26 @@ struct SceneChecks {
         replace.copying = true
         let copiedReplacement = try replace.applying(to: [sourcePattern, moved[0]])
         precondition(copiedReplacement.count == 2)
+        var laterRecording = sourcePattern
+        laterRecording.notes[0].pitch = 88
+        let lateAck = move.acknowledged(in: [laterRecording], sourceUnchanged: false, destinationUnchanged: true)
+        precondition(lateAck.contains(laterRecording) && lateAck.contains(moved[0]))
+        let supersededAck = move.acknowledged(in: [laterRecording], sourceUnchanged: false, destinationUnchanged: false)
+        precondition(supersededAck == [laterRecording])
+        var deletion = move
+        deletion.deleting = true
+        let deleted = try deletion.applying(to: [sourcePattern, moved[0]])
+        precondition(deleted == moved)
+        let persisted = try JSONDecoder().decode([SequencerPattern].self, from: JSONEncoder().encode(copiedReplacement))
+        precondition(persisted == copiedReplacement)
+        do {
+            _ = try move.applying(to: [laterRecording])
+            preconditionFailure("Stale source must fail before publication")
+        } catch is SceneError {}
+        do {
+            _ = try move.applying(to: [sourcePattern, moved[0]])
+            preconditionFailure("Unconfirmed replacement must fail")
+        } catch is SceneError {}
         print("PASS transactional MOVE model: exact note preservation, destination identity and JSON persistence")
         precondition(SynthParameter.allCases.count == Int(ov_parameter_count()))
         precondition(SynthParameter.arpVelocity.audioUnitID == 64)

@@ -2,13 +2,35 @@
 #include <cassert>
 #include <cstdio>
 #include <memory>
+#include <cstdlib>
+#include <new>
+static bool rendering = false;
+void* operator new(std::size_t size)
+{
+    assert(!rendering && "C++ allocation on the audio owner");
+    if (void* pointer = std::malloc(size ? size : 1)) return pointer;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) { return ::operator new(size); }
+void operator delete(void* pointer) noexcept
+{
+    assert((!pointer || !rendering) && "C++ deallocation on the audio owner");
+    std::free(pointer);
+}
+void operator delete[](void* pointer) noexcept { ::operator delete(pointer); }
+void operator delete(void* pointer, std::size_t) noexcept { ::operator delete(pointer); }
+void operator delete[](void* pointer, std::size_t) noexcept { ::operator delete(pointer); }
 #include "../../ios/OberVave/SynthRack.cpp"
 
 namespace music = ob1::music;
 static void render(uint32_t frames = CTL)
 {
     float left[CTL], right[CTL];
-    for (uint32_t i = 0; i < frames; i += CTL) ov_render(left, right, CTL);
+    for (uint32_t i = 0; i < frames; i += CTL) {
+        rendering = true;
+        ov_render(left, right, CTL);
+        rendering = false;
+    }
 }
 static rack::NativeEngine<true>& engine(uint32_t slot)
 {
@@ -399,13 +421,17 @@ static void checkConsecutiveTakes()
     const auto epoch = ov_seq_scene_epoch();
     std::array<int64_t, 3> origins {};
     for (uint32_t slot = 0; slot < 3; ++slot) {
-        assert(ov_seq_tap(slot, 0, 2, 1, 0, 1, 0)); render();
+        assert(ov_seq_tap(slot, 0, 2, 1, 0, 1, 0));
+        assert(ov_seq_pad_pending(slot, 0));
+        render();
+        assert(!ov_seq_pad_pending(slot, 0) && (ov_seq_record_state() >> 3) == slot * 8 + 1);
         while (ov_seq_record_phase() != 3) render();
         ov_note_on(60 + slot, 100); render(2048); ov_note_off(60 + slot); render();
         assert(ov_seq_tap(slot, 0, 2, 1, 0, 1, 0)); render();
         assert(ov_seq_record_phase() == 5);
         while (rack::recorder.running) render();
         assert(ov_seq_record_phase() == 0 && ov_seq_recording_slot() == -1);
+        assert(!ov_seq_record_state());
         origins[slot] = rack::players[slot].origin;
         for (uint32_t previous = 0; previous <= slot; ++previous) {
             assert(ov_seq_active(previous) == 0 && rack::players[previous].origin == origins[previous]);
@@ -508,7 +534,54 @@ static void checkPatternMove()
     std::puts("PASS transactional MOVE: stale destination rejection, cross-column retarget, affected-only Stop, immutable publication and acknowledgement");
 }
 
+static void checkEditRaces()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120;
+    for (uint32_t slot = 0; slot < 2; ++slot) scene->slots[slot] = {1, config()};
+    auto source = std::make_unique<ov_seq_clip>(clip(0, 0));
+    assert(ov_rack_load_sequenced(scene.get(), source.get(), 1)); render();
+    const auto epoch = ov_seq_scene_epoch(), revision = ov_seq_cell_revision(0, 0);
+    const auto destinationRevision = ov_seq_cell_revision(1, 0);
+    auto submit = [&](uint32_t mode, uint64_t generation, uint64_t targetRevision, uint64_t token) {
+        return ov_seq_edit(source.get(), 1, 0, mode, generation, revision, targetRevision, token);
+    };
+    for (uint32_t i = 0; i < rack::editCapacity; ++i) assert(submit(1, epoch, destinationRevision, i + 1));
+    assert(!submit(1, epoch, destinationRevision, 100) && ov_rack_take_error() == 4);
+    assert(!rack::clips[1][0]); // Stopped audio has not published anything.
+    render();
+    ov_seq_edit_result result {};
+    for (uint32_t i = 0; i < rack::editCapacity; ++i) {
+        assert(ov_seq_read_edit(&result) && result.token == i + 1 && result.success == (i == 0));
+    }
+    assert(!ov_seq_read_edit(&result) && rack::clips[0][0] && rack::clips[1][0]);
+    // A changed source snapshot is rejected even when the caller uses its current revision.
+    source->notes[0].pitch = 80;
+    assert(submit(3, epoch, ov_seq_cell_revision(1, 0), 101)); render();
+    assert(ov_seq_read_edit(&result) && !result.success);
+    source->notes[0].pitch = 60;
+    // Destination changes after a confirmation was opened: neither source nor new target is lost.
+    const auto confirmedRevision = ov_seq_cell_revision(1, 0);
+    auto updated = std::make_unique<ov_seq_clip>(clip(1, 0));
+    updated->notes[0].pitch = 90;
+    assert(ov_seq_set_clip(updated.get()));
+    assert(submit(2, epoch, confirmedRevision, 102)); render();
+    assert(ov_seq_read_edit(&result) && !result.success && rack::clips[0][0]);
+    assert(rack::clips[1][0]->pattern.data().notes[0].pitch == 90);
+    assert(ov_rack_load_sequenced(scene.get(), source.get(), 1));
+    assert(submit(2, epoch, ov_seq_cell_revision(1, 0), 103)); render();
+    assert(ov_seq_read_edit(&result) && !result.success && rack::clips[0][0] && !rack::clips[1][0]);
+    // Same-column MOVE also retargets identity without changing musical content.
+    assert(ov_seq_edit(source.get(), 0, 7, 0, ov_seq_scene_epoch(), ov_seq_cell_revision(0, 0),
+        ov_seq_cell_revision(0, 7), 104)); render();
+    assert(ov_seq_read_edit(&result) && result.success && !rack::clips[0][0] && rack::clips[0][7]);
+    assert(rack::clips[0][7]->pattern.data().id == 8);
+    assert(!ov_rack_take_error() && !rack::editOutstanding.load());
+    ov_rack_collect();
+    std::puts("PASS edit races: stopped audio, bounded ack capacity, rapid stale commands, changed content, confirmation revision, scene invalidation, same-column MOVE; render has no ordinary C++ allocation/deallocation");
+}
+
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); ov_rack_collect();
 }

@@ -372,6 +372,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var sequencerRevision = 0
     @Published var launchGrid = 2
     @Published var recordingPattern: Int?
+    @Published var recordingPhase: UInt32 = 0
     @Published var recordMode = SequencerRecordMode.waitForNote
     @Published var recordCountBars = 1
     @Published var recordOutput = true

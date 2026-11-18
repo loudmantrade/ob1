@@ -5,6 +5,7 @@ import UIKit
 struct SequencerTouchSurface: UIViewRepresentable {
     var editable: Bool
     var epoch: UInt64
+    var revision: UInt64
     var onDown: () -> Void
     var onEffect: (PatternCellGesture.Effect, CGPoint) -> Void
     var onCancel: () -> Void
@@ -16,9 +17,12 @@ struct SequencerTouchSurface: UIViewRepresentable {
     }
 
     func updateUIView(_ view: SequencerTouchView, context: Context) {
-        if view.epoch != epoch {
+        if view.epoch != epoch || view.revision != revision {
+            let interrupted = view.touch.hasInteraction
             view.touch.cancelInteraction(notify: false)
             view.epoch = epoch
+            view.revision = revision
+            if interrupted { DispatchQueue.main.async(execute: onCancel) }
         }
         view.touch.editable = editable
         view.touch.onDown = onDown
@@ -34,6 +38,7 @@ struct SequencerTouchSurface: UIViewRepresentable {
 final class SequencerTouchView: UIView {
     let touch = SequencerTouchRecognizer()
     var epoch: UInt64 = 0
+    var revision: UInt64 = 0
 
     init() {
         super.init(frame: .zero)
@@ -69,6 +74,7 @@ final class SequencerTouchRecognizer: UIGestureRecognizer {
     private var point = CGPoint.zero
     private var maximumDistance = 0.0
     private var touching = false
+    var hasInteraction: Bool { machine.hasInteraction }
 
     init() {
         super.init(target: nil, action: nil)

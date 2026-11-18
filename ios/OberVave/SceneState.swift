@@ -304,6 +304,7 @@ struct PatternCellGesture {
     private var dragging = false
     private var held = false
     private var scrolling = false
+    var hasInteraction: Bool { pendingTap != nil || pressedAt != nil }
 
     mutating func down(at time: Double, editable: Bool, dragAllowed: Bool) -> [Effect] {
         let effects = tick(at: time)
@@ -349,7 +350,7 @@ struct PatternCellGesture {
         if editable && (held || time - pressedAt >= Self.holdTime) { return [prefix ? .delete : .menu] }
         if editable && prefix { return [.edit] }
         if editable { pendingTap = time; return [] }
-        if time - pressedAt >= Self.holdTime { return [] }
+        if time - pressedAt >= Self.holdTime { return [.menu] }
         return [.tap]
     }
 
@@ -374,6 +375,7 @@ struct PatternTransfer {
     var deleting = false
 
     func applying(to patterns: [SequencerPattern]) throws -> [SequencerPattern] {
+        try source.validate()
         if deleting {
             guard patterns.first(where: { $0.id == source.id }) == source else {
                 throw SceneError.invalid("The pattern changed before deletion. No patterns were modified.")
@@ -389,6 +391,18 @@ struct PatternTransfer {
         moved.slot = destination.slot; moved.row = destination.row
         try moved.validate()
         return patterns.filter { $0.id != destination.id && (copying || $0.id != source.id) } + [moved]
+    }
+
+    func acknowledged(in patterns: [SequencerPattern], sourceUnchanged: Bool, destinationUnchanged: Bool) -> [SequencerPattern] {
+        var result = patterns
+        if !copying && sourceUnchanged { result.removeAll { $0.id == source.id } }
+        if !deleting && destinationUnchanged {
+            var target = source
+            target.slot = destination.slot; target.row = destination.row
+            result.removeAll { $0.id == target.id }
+            result.append(target)
+        }
+        return result
     }
 }
 

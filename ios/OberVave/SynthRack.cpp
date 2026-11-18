@@ -336,6 +336,7 @@ bool completionSpace()
     return completionWrite.load(std::memory_order_relaxed) - completionRead.load(std::memory_order_acquire) < completionCapacity;
 }
 std::atomic<uint32_t> recordingPhase {0}, recordingRemaining {0}, recordingProgress {0};
+std::atomic<uint32_t> recorderState {0};
 std::atomic<int64_t> recordingLength {0};
 music::Frame sequencerAnchor = 0;
 uint32_t clickFrames = 0;
@@ -527,6 +528,7 @@ void finishRecording(bool autoplay)
     recordingRow.store(-1);
     recordingPhase.store(0); recordingRemaining.store(0);
     recordingLength.store(0);
+    recorderState.store(0);
     auto& completed = completions[completionWrite.load(std::memory_order_relaxed) % completionCapacity];
     completed.epoch = sceneEpoch.load();
     if (recorder.overflow) {
@@ -863,6 +865,7 @@ void apply(const Command& c)
         recordingSlot.store(c.slot);
         recordingRow.store(c.a);
         recordingPhase.store(recorder.phase(musicalPosition.value));
+        recorderState.store(((c.slot * OV_SEQ_ROWS + c.a + 1) << 3) | recorder.phase(musicalPosition.value));
         recordingRemaining.store(recorder.remaining(musicalPosition.value));
         recordingLength.store(recorder.lengthAt(musicalPosition.value));
         return;
@@ -1044,6 +1047,8 @@ void renderBlock()
     const auto click = recorder.click(musicalPosition.value);
     if (click >= 0) { clickFrames = FS / 40; clickPhase = 0; clickFrequency = click == 0 ? 1760 : 1320; }
     recordingPhase.store(recorder.phase(musicalPosition.value));
+    recorderState.store(recorder.running ?
+        ((recorder.slot * OV_SEQ_ROWS + recorder.row + 1) << 3) | recorder.phase(musicalPosition.value) : 0);
     recordingRemaining.store(recorder.remaining(musicalPosition.value));
     recordingLength.store(recorder.running ? recorder.lengthAt(musicalPosition.value) : 0);
     const auto captureElapsed = musicalPosition.value - recorder.origin;
@@ -1398,6 +1403,7 @@ int ov_seq_tap(uint32_t slot, uint32_t row, uint32_t mode, uint32_t bars, uint32
     return enqueuePad(rack::Kind::SeqTap, slot, row, mode, bars, beats, output, grid);
 }
 uint32_t ov_seq_record_phase(void) { return rack::recordingPhase.load(); }
+uint32_t ov_seq_record_state(void) { return rack::recorderState.load(); }
 uint32_t ov_seq_record_remaining(void) { return rack::recordingRemaining.load(); }
 int64_t ov_seq_record_length(void) { return rack::recordingLength.load(); }
 uint32_t ov_seq_record_result(void)
