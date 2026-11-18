@@ -9,9 +9,14 @@ enum {
     kOberVaveGrid = 69,
     kOberVaveArpSelection = 70,
     kOberVaveLatchSelection = 71,
-    kOberVaveParameterCount = 72,
+    kOberVaveModulationBase = 72,
+    kOberVaveControllerBase = 97,
+    kOberVaveLegacyWheel = 96,
+    kOberVaveParameterCount = 209,
     kOberVaveMeters = 64000,
-    kOberVaveKeyboard = 64001
+    kOberVaveKeyboard = 64001,
+    kOberVaveControllerLearn = 64002,
+    kOberVavePanic = 64003
 };
 typedef struct {
     float left, right;
@@ -24,6 +29,7 @@ typedef struct { UInt32 status, data1, data2; } OberVaveKeyboardEvent;
 extern "C" {
 #endif
 OSStatus OberVaveCocoaViewInfo(void* info);
+double ov_lfo_rate_hz(UInt32 value);
 #ifdef __cplusplus
 }
 #endif

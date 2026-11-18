@@ -254,6 +254,101 @@ int main(int argc, char** argv)
         AudioComponentDescription desc{kAudioUnitType_MusicDevice, 'Obv1', 'Obvv', 0, 0};
         auto component = AudioComponentRegister(&desc, CFSTR("OberVave: Native test"), 256, factory);
         require(component, "cannot register");
+        {
+            Unit a(component, 44100), b(component, 44100);
+            for (UInt32 slot = 0; slot < MOD_SLOTS; ++slot) {
+                const auto base = kOberVaveModulationBase + slot * 3;
+                require(get(a.unit, base) == 0 && get(a.unit, base + 2) == 64, "matrix not neutral by default");
+                set(a.unit, base, 1 + slot % (NMODSRC - 1));
+                set(a.unit, base + 1, slot);
+                set(a.unit, base + 2, slot % 2 ? 0 : 128);
+            }
+            set(a.unit, kOberVaveLegacyWheel, 0);
+            set(a.unit, kOberVaveProgram, 18);
+            require(get(a.unit, kOberVaveModulationBase) == 0 &&
+                get(a.unit, kOberVaveLegacyWheel) == 1, "program did not reset matrix");
+            set(a.unit, kOberVaveModulationBase, MS_PRESSURE);
+            set(a.unit, kOberVaveModulationBase + 1, MD_CUTOFF);
+            set(a.unit, kOberVaveModulationBase + 2, 101);
+            set(a.unit, kOberVaveLegacyWheel, 0);
+            CFPropertyListRef state = nullptr;
+            UInt32 size = sizeof(state);
+            check(AudioUnitGetProperty(a.unit, kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global,
+                0, &state, &size), "save matrix");
+            check(AudioUnitSetProperty(b.unit, kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global,
+                0, &state, sizeof(state)), "restore matrix");
+            CFRelease(state);
+            for (UInt32 id = kOberVaveModulationBase; id < kOberVaveParameterCount; ++id)
+                require(get(a.unit, id) == get(b.unit, id), "AU matrix did not roundtrip");
+            require(get(a.unit, kOberVaveProgram) == 18 && kOberVavePan == 67 &&
+                kOberVaveGrid == 69, "legacy automation IDs changed");
+            std::cout << "PASS all eight AU matrix slots, signed depth endpoints, program reset, state restore and stable legacy IDs\n";
+        }
+        {
+            Unit a(component, 44100), b(component, 44100);
+            for (UInt32 slot = 0; slot < CONTROLLER_SLOTS; ++slot) {
+                const auto base = kOberVaveControllerBase + slot * CONTROLLER_FIELDS;
+                require(get(a.unit, base) == 0 && get(a.unit, base + 5) == 64, "controller default not neutral");
+                set(a.unit, base, slot == 0 ? CS_CC0 + 1 : CS_POLY);
+                set(a.unit, base + 1, slot == 0 ? P_LFO_RATE : P_CUTOFF);
+                set(a.unit, base + 2, slot == 0 ? 0 : 1);
+                set(a.unit, base + 3, 32);
+                set(a.unit, base + 4, 96);
+                set(a.unit, base + 5, slot % 2 ? 0 : 128);
+                set(a.unit, base + 6, 1);
+            }
+            check(MusicDeviceMIDIEvent(a.unit, 0xB0, 1, 0, 0), "controller low");
+            a.render(32);
+            require(get(a.unit, P_LFO_RATE) == 32, "AU controller Min not applied");
+            check(MusicDeviceMIDIEvent(a.unit, 0xB0, 1, 127, 0), "controller high");
+            a.render(32);
+            require(get(a.unit, P_LFO_RATE) == 95, "AU controller Max not applied");
+            require(get(a.unit, P_MOD_DEPTH) == 0, "OVERRIDE allowed old CC1 assignment");
+            CFPropertyListRef state = nullptr;
+            UInt32 size = sizeof(state);
+            check(AudioUnitGetProperty(a.unit, kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global,
+                0, &state, &size), "save controllers");
+            check(AudioUnitSetProperty(b.unit, kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global,
+                0, &state, sizeof(state)), "restore controllers");
+            for (UInt32 id = 0; id < kOberVaveParameterCount; ++id)
+                require(get(a.unit, id) == get(b.unit, id), "AU controller state did not roundtrip");
+            auto legacy = CFDictionaryCreateMutableCopy(nullptr, 0, static_cast<CFDictionaryRef>(state));
+            const auto data = static_cast<CFDataRef>(CFDictionaryGetValue(legacy, CFSTR("data")));
+            require(data && CFDataGetLength(data) == 12 + kOberVaveParameterCount * 8, "unexpected preset layout");
+            auto legacyData = CFDataCreateMutableCopy(nullptr, 0, data);
+            for (const UInt32 count : {97u, 70u}) {
+                UInt32 storedCount = CFSwapInt32HostToBig(count);
+                CFDataSetLength(legacyData, 12 + count * 8);
+                std::memcpy(CFDataGetMutableBytePtr(legacyData) + 8, &storedCount, sizeof(storedCount));
+                CFDictionarySetValue(legacy, CFSTR("data"), legacyData);
+                CFPropertyListRef oldState = legacy;
+                check(AudioUnitSetProperty(b.unit, kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global,
+                    0, &oldState, sizeof(oldState)), "restore pre-controller state");
+                for (UInt32 slot = 0; slot < CONTROLLER_SLOTS; ++slot)
+                    require(get(b.unit, kOberVaveControllerBase + slot * CONTROLLER_FIELDS) == 0,
+                        "old state retained controller routes");
+            }
+            CFRelease(legacyData); CFRelease(legacy); CFRelease(state);
+            UInt32 armed = 1, learned = 0;
+            check(AudioUnitSetProperty(a.unit, kOberVaveControllerLearn, kAudioUnitScope_Global,
+                0, &armed, sizeof(armed)), "arm AU controller learn");
+            check(MusicDeviceMIDIEvent(a.unit, 0x90, 60, 100, 0), "learn ignores note");
+            check(MusicDeviceMIDIEvent(a.unit, 0xE0, 0, 64, 0), "learn bend");
+            check(MusicDeviceMIDIEvent(a.unit, 0xD0, 100, 0, 0), "learn one-shot");
+            a.render(64); size = sizeof(learned);
+            check(AudioUnitGetProperty(a.unit, kOberVaveControllerLearn, kAudioUnitScope_Global,
+                0, &learned, &size), "read AU controller learn");
+            require(learned == CS_BEND, "AU learn not first controller/one-shot");
+            check(AudioUnitGetProperty(a.unit, kOberVaveControllerLearn, kAudioUnitScope_Global,
+                0, &learned, &size), "consume AU controller learn");
+            require(learned == 0, "AU learn not consumed");
+            check(AudioUnitSetProperty(a.unit, kOberVavePanic, kAudioUnitScope_Global,
+                0, &armed, sizeof(armed)), "dedicated panic");
+            a.render(64);
+            set(a.unit, kOberVaveProgram, 18);
+            require(get(a.unit, kOberVaveControllerBase) == 0, "program retained controller routes");
+            std::cout << "PASS 16 AU Controller routes, exact ranges, overrides, all-parameter state, 97/70-ID preset migration, first-event MIDI Learn and program reset\n";
+        }
         for (const double rate : {22050., 44100., 48000., 88200., 96000., 192000.}) {
             Unit a(component, rate), b(component, rate);
             set(a.unit, P_ARP_MODE, A_OFF);
@@ -293,7 +388,7 @@ int main(int argc, char** argv)
                     [](float value) { return std::abs(value) < 1e-8; }), "voices/effects leak between instances");
             }
             check(MusicDeviceMIDIEvent(a.unit, 0x80, 60, 0, 0), "note off");
-            set(a.unit, NPARAM + 2, 1);
+            set(a.unit, kOberVavePan, 1);
             auto panned = a.render(512);
             require(std::all_of(panned.begin(), panned.end(),
                 [](float value) { return value == 0; }), "master pan not applied");
@@ -384,8 +479,8 @@ int main(int argc, char** argv)
             a.sync(tempo);
             set(a.unit, P_ARP_MODE, A_UP);
             set(a.unit, P_AA, 0);
-            set(a.unit, NPARAM + 3, 1);
-            set(a.unit, NPARAM + 4, 2);
+            set(a.unit, kOberVaveSync, 1);
+            set(a.unit, kOberVaveGrid, 2);
             check(MusicDeviceMIDIEvent(a.unit, 0x90, 60, 100, 0), "arp note");
             std::vector<float> audio;
             for (unsigned i = 0; i < 80; ++i) {
@@ -442,6 +537,9 @@ int main(int argc, char** argv)
             std::memcpy(CFDataGetMutableBytePtr(data) + 8, &count, sizeof(count));
             CFDictionarySetValue(legacy, CFSTR("data"), data);
             CFPropertyListRef legacyState = legacy;
+            set(b.unit, kOberVaveModulationBase, MS_LFO);
+            set(b.unit, kOberVaveModulationBase + 2, 128);
+            set(b.unit, kOberVaveLegacyWheel, 0);
             check(AudioUnitSetProperty(b.unit, kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global,
                 0, &legacyState, sizeof(legacyState)), "restore old 70-parameter preset");
             CFRelease(data);
@@ -450,6 +548,10 @@ int main(int argc, char** argv)
             require(get(b.unit, P_ARP_MODE) == A_PLAY && get(b.unit, P_ARP_LATCH) == 2 &&
                 get(b.unit, kOberVaveArpSelection) == A_PLAY && get(b.unit, kOberVaveLatchSelection) == 2,
                 "legacy preset lost selected modes");
+            require(get(b.unit, kOberVaveModulationBase) == MS_OFF &&
+                get(b.unit, kOberVaveModulationBase + 2) == 64 &&
+                get(b.unit, kOberVaveLegacyWheel) == 1,
+                "legacy preset inherited stale matrix or lost legacy wheel sound");
             std::cout << "PASS separate enable/mode controls and saved disabled selections\n";
         }
         {

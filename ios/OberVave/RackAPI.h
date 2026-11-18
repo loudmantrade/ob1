@@ -6,7 +6,7 @@ extern "C" {
 #endif
 
 #define OV_RACK_CAPACITY 16
-#define OV_RACK_PARAMETERS 65
+#define OV_RACK_PARAMETERS 202
 #define OV_ENGINE_OBERVAVE 1
 uint32_t ov_engine_count(void);
 uint32_t ov_engine_id(uint32_t index);
@@ -55,6 +55,17 @@ void ov_keyboard_channels(uint32_t mask);
 void ov_keyboard_note_on(uint32_t note, uint32_t velocity, uint32_t channels);
 void ov_keyboard_note_off(uint32_t note, uint32_t channels);
 void ov_keyboard_control(uint32_t status, uint32_t data1, uint32_t data2);
+/* One-shot external Note On learn, filtered by channel (1...16); 0 cancels.
+   Read returns note + 1, or 0 while waiting. Notes still reach the synth. */
+void ov_key_learn(uint32_t channel);
+uint32_t ov_take_key_learn(void);
+void ov_set_sustain_inverted(uint32_t inverted);
+/* Last incoming CC64: bit 16 valid, bits 8...11 channel (0...15), bits 0...6 raw value. */
+uint32_t ov_sustain_input(void);
+/* Hysteresis state: press >=96, release <=31 after polarity normalization. */
+uint32_t ov_sustain_down_channels(void);
+void ov_controller_learn(uint32_t armed);
+uint32_t ov_controller_learned(void); /* 0 waiting, otherwise source ID */
 
 #ifdef __cplusplus
 }

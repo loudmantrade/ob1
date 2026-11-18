@@ -54,7 +54,7 @@ final class OberVaveModel: ObservableObject {
     let unit: AudioUnit
     @Published private var values = Array(repeating: Float(0), count: Int(kOberVaveParameterCount))
     @Published var errorMessage: String?
-    private var maxima = Array(repeating: 127, count: Int(kOberVaveProgram))
+    private var maxima = Array(repeating: 127, count: Int(kOberVaveParameterCount))
     private var gestures = Set<AudioUnitParameterID>()
     let programNames: [String]
 
@@ -89,9 +89,22 @@ final class OberVaveModel: ObservableObject {
     var masterPan: Double { Double(values[Int(panID)]) }
     var isArpSyncEnabled: Bool { values[Int(syncID)] != 0 }
     var arpSyncGrid: Int { min(5, max(0, Int(values[Int(gridID)]))) }
-    func parameterValue(_ parameter: SynthParameter) -> Int { Int(values[parameter.rawValue]) }
-    func parameterMax(_ parameter: SynthParameter) -> Int { maxima[parameter.rawValue] }
-    func setParameter(_ parameter: SynthParameter, value: Int) { set(UInt32(parameter.rawValue), Float(value)) }
+    func parameterValue(_ parameter: SynthParameter) -> Int { Int(values[Int(parameter.audioUnitID)]) }
+    func parameterMax(_ parameter: SynthParameter) -> Int { maxima[Int(parameter.audioUnitID)] }
+    func setParameter(_ parameter: SynthParameter, value: Int) { set(parameter.audioUnitID, Float(value)) }
+    var controllerContext: Int { 0 }
+    func armControllerLearn(_ armed: Bool) {
+        var value: UInt32 = armed ? 1 : 0
+        report(AudioUnitSetProperty(unit, UInt32(kOberVaveControllerLearn), kAudioUnitScope_Global,
+            0, &value, UInt32(MemoryLayout.size(ofValue: value))), "Arm controller learn")
+    }
+    func takeControllerLearn() -> Int {
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout.size(ofValue: value))
+        report(AudioUnitGetProperty(unit, UInt32(kOberVaveControllerLearn), kAudioUnitScope_Global,
+            0, &value, &size), "Read controller learn")
+        return Int(value)
+    }
     func performanceMode(_ parameter: SynthParameter) -> Int {
         Int(values[Int(parameter == .arpMode ? kOberVaveArpSelection : kOberVaveLatchSelection)])
     }
@@ -111,9 +124,13 @@ final class OberVaveModel: ObservableObject {
     func noteOff(_ note: UInt32) { midi(0x80, note, 0) }
     func setPitchBend(_ value: Int) { let bend = UInt32(value + 8192); midi(0xE0, bend & 127, bend >> 7) }
     func setModWheel(_ value: Int) { midi(0xB0, 1, UInt32(value)) }
-    func panic() { midi(0xB0, 120, 0) }
+    func panic() {
+        var value: UInt32 = 1
+        report(AudioUnitSetProperty(unit, UInt32(kOberVavePanic), kAudioUnitScope_Global,
+                                   0, &value, UInt32(MemoryLayout.size(ofValue: value))), "Panic")
+    }
     func editParameter(_ parameter: SynthParameter, editing: Bool) {
-        edit(UInt32(parameter.rawValue), editing: editing)
+        edit(parameter.audioUnitID, editing: editing)
     }
     func editOutput(pan: Bool, editing: Bool) { edit(pan ? panID : masterID, editing: editing) }
     private func edit(_ id: AudioUnitParameterID, editing: Bool) {
@@ -225,7 +242,13 @@ struct OberVaveEditor: View {
     var body: some View {
         VStack(spacing: 8) {
             header
-            panels
+            if screen == .modulation {
+                SynthControlPanel.ModulationMatrixView(model: model)
+            } else if screen == .controllers {
+                ControllersView(model: model)
+            } else {
+                panels
+            }
             HStack(spacing: 8) {
                 ForEach(OberVaveScreen.allCases, id: \.self) { item in
                     Button { screen = item } label: {
@@ -296,12 +319,14 @@ struct OberVaveEditor: View {
         case .main: SynthControlLayouts.ob1
         case .more: SynthControlLayouts.extensions
         case .effects: SynthControlLayouts.effects
+        case .modulation: []
+        case .controllers: []
         }
     }
     private var panels: some View {
         GeometryReader { geometry in
             let width = geometry.size.width - 24
-            let count = screen == .main ? 5 : screen == .more ? 4 : 3
+            let count = screen == .main ? 5 : 3
             let cellWidth = (width - CGFloat(count - 1) * 12) / CGFloat(count)
             let items = (screen == .main ? [ControlPanelItem.amp] : []) + sections.map(ControlPanelItem.section)
             let rows = stride(from: 0, to: items.count, by: count).map {

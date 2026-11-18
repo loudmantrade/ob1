@@ -21,10 +21,29 @@ enum {
     P_REV_SIZE, P_REV_DAMP, P_REV_PRE, P_REV_MIX,
     P_ARP_LATCH,                                /* appended: preserve existing parameter indices */
     P_ARP_VEL,                                  /* appended: 0 follows played-key velocity */
+    P_MOD1_SRC, P_MOD1_DST, P_MOD1_AMT,
+    P_MOD2_SRC, P_MOD2_DST, P_MOD2_AMT,
+    P_MOD3_SRC, P_MOD3_DST, P_MOD3_AMT,
+    P_MOD4_SRC, P_MOD4_DST, P_MOD4_AMT,
+    P_MOD5_SRC, P_MOD5_DST, P_MOD5_AMT,
+    P_MOD6_SRC, P_MOD6_DST, P_MOD6_AMT,
+    P_MOD7_SRC, P_MOD7_DST, P_MOD7_AMT,
+    P_MOD8_SRC, P_MOD8_DST, P_MOD8_AMT,
+    P_WHEEL_LEGACY,
+#define CONTROLLER_ENUM(n) P_CTL##n##_SRC, P_CTL##n##_DST, P_CTL##n##_MODE, P_CTL##n##_MIN, P_CTL##n##_MAX, P_CTL##n##_DEPTH, P_CTL##n##_OVERRIDE,
+    CONTROLLER_ENUM(1) CONTROLLER_ENUM(2) CONTROLLER_ENUM(3) CONTROLLER_ENUM(4)
+    CONTROLLER_ENUM(5) CONTROLLER_ENUM(6) CONTROLLER_ENUM(7) CONTROLLER_ENUM(8)
+    CONTROLLER_ENUM(9) CONTROLLER_ENUM(10) CONTROLLER_ENUM(11) CONTROLLER_ENUM(12)
+    CONTROLLER_ENUM(13) CONTROLLER_ENUM(14) CONTROLLER_ENUM(15) CONTROLLER_ENUM(16)
+#undef CONTROLLER_ENUM
     NPARAM
 };
 #define PATCH_NAME 10u
-#define PATCH_BYTES 80u                         /* NPARAM values, the name at NPARAM, the rest spare */
+#define PATCH_BYTES 216u                        /* native patch storage, not a firmware binary dump */
+#define CONTROLLER_SLOTS 16u
+#define CONTROLLER_FIELDS 7u
+#define CONTROLLER_TARGETS 65u
+enum { CS_OFF, CS_CC0, CS_BEND = 129, CS_PRESSURE, CS_POLY, NCONTROLLER_SOURCE };
 #if NPARAM + PATCH_NAME > PATCH_BYTES
 #error "the patch outgrew PATCH_BYTES"
 #endif
@@ -32,14 +51,17 @@ enum {
 #define NFACT 64u
 
 enum { K_NUM, K_BIP, K_ONOFF, K_WAVE, K_FTYPE, K_MODE, K_LSHAPE, K_LPHASE, K_TO, K_ARP, K_DIV, K_SEMI, K_MS, K_HZ,
-       K_PCT, K_CUT, K_OCT, K_MORPH, K_DDIV, K_LATCH, K_AVEL };
+       K_PCT, K_CUT, K_OCT, K_MORPH, K_DDIV, K_LATCH, K_AVEL, K_MSRC, K_MDST };
+enum { MS_OFF, MS_LFO, MS_WHEEL, MS_VELOCITY, MS_PRESSURE, MS_FENV, MS_AENV, MS_LFO_WHEEL, NMODSRC };
+enum { MD_PITCH1, MD_PITCH2, MD_PWM1, MD_PWM2, MD_CUTOFF, MD_RESO, MD_VOLUME, MD_PAN, NMODDST };
+#define MOD_SLOTS 8u
 enum { W_OFF, W_SAW, W_PLS, W_BOTH };
 enum { F_LP12, F_HP12, F_BP12, F_NOTCH, F_LP24, F_SEM, NFTYPE };   /* SEM: LP .. notch .. HP by MORPH */
 enum { M_POLY, M_DUAL, M_UNISON, M_MONO };
 enum { L_TRI, L_SAW, L_RAMP, L_SQR, L_SH, L_RND };
 enum { LP_SYNC, LP_FREE, LP_SPREAD };
 enum { TO_O1, TO_O2, TO_BOTH };
-enum { A_OFF, A_UP, A_DOWN, A_UPDN, A_RND, A_PLAY, NARPMODE };
+enum { A_OFF, A_UP, A_DOWN, A_UPDN, A_RND, A_PLAY, A_CHORD, A_HOLD, A_HOLD_LEGATO, NARPMODE };
 enum { D_4, D_8, D_8T, D_16, D_16T, D_32, D_32T, NDIV };
 enum { DD_16, DD_8T, DD_8, DD_8D, DD_4, DD_4D, DD_2, NDDIV };   /* the delay's note values */
 
@@ -95,7 +117,7 @@ static const pdef_t PDEF[NPARAM] = {
     [P_BEND] = {"BEND", 24, 2, K_NUM, 0},
     [P_VOLUME] = {"VOLUME", 127, 100, K_NUM, 0},
     [P_MOD_DEPTH] = {"MOD DPT", 127, 0, K_NUM, 1},
-    [P_ARP_MODE] = {"ARP", 5, A_OFF, K_ARP, 0},
+    [P_ARP_MODE] = {"ARP", NARPMODE - 1, A_OFF, K_ARP, 0},
     [P_ARP_DIV] = {"DIV", 6, D_16, K_DIV, 0},
     [P_ARP_OCT] = {"OCTAVES", 4, 1, K_OCT, 0},
     [P_ARP_GATE] = {"GATE", 127, 64, K_PCT, 0},
@@ -113,6 +135,33 @@ static const pdef_t PDEF[NPARAM] = {
     [P_REV_MIX] = {"MIX", 127, 0, K_NUM, 0},
     [P_ARP_LATCH] = {"LATCH", 2, 0, K_LATCH, 0},
     [P_ARP_VEL] = {"ARP VEL", 127, 0, K_AVEL, 0},
+#define MOD_DEF(n) \
+    [P_MOD##n##_SRC] = {"SOURCE", NMODSRC - 1, MS_OFF, K_MSRC, 0}, \
+    [P_MOD##n##_DST] = {"DEST", NMODDST - 1, MD_PITCH1, K_MDST, 0}, \
+    [P_MOD##n##_AMT] = {"AMOUNT", 128, 64, K_BIP, 0},
+    MOD_DEF(1) MOD_DEF(2) MOD_DEF(3) MOD_DEF(4)
+    MOD_DEF(5) MOD_DEF(6) MOD_DEF(7) MOD_DEF(8)
+#undef MOD_DEF
+    [P_WHEEL_LEGACY] = {"OLD WHEEL", 1, 1, K_ONOFF, 0},
+#define CONTROLLER_DEF(n) \
+    [P_CTL##n##_SRC] = {"INPUT", NCONTROLLER_SOURCE - 1, 0, K_NUM, 0}, \
+    [P_CTL##n##_DST] = {"TARGET", CONTROLLER_TARGETS - 1, P_CUTOFF, K_NUM, 0}, \
+    [P_CTL##n##_MODE] = {"MODE", 1, 0, K_NUM, 0}, \
+    [P_CTL##n##_MIN] = {"MIN", 128, 0, K_NUM, 0}, \
+    [P_CTL##n##_MAX] = {"MAX", 128, 128, K_NUM, 0}, \
+    [P_CTL##n##_DEPTH] = {"DEPTH", 128, 64, K_BIP, 0}, \
+    [P_CTL##n##_OVERRIDE] = {"OVERRIDE", 1, 0, K_ONOFF, 0},
+    CONTROLLER_DEF(1) CONTROLLER_DEF(2) CONTROLLER_DEF(3) CONTROLLER_DEF(4)
+    CONTROLLER_DEF(5) CONTROLLER_DEF(6) CONTROLLER_DEF(7) CONTROLLER_DEF(8)
+    CONTROLLER_DEF(9) CONTROLLER_DEF(10) CONTROLLER_DEF(11) CONTROLLER_DEF(12)
+    CONTROLLER_DEF(13) CONTROLLER_DEF(14) CONTROLLER_DEF(15) CONTROLLER_DEF(16)
+#undef CONTROLLER_DEF
+};
+static const char *const MOD_SOURCE_NAME[NMODSRC] = {
+    "OFF", "LFO", "MOD WHEEL", "VELOCITY", "AFTERTOUCH", "FILTER ENV", "AMP ENV", "LFO x WHEEL"
+};
+static const char *const MOD_DEST_NAME[NMODDST] = {
+    "OSC 1 PITCH", "OSC 2 PITCH", "OSC 1 PWM", "OSC 2 PWM", "CUTOFF", "RESONANCE", "VOLUME", "PAN"
 };
 
 static const char *const WAVE_NAME[4] = {"OFF", "SAW", "PULSE", "SAW+PLS"};
@@ -121,7 +170,7 @@ static const char *const MODE_NAME[4] = {"POLY", "DUAL", "UNISON", "MONO"};
 static const char *const LSHAPE_NAME[6] = {"TRI", "SAW", "RAMP", "SQUARE", "S&H", "RANDOM"};
 static const char *const LPHASE_NAME[3] = {"SYNC", "FREE", "SPREAD"};
 static const char *const TO_NAME[3] = {"OSC1", "OSC2", "BOTH"};
-static const char *const ARP_NAME[NARPMODE] = {"OFF", "UP", "DOWN", "UP/DN", "RANDOM", "PLAYED"};
+static const char *const ARP_NAME[NARPMODE] = {"OFF", "UP", "DOWN", "UP/DN", "RANDOM", "PLAYED", "CHORD", "HOLD RETRIGGER", "HOLD LEGATO"};
 static const char *const LATCH_NAME[3] = {"OFF", "ADD", "REPLACE"};
 static const char *const DIV_NAME[NDIV] = {"1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32", "1/32T"};
 static const uint8_t DIV_PER_QUARTER[NDIV] = {1, 2, 3, 4, 6, 8, 12};

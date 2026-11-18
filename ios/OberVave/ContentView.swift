@@ -225,12 +225,6 @@ enum SynthControlLayouts {
             .init(parameter: .ampSustain, label: "SUSTAIN"),
             .init(parameter: .ampRelease, label: "RELEASE")
         ]),
-        .init(title: "LFO", controls: [
-            .init(parameter: .lfoShape, label: "WAVE", options: ["TRI", "SAW", "RAMP", "SQUARE", "S&H", "RND"]),
-            .init(parameter: .lfoRate, label: "RATE"),
-            .init(parameter: .lfoPitch, label: "PITCH"),
-            .init(parameter: .modWheelDepth, label: "MOD WHEEL")
-        ]),
         .init(title: "PERFORMANCE", controls: [
             .init(parameter: .glide, label: "GLIDE"),
             .init(parameter: .bendRange, label: "BEND RANGE"),
@@ -252,23 +246,34 @@ enum SynthControlLayouts {
             .init(parameter: .velocityToAmp, label: "VELOCITY → AMP"),
             .init(parameter: .fmMorph, label: "FM MORPH")
         ]),
-        .init(title: "LFO MODULATION", controls: [
-            .init(parameter: .lfoDelay, label: "DELAY"),
-            .init(parameter: .lfoPhase, label: "PHASE", options: ["SYNC", "FREE", "SPREAD"]),
-            .init(parameter: .lfoPulseWidth, label: "PULSE WIDTH"),
-            .init(parameter: .lfoFilter, label: "FILTER"),
-            .init(parameter: .lfoAmp, label: "AMP"),
-            .init(parameter: .lfoPitchTarget, label: "PITCH →", options: ["OSC 1", "OSC 2", "BOTH"]),
-            .init(parameter: .lfoPulseTarget, label: "PWM →", options: ["OSC 1", "OSC 2", "BOTH"])
-        ]),
         .init(title: "ARPEGGIATOR", controls: [
-            .init(parameter: .arpMode, label: "MODE", options: ["UP", "DOWN", "UP/DN", "RANDOM", "PLAYED"], optionValueOffset: 1),
+            .init(parameter: .arpMode, label: "MODE", options: ["UP", "DOWN", "UP/DN", "RANDOM", "PLAYED", "CHORD", "HOLD RETRIGGER", "HOLD LEGATO"], optionValueOffset: 1),
             .init(parameter: .arpLatch, label: "LATCH MODE", options: ["ADD", "REPLACE"], optionValueOffset: 1),
             .init(parameter: .arpDivision, label: "DIVISION", options: ["1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32", "1/32T"]),
             .init(parameter: .arpOctaves, label: "OCTAVES", options: ["1", "2", "3", "4"], optionValueOffset: 1),
             .init(parameter: .arpVelocity, label: "VELOCITY"),
             .init(parameter: .arpGate, label: "GATE")
         ]),
+    ]
+
+    static let modulation: [SynthControlSection] = [
+        .init(title: "LFO", controls: [
+            .init(parameter: .lfoShape, label: "WAVE", options: ["TRI", "SAW", "RAMP", "SQUARE", "S&H", "RND"]),
+            .init(parameter: .lfoRate, label: "RATE"),
+            .init(parameter: .lfoDelay, label: "DELAY"),
+            .init(parameter: .lfoPhase, label: "PHASE", options: ["SYNC", "FREE", "SPREAD"])
+        ]),
+        .init(title: "LFO OSCILLATORS", controls: [
+            .init(parameter: .lfoPitch, label: "PITCH DEPTH"),
+            .init(parameter: .lfoPitchTarget, label: "PITCH →", options: ["OSC 1", "OSC 2", "BOTH"]),
+            .init(parameter: .lfoPulseWidth, label: "PWM DEPTH"),
+            .init(parameter: .lfoPulseTarget, label: "PWM →", options: ["OSC 1", "OSC 2", "BOTH"])
+        ]),
+        .init(title: "LFO FILTER / AMP", controls: [
+            .init(parameter: .lfoFilter, label: "CUTOFF DEPTH"),
+            .init(parameter: .lfoAmp, label: "VOLUME DEPTH"),
+            .init(parameter: .modWheelDepth, label: "LEGACY WHEEL DEPTH")
+        ])
     ]
 
     static let effects: [SynthControlSection] = [
@@ -296,12 +301,16 @@ enum OberVaveScreen: Int, CaseIterable {
     case main
     case more
     case effects
+    case modulation
+    case controllers
 
     var title: String {
         switch self {
         case .main: "OB-1"
         case .more: "MORE"
         case .effects: "EFFECTS"
+        case .modulation: "LFO / MOD"
+        case .controllers: "CONTROLLERS"
         }
     }
 
@@ -310,6 +319,8 @@ enum OberVaveScreen: Int, CaseIterable {
         case .main: "slider.horizontal.3"
         case .more: "ellipsis.circle"
         case .effects: "waveform"
+        case .modulation: "point.3.connected.trianglepath.dotted"
+        case .controllers: "dial.medium"
         }
     }
 }
@@ -321,7 +332,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var program = 17
     @Published var parameterValues: [Int] = []
     @Published var arpSelectedMode = 1
-    @Published var latchSelectedMode = 1
+    @Published var latchSelectedMode = 2
     @Published var ccAssignments: [Int] = []
     @Published var midiMappingMode = false
     @Published private(set) var learningParameter: SynthParameter?
@@ -338,7 +349,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     var keyboardStopGeneration: UInt32 = 0
     var sceneFileURL: URL?
     var pendingSceneURL: URL?
-    var sceneSaveStarted = 0.0
+    let sceneSaveMonitor = SceneSaveMonitor()
     @Published var midiSourceCount = 0
     @Published var midiSourceNames: [String] = []
     @Published fileprivate var bluetoothDevices: [BluetoothMIDIDevice] = []
@@ -358,6 +369,30 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published private(set) var arpLatencyManualMS = 0.0
     @Published private(set) var audioLatencyEstimateMS = 0.0
     @Published private(set) var isAudioRunning = false
+    @Published private(set) var sustainInverted = false
+    @Published private(set) var sustainInput: UInt32 = 0
+    @Published private(set) var sustainDownChannels: UInt32 = 0
+
+    var sustainInputDescription: String {
+        guard sustainInput & 0x10000 != 0 else { return "No CC64 received" }
+        let value = Int(sustainInput & 127)
+        let channel = Int((sustainInput >> 8) & 15) + 1
+        let down = sustainDownChannels & (1 << (channel - 1)) != 0
+        return "CH \(channel) · CC64 \(value) · \(down ? "DOWN" : "UP")"
+    }
+
+    func setSustainInverted(_ inverted: Bool) {
+        sustainInverted = inverted
+        ov_set_sustain_inverted(inverted ? 1 : 0)
+        UserDefaults.standard.set(inverted, forKey: "sustain-inverted")
+    }
+
+    func refreshSustainInput() {
+        let latest = ov_sustain_input()
+        if latest != sustainInput { sustainInput = latest }
+        let channels = ov_sustain_down_channels()
+        if channels != sustainDownChannels { sustainDownChannels = channels }
+    }
 
     let programNames: [String]
     private let defaultCCAssignments: [Int]
@@ -413,6 +448,8 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             return cc == 255 ? -1 : cc
         }
         super.init()
+        sustainInverted = UserDefaults.standard.bool(forKey: "sustain-inverted")
+        ov_set_sustain_inverted(sustainInverted ? 1 : 0)
         arpLatencyAuto = UserDefaults.standard.object(forKey: "arp-latency-auto") as? Bool ?? true
         let manual = UserDefaults.standard.double(forKey: "arp-latency-manual-ms")
         arpLatencyManualMS = manual.isFinite ? min(500, max(-500, manual)) : 0
@@ -627,6 +664,10 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         rememberSelectedInstrument()
     }
 
+    var controllerContext: Int { selectedSlot }
+    func armControllerLearn(_ armed: Bool) { ov_controller_learn(armed ? 1 : 0) }
+    func takeControllerLearn() -> Int { Int(ov_controller_learned()) }
+
     func performanceMode(_ parameter: SynthParameter) -> Int {
         let current = parameterValue(parameter)
         return current > 0 ? current : parameter == .arpMode ? arpSelectedMode : latchSelectedMode
@@ -806,17 +847,18 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         let program = index % 128
         let key = presetKey(bank: bank, program: program)
         ov_reset_parameter_ccs()
-        arpSelectedMode = min(5, max(1, presetLibrary.presets[key]?.arpSelectedMode ?? 1))
-        latchSelectedMode = min(2, max(1, presetLibrary.presets[key]?.latchSelectedMode ?? 1))
+        arpSelectedMode = min(8, max(1, presetLibrary.presets[key]?.arpSelectedMode ?? 1))
+        latchSelectedMode = min(2, max(1, presetLibrary.presets[key]?.latchSelectedMode ?? 2))
         if let preset = presetLibrary.presets[key] {
             for (parameter, value) in preset.parameters.enumerated()
                 where parameter < Int(ov_parameter_count()) {
                 ov_set_parameter(UInt32(parameter), UInt32(value))
             }
         }
-        let mappings = presetLibrary.ccMappings[key] ??
+        let savedMappings = presetLibrary.ccMappings[key] ??
             presetLibrary.presets[key]?.ccAssignments ??
             defaultCCAssignments
+        let mappings = ModulationMatrix.migrateLegacy(savedMappings, defaults: defaultCCAssignments)
         ccAssignments = mappings
         for (parameter, cc) in mappings.enumerated() where parameter < defaultCCAssignments.count {
             if cc != defaultCCAssignments[parameter] {
@@ -1675,6 +1717,10 @@ struct ContentView: View {
                 sections: SynthControlLayouts.effects,
                 minimumPanelWidth: 205
             )
+        case .modulation:
+            SynthControlPanel.ModulationMatrixView(model: model)
+        case .controllers:
+            ControllersView(model: model)
         }
     }
 
@@ -2193,6 +2239,144 @@ struct SynthControlPanel: View {
         }
     }
 
+    struct ModulationMatrixView: View {
+        @ObservedObject var model: OberVaveModel
+        @State private var confirmsClear = false
+
+        var body: some View {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 12)],
+                              alignment: .leading, spacing: 12) {
+                        ForEach(SynthControlLayouts.modulation) { section in
+                            SynthControlPanel(section: section, model: model)
+                        }
+                    }
+                    ForEach(LFOModulationRoute.routes(value: model.parameterValue)) { route in
+                        if let warning = route.warning {
+                            Text(warning).foregroundStyle(.orange)
+                                .font(.system(size: 11))
+                        }
+                    }
+                    HStack {
+                        Label("MODULATION MATRIX", systemImage: "slider.horizontal.3")
+                            .font(.system(size: 14, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.cyan)
+                        Spacer()
+                        Button("CLEAR MATRIX") { confirmsClear = true }
+                            .buttonStyle(.bordered)
+                    }
+                    Text("8 independent routes, added to existing patch modulation. LFO is bipolar; wheel, velocity, aftertouch and envelopes are unipolar. Negative depth reverses the effect.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Toggle("LEGACY WHEEL → PITCH + CUTOFF", isOn: Binding(
+                        get: { model.parameterValue(.legacyWheel) != 0 },
+                        set: { model.setParameter(.legacyWheel, value: $0 ? 1 : 0) }
+                    ))
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .tint(.cyan)
+                    Text("Turn this off for freely assigned CC1 with no built-in vibrato/filter sweep. LFO × WHEEL lets the wheel control LFO depth.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    ForEach(0..<8, id: \.self) { slot in
+                        route(slot)
+                    }
+                    Text("Ranges are per route at ±100%. Routes sum before destination limits. Volume scales the amp envelope (cannot bypass it); PWM needs a PULSE wave. Aftertouch accepts channel pressure and per-note poly pressure.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                .padding(12)
+            }
+            .confirmationDialog("Clear all eight modulation routes? Existing patch modulation is unchanged.",
+                                isPresented: $confirmsClear, titleVisibility: .visible) {
+                Button("Clear Matrix", role: .destructive) {
+                    for slot in 0..<8 { reset(slot) }
+                }
+            }
+        }
+
+        private func selection(_ parameter: SynthParameter) -> Binding<Int> {
+            Binding(get: { model.parameterValue(parameter) },
+                    set: { model.setParameter(parameter, value: $0) })
+        }
+
+        private func reset(_ slot: Int) {
+            let p = ModulationMatrix.parameters(slot: slot)
+            model.setParameter(p.source, value: 0)
+            model.setParameter(p.destination, value: 0)
+            model.setParameter(p.amount, value: 64)
+        }
+
+        private func route(_ slot: Int) -> some View {
+            let p = ModulationMatrix.parameters(slot: slot)
+            let source = model.parameterValue(p.source)
+            let destination = model.parameterValue(p.destination)
+            let amount = model.parameterValue(p.amount)
+            let active = source != 0 && amount != 64
+            let pulseParameter: SynthParameter = destination == 2 ? .osc1Wave : .osc2Wave
+            let pwmWarning = active && (destination == 2 || destination == 3) &&
+                model.parameterValue(pulseParameter) & 2 == 0
+            return VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    Text(String(format: "%02d", slot + 1)).foregroundStyle(active ? Color.cyan : .secondary)
+                    Picker("SOURCE", selection: selection(p.source)) {
+                        ForEach(ModulationMatrix.sources.indices, id: \.self) { index in
+                            Text(ModulationMatrix.sources[index]).tag(index)
+                        }
+                    }
+                    .accessibilityLabel("Mod \(slot + 1) source")
+                    Image(systemName: "arrow.right").foregroundStyle(.cyan)
+                    Picker("DESTINATION", selection: selection(p.destination)) {
+                        ForEach(ModulationMatrix.destinations.indices, id: \.self) { index in
+                            Text(ModulationMatrix.destinations[index]).tag(index)
+                        }
+                    }
+                    .accessibilityLabel("Mod \(slot + 1) destination")
+                    Button("RESET") { reset(slot) }.buttonStyle(.bordered)
+                        .accessibilityLabel("Reset mod \(slot + 1)")
+                }
+                HStack(spacing: 10) {
+                    Text("DEPTH").frame(width: 48, alignment: .leading)
+                    Slider(value: Binding(get: { Double(model.parameterValue(p.amount)) },
+                                          set: { model.setParameter(p.amount, value: Int($0.rounded())) }),
+                           in: 0...128, step: 1, onEditingChanged: { editing in
+    #if OBERVAVE_AU
+                        model.editParameter(p.amount, editing: editing)
+    #endif
+                    })
+                    .tint(.cyan)
+                    .accessibilityLabel("Mod \(slot + 1) depth")
+                    .accessibilityValue(ModulationMatrix.amountText(amount))
+#if OBERVAVE_AU
+                    .overlay {
+                        GeometryReader { geometry in
+                            AUDragSurface(
+                                onStart: { model.editParameter(p.amount, editing: true) },
+                                onChange: { point, _ in
+                                    let position = (point.x - 8) / max(1, geometry.size.width - 16)
+                                    model.setParameter(p.amount, value: Int((min(1, max(0, position)) * 128).rounded()))
+                                },
+                                onEnd: { model.editParameter(p.amount, editing: false) }
+                            )
+                        }
+                    }
+#endif
+                    Text(ModulationMatrix.amountText(amount)).frame(width: 70, alignment: .trailing)
+                        .foregroundStyle(active ? Color.cyan : .secondary)
+                    Button("ZERO") { model.setParameter(p.amount, value: 64) }
+                        .buttonStyle(.bordered).accessibilityLabel("Zero mod \(slot + 1) depth")
+                    Text(ModulationMatrix.ranges[max(0, min(7, destination))])
+                        .frame(width: 100, alignment: .trailing).foregroundStyle(.secondary)
+                }
+                if pwmWarning {
+                    Text("Enable PULSE for \(destination == 2 ? "OSC 1" : "OSC 2") to hear PWM.")
+                        .foregroundStyle(.orange)
+                }
+            }
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .padding(10)
+            .background(Color.white.opacity(active ? 0.08 : 0.04), in: RoundedRectangle(cornerRadius: 9))
+        }
+    }
+
     private func parameterControl(for control: SynthControl) -> some View {
         let parameter = control.parameter
         let performance = parameter == .arpMode || parameter == .arpLatch
@@ -2242,6 +2426,179 @@ struct SynthControlPanel: View {
             onToggle: { model.togglePerformance(parameter) }
         )
 #endif
+    }
+}
+
+struct ControllersView: View {
+    @ObservedObject var model: OberVaveModel
+    @State private var learningSlot: Int?
+    @State private var learnDeadline = Date.distantPast
+    @State private var status = ""
+    @State private var confirmsReset = false
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label("CONTROLLERS", systemImage: "dial.medium")
+                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.cyan)
+                    Spacer()
+                    Button("RESET ROUTES") { confirmsReset = true }.buttonStyle(.bordered)
+                }
+                Text("16 routes per instrument. VALUE writes the parameter through Min/Max; MOD adds a signed offset to its current setting without overwriting it. Depth is a percentage of the target's full parameter range.")
+                Text("CC and pressure are unipolar. Pitch Bend is centered for MOD and spans Min/Max for VALUE. Poly Aftertouch is per-note for voice modulation; effects, LFO and arpeggiator settings use the last received pressure. Discrete targets are rounded.")
+                    .foregroundStyle(.secondary)
+                Text("OVERRIDE disables this input's original action and old CC assignments while the route is enabled. Use it to redirect Mod Wheel, Sustain, bank CC, CC7, Pitch Bend or panic CC. Input still reaches other custom routes and matrix sources. Program Change, notes and MIDI transport are not remapped.")
+                    .foregroundStyle(.secondary)
+                if !status.isEmpty { Text(status).foregroundStyle(learningSlot == nil ? Color.secondary : .cyan) }
+                ForEach(0..<16, id: \.self) { slot in route(slot) }
+#if !OBERVAVE_AU
+                DisclosureGroup("EXISTING CC ASSIGNMENTS") {
+                    Text("These are the same per-preset assignments shown by MIDI Mapping. Custom routes with OVERRIDE bypass them for that input.")
+                        .foregroundStyle(.secondary)
+                    ForEach(0..<ControllerRouting.targetNames.count, id: \.self) { index in
+                        let parameter = SynthParameter.allCases[index]
+                        Picker(ControllerRouting.targetNames[index], selection: Binding(
+                            get: { model.ccAssignments.indices.contains(index) ? model.ccAssignments[index] : -1 },
+                            set: { _ = model.setCC(parameter, value: $0) }
+                        )) {
+                            Text("UNASSIGNED").tag(-1)
+                            ForEach(0..<128, id: \.self) { cc in Text("CC \(cc)").tag(cc) }
+                        }
+                    }
+                }
+#endif
+            }
+            .font(.system(size: 11, weight: .medium, design: .monospaced))
+            .padding(12)
+        }
+        .onReceive(Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()) { _ in
+            guard let slot = learningSlot else { return }
+            let source = model.takeControllerLearn()
+            if source > 0 && source < ControllerRouting.sources.count {
+                model.setParameter(ControllerRouting.parameter(slot, 0), value: source)
+                status = "Route \(slot + 1): learned \(ControllerRouting.sources[source])."
+                cancelLearn()
+            } else if Date() >= learnDeadline {
+                status = "MIDI Learn timed out. Move a controller on this instrument's MIDI channel and try again."
+                cancelLearn()
+            }
+        }
+        .onDisappear { cancelLearn() }
+        .onChange(of: model.controllerContext) { _ in
+            cancelLearn()
+            status = ""
+        }
+        .confirmationDialog("Reset all controller routes? Sound parameters and existing CC assignments are unchanged.",
+                            isPresented: $confirmsReset, titleVisibility: .visible) {
+            Button("Reset Routes", role: .destructive) {
+                cancelLearn()
+                for slot in 0..<16 { reset(slot) }
+            }
+        }
+    }
+
+    private func cancelLearn() {
+        model.armControllerLearn(false)
+        learningSlot = nil
+    }
+
+    private func reset(_ slot: Int) {
+        for (field, value) in [0, 12, 0, 0, 128, 64, 0].enumerated() {
+            model.setParameter(ControllerRouting.parameter(slot, field), value: value)
+        }
+    }
+
+    private func binding(_ slot: Int, _ field: Int) -> Binding<Int> {
+        let parameter = ControllerRouting.parameter(slot, field)
+        return Binding(get: { model.parameterValue(parameter) },
+                       set: { model.setParameter(parameter, value: $0) })
+    }
+
+    private func amount(_ slot: Int, _ field: Int, _ label: String, signed: Bool = false) -> some View {
+        let parameter = ControllerRouting.parameter(slot, field)
+        let value = model.parameterValue(parameter)
+        return HStack {
+            Text(label).frame(width: 45, alignment: .leading)
+            Slider(value: Binding(get: { Double(model.parameterValue(parameter)) },
+                                  set: { model.setParameter(parameter, value: Int($0.rounded())) }),
+                   in: 0...128, step: 1, onEditingChanged: { editing in
+#if OBERVAVE_AU
+                model.editParameter(parameter, editing: editing)
+#endif
+            })
+            .tint(.cyan)
+#if OBERVAVE_AU
+            .overlay {
+                GeometryReader { geometry in
+                    AUDragSurface(onStart: { model.editParameter(parameter, editing: true) },
+                                  onChange: { point, _ in
+                        let x = min(1, max(0, (point.x - 8) / max(1, geometry.size.width - 16)))
+                        model.setParameter(parameter, value: Int((x * 128).rounded()))
+                    }, onEnd: { model.editParameter(parameter, editing: false) })
+                }
+            }
+#endif
+            .accessibilityLabel("Controller \(slot + 1) \(label)")
+            Text(signed ? ModulationMatrix.amountText(value) : String(format: "%.1f%%", Double(value) * 100 / 128))
+                .frame(width: 75, alignment: .trailing).foregroundStyle(.cyan)
+            if signed {
+                Button("ZERO") { model.setParameter(parameter, value: 64) }.buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private func route(_ slot: Int) -> some View {
+        let source = model.parameterValue(ControllerRouting.parameter(slot, 0))
+        let mode = model.parameterValue(ControllerRouting.parameter(slot, 2))
+        let target = model.parameterValue(ControllerRouting.parameter(slot, 1))
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(String(format: "%02d", slot + 1)).foregroundStyle(source > 0 ? Color.cyan : .secondary)
+                Picker("INPUT", selection: binding(slot, 0)) {
+                    ForEach(ControllerRouting.sources.indices, id: \.self) { index in
+                        Text(ControllerRouting.sources[index]).tag(index)
+                    }
+                }
+                Button(learningSlot == slot ? "CANCEL" : "LEARN") {
+                    let wasLearning = learningSlot == slot
+                    cancelLearn()
+                    if !wasLearning {
+                        learningSlot = slot
+                        learnDeadline = Date().addingTimeInterval(15)
+                        status = "Move a CC, Pitch Bend or Aftertouch control for route \(slot + 1)…"
+                        model.armControllerLearn(true)
+                    }
+                }.buttonStyle(.bordered).tint(learningSlot == slot ? .cyan : nil)
+                Button("RESET") { reset(slot) }.buttonStyle(.bordered)
+            }
+            HStack {
+                Picker("TARGET", selection: binding(slot, 1)) {
+                    ForEach(ControllerRouting.targetNames.indices, id: \.self) { index in
+                        Text(ControllerRouting.targetNames[index]).tag(index)
+                    }
+                }
+                Picker("TYPE", selection: binding(slot, 2)) {
+                    Text("VALUE").tag(0)
+                    Text("MOD").tag(1)
+                }.frame(maxWidth: 200)
+                Toggle("OVERRIDE", isOn: Binding(get: { binding(slot, 6).wrappedValue != 0 },
+                                                set: { binding(slot, 6).wrappedValue = $0 ? 1 : 0 }))
+                    .toggleStyle(.switch).tint(.orange)
+            }
+            if mode == 0 {
+                amount(slot, 3, "MIN")
+                amount(slot, 4, "MAX")
+                let maximum = model.parameterMax(SynthParameter.allCases[target])
+                Text("Output \(Int((Double(binding(slot, 3).wrappedValue) * Double(maximum) / 128).rounded())) → \(Int((Double(binding(slot, 4).wrappedValue) * Double(maximum) / 128).rounded())) / \(maximum). Min > Max inverts the controller.")
+                    .foregroundStyle(.secondary)
+            } else {
+                amount(slot, 5, "DEPTH", signed: true)
+            }
+        }
+        .padding(10)
+        .background(Color.white.opacity(source > 0 ? 0.08 : 0.04), in: RoundedRectangle(cornerRadius: 9))
     }
 }
 
@@ -2508,7 +2865,7 @@ private struct SynthParameterControl: View {
             let amount = value - 64
             return amount > 0 ? "+\(amount)" : "\(amount)"
         case .lfoRate:
-            return String(format: "%.1f Hz", Double(value) * 0.1)
+            return lfoRateText(value)
         case .arpVelocity:
             return value == 0 ? "KEY" : "\(value)"
         default:
@@ -2697,6 +3054,16 @@ private struct BluetoothMIDIView: View {
                     }
                 }
 
+                Section("Sustain Pedal") {
+                    Toggle("Invert Sustain polarity", isOn: Binding(
+                        get: { model.sustainInverted },
+                        set: { model.setSustainInverted($0) }))
+                    Text(model.sustainInputDescription)
+                        .font(.subheadline.monospaced())
+                    Text("After polarity correction: CC64 96-127 arms DOWN; 0-31 releases UP only after DOWN. Values 32-95 preserve the previous state to reject pedal chatter. Enable inversion if your pedal sends low values on press. Change polarity with notes released, then cycle the pedal once. This device setting applies to all MIDI channels, not AU or scene files.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
                 Section {
                     LabeledContent("Audio output", value: model.audioOutputName)
                     LabeledContent("Hardware format", value: model.audioOutputFormat)
@@ -2769,9 +3136,13 @@ private struct BluetoothMIDIView: View {
             }
             .navigationTitle("MIDI Connections")
             .navigationBarTitleDisplayMode(.inline)
+            .onReceive(Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()) { _ in
+                model.refreshSustainInput()
+            }
             .onAppear {
                 model.refreshMIDISources()
                 model.refreshAudioStatus()
+                model.refreshSustainInput()
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

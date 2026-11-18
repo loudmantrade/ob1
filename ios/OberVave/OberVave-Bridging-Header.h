@@ -8,6 +8,7 @@ void ov_init(void);
 uint32_t ov_program_count(void);
 uint32_t ov_parameter_count(void);
 uint32_t ov_parameter_max(uint32_t parameter);
+double ov_lfo_rate_hz(uint32_t value);
 uint32_t ov_parameter_value(uint32_t parameter);
 uint32_t ov_parameter_cc(uint32_t parameter);
 uint32_t ov_voice_level(uint32_t voice);

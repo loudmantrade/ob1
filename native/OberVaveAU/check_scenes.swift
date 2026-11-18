@@ -3,6 +3,59 @@ import Foundation
 
 @main
 struct SceneChecks {
+    static func waitForSave(_ finished: () -> Bool) {
+        let deadline = Date().addingTimeInterval(1)
+        while !finished() && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        precondition(finished(), "Scene save did not finish without a view refresh")
+    }
+
+    static func checkSaveMonitor() {
+        let monitor = SceneSaveMonitor()
+        var left = [Float](repeating: 0, count: 32)
+        var right = left
+        func render() { ov_render(&left, &right, 32) }
+        for cutoff in [43, 87] {
+            ov_set_parameter(UInt32(SynthParameter.cutoff.rawValue), UInt32(cutoff))
+            precondition(ov_rack_snapshot_request() != 0)
+            var finished = false
+            monitor.start(timeout: 0.5, interval: 0.005) {
+                var captured = ov_scene_config()
+                guard ov_rack_snapshot_read(&captured) != 0 else { return false }
+                let parameters = withUnsafeBytes(of: captured.slots.0.config.parameters) {
+                    Array($0.bindMemory(to: UInt8.self))
+                }
+                precondition(Int(parameters[SynthParameter.cutoff.rawValue]) == cutoff)
+                finished = true
+                return true
+            } onTimeout: { fatalError("A ready audio snapshot timed out") }
+            render()
+            waitForSave { finished }
+        }
+        precondition(ov_rack_snapshot_request() != 0)
+        var timedOut = false
+        monitor.start(timeout: 0.02, interval: 0.005, poll: { false }) {
+            timedOut = true
+        }
+        waitForSave { timedOut }
+        render()
+        var stale = ov_scene_config()
+        precondition(ov_rack_snapshot_read(&stale) != 0)
+        precondition(ov_rack_snapshot_request() != 0)
+        var recovered = false
+        monitor.start(interval: 0.005, poll: {
+            var captured = ov_scene_config()
+            recovered = ov_rack_snapshot_read(&captured) != 0
+            return recovered
+        }) {
+            fatalError("Scene save monitor did not recover after timeout")
+        }
+        render()
+        waitForSave { recovered }
+        print("PASS scene save completes without view refresh, saves again after edits, times out and recovers")
+    }
+
     static func rejects(_ value: RackSceneDocument) {
         do {
             try value.validate()
@@ -11,6 +64,66 @@ struct SceneChecks {
     }
 
     static func main() throws {
+        precondition(SynthParameter.allCases.count == Int(ov_parameter_count()))
+        precondition(SynthParameter.arpVelocity.audioUnitID == 64)
+        precondition(SynthParameter.mod1Source.audioUnitID == 72 && SynthParameter.legacyWheel.audioUnitID == 96)
+        precondition(ModulationMatrix.amountText(0) == "-100.0%")
+        precondition(ModulationMatrix.amountText(64) == "+0.0%")
+        precondition(ModulationMatrix.amountText(128) == "+100.0%")
+        let legacyMappings = Array(repeating: -1, count: 65)
+        let defaultMappings = SynthParameter.allCases.map { Int(ov_rack_default_cc(UInt32($0.rawValue))) }
+        let expandedMappings = ModulationMatrix.migrateLegacy(legacyMappings, defaults: defaultMappings)
+        precondition(expandedMappings.count == 202 && Array(expandedMappings.prefix(65)) == legacyMappings)
+        precondition(expandedMappings.dropFirst(65).allSatisfy { $0 == 255 })
+        precondition(ModulationMatrix.migrateLegacy(expandedMappings, defaults: defaultMappings) == expandedMappings)
+        precondition(ControllerRouting.sources.count == 132 && ControllerRouting.targetNames.count == 65)
+        precondition(ControllerRouting.parameter(0, 0).audioUnitID == 97)
+        precondition(ControllerRouting.parameter(15, 6).audioUnitID == 208)
+        precondition(ModulationMatrix.migrateLegacy(Array(defaultMappings.prefix(90)),
+            defaults: defaultMappings) == defaultMappings)
+        for slot in 0..<8 {
+            let p = ModulationMatrix.parameters(slot: slot)
+            precondition(p.source.rawValue == 65 + slot * 3)
+            precondition(p.destination.rawValue == 66 + slot * 3)
+            precondition(p.amount.rawValue == 67 + slot * 3)
+        }
+        var modulation = [Int](repeating: 0, count: SynthParameter.allCases.count)
+        func routes() -> [LFOModulationRoute] { LFOModulationRoute.routes { modulation[$0.rawValue] } }
+        precondition(routes().allSatisfy { $0.depth == 0 && $0.text.hasSuffix("OFF") && $0.warning == nil })
+        modulation[SynthParameter.lfoPitchTarget.rawValue] = 1
+        modulation[SynthParameter.lfoPitch.rawValue] = 73
+        modulation[SynthParameter.lfoPulseTarget.rawValue] = 2
+        modulation[SynthParameter.lfoPulseWidth.rawValue] = 64
+        modulation[SynthParameter.osc1Wave.rawValue] = 2
+        modulation[SynthParameter.osc2Wave.rawValue] = 1
+        modulation[SynthParameter.modWheelDepth.rawValue] = 99
+        modulation[SynthParameter.legacyWheel.rawValue] = 1
+        precondition(routes()[0].text == "LFO → OSC 2 PITCH  73/127")
+        precondition(routes()[1].warning == "OSC 2: enable PULSE wave for PWM")
+        precondition(routes()[4].depth == 99 && routes()[4].destination.contains("OSC 1+2 PITCH + CUTOFF"))
+        modulation[SynthParameter.legacyWheel.rawValue] = 0
+        precondition(routes()[4].depth == 0)
+        modulation[SynthParameter.osc2Wave.rawValue] = 3
+        precondition(routes()[1].warning == nil)
+        print("PASS LFO route labels: oscillator targets, independent wheel depth, OFF state and pulse-wave warnings")
+        precondition(lfoRateText(0) == "0.05 Hz")
+        precondition(lfoRateText(70) == "1.70 Hz")
+        for rate in 0...127 {
+            let text = lfoRateText(rate)
+            let shown = Double(text.replacingOccurrences(of: " Hz", with: ""))!
+            precondition(abs(shown - ov_lfo_rate_hz(UInt32(rate))) <= 0.005001)
+        }
+        print("PASS LFO displayed Hz tracks engine frequency within 0.005 Hz at every knob setting")
+        for note in 0...127 {
+            precondition(KeyboardZoneLayout.note(at: KeyboardZoneLayout.position(note)) == note)
+            if note > 0 {
+                precondition(KeyboardZoneLayout.position(note) > KeyboardZoneLayout.position(note - 1))
+            }
+        }
+        precondition(KeyboardZoneLayout.note(at: -1) == 0)
+        precondition(KeyboardZoneLayout.note(at: 2) == 127)
+        precondition(KeyboardZoneLayout.whiteIndex(127) == 74)
+        print("PASS full MIDI keyboard range geometry: 128 aligned marker positions and clamped drag endpoints")
         var locks = KeyboardLockState()
         locks.lock(60)
         precondition(locks.notes.isEmpty)
@@ -40,19 +153,62 @@ struct SceneChecks {
         precondition(!KeyboardLockState.isLockSwipe(startY: 40, endY: -10, keyHeight: 130, duration: 0.1))
         print("PASS keyboard key-lock: opt-in, independent notes, toggle release, clearing and fast downward boundary swipe")
         ov_init()
+        checkSaveMonitor()
         var instruments = (0..<16).map { RackInstrument.oberVave(slot: $0, channel: $0 + 1) }
         instruments[0].channel = 2
         instruments[0].lowNote = 24
         instruments[0].highNote = 64
         instruments[0].parameters[SynthParameter.cutoff.rawValue] = 87
+        instruments[0].parameters[SynthParameter.mod1Source.rawValue] = 4
+        instruments[0].parameters[SynthParameter.mod1Destination.rawValue] = 4
+        instruments[0].parameters[SynthParameter.mod1Amount.rawValue] = 128
+        instruments[0].parameters[SynthParameter.mod8Source.rawValue] = 7
+        instruments[0].parameters[SynthParameter.mod8Destination.rawValue] = 7
+        instruments[0].parameters[SynthParameter.mod8Amount.rawValue] = 0
+        instruments[0].parameters[SynthParameter.legacyWheel.rawValue] = 0
+        instruments[0].parameters[SynthParameter.ctl1Source.rawValue] = 2
+        instruments[0].parameters[SynthParameter.ctl1Target.rawValue] = SynthParameter.lfoRate.rawValue
+        instruments[0].parameters[SynthParameter.ctl1Mode.rawValue] = 1
+        instruments[0].parameters[SynthParameter.ctl1Depth.rawValue] = 96
+        instruments[0].parameters[SynthParameter.ctl1Override.rawValue] = 1
+        instruments[0].parameters[SynthParameter.ctl16Source.rawValue] = 131
         instruments[0].cc[SynthParameter.cutoff.rawValue] = 19
-        instruments[0].arpMode = 5; instruments[0].latchMode = 2
+        precondition(instruments.allSatisfy { $0.latchMode == 2 })
+        instruments[0].arpMode = 7; instruments[0].latchMode = 2
+        instruments[0].parameters[SynthParameter.arpMode.rawValue] = 7
+        instruments[1].arpMode = 6
+        instruments[1].parameters[SynthParameter.arpMode.rawValue] = 6
+        instruments[2].arpMode = 8
+        instruments[2].parameters[SynthParameter.arpMode.rawValue] = 8
         instruments[0].sync = true; instruments[0].grid = 4
         instruments[0].levelDB = -6.5; instruments[0].pan = -0.75
         var document = RackSceneDocument(name: "Split + Layer", instruments: instruments, tempo: 137,
             masterDB: -9, masterPan: 0.1, keyboardMask: 0x8003, selectedSlot: 7)
         try document.validate()
         let encoder = JSONEncoder()
+        var oldInstrument = RackInstrument.oberVave(slot: 0, channel: 1)
+        oldInstrument.parameters = Array(oldInstrument.parameters.prefix(65))
+        oldInstrument.cc = Array(oldInstrument.cc.prefix(65))
+        let migrated = try JSONDecoder().decode(RackInstrument.self, from: encoder.encode(oldInstrument))
+        try migrated.validate()
+        precondition(Array(migrated.parameters.prefix(65)) == oldInstrument.parameters)
+        for slot in 0..<8 {
+            let p = ModulationMatrix.parameters(slot: slot)
+            precondition(migrated.parameters[p.source.rawValue] == 0 && migrated.parameters[p.amount.rawValue] == 64)
+            precondition(migrated.cc[p.source.rawValue] == 255)
+        }
+        precondition(migrated.parameters[SynthParameter.legacyWheel.rawValue] == 1)
+        var matrixInstrument = instruments[0]
+        matrixInstrument.parameters = Array(matrixInstrument.parameters.prefix(90))
+        matrixInstrument.cc = Array(matrixInstrument.cc.prefix(90))
+        let migratedMatrix = try JSONDecoder().decode(RackInstrument.self, from: encoder.encode(matrixInstrument))
+        try migratedMatrix.validate()
+        precondition(Array(migratedMatrix.parameters.prefix(90)) == matrixInstrument.parameters)
+        for slot in 0..<16 {
+            precondition(migratedMatrix.parameters[ControllerRouting.parameter(slot, 0).rawValue] == 0)
+            precondition(migratedMatrix.parameters[ControllerRouting.parameter(slot, 5).rawValue] == 64)
+        }
+        print("PASS matrix signed controls, stable AU IDs and legacy 65-parameter scene migration without sound changes")
         encoder.outputFormatting = [.sortedKeys]
         let encoded = try encoder.encode(document)
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("obervave-scene-test-\(UUID())")

@@ -138,10 +138,6 @@ extension OberVaveModel {
         var captured = ov_scene_config()
         if ov_rack_snapshot_read(&captured) != 0 {
             if pendingSceneName != nil { finishSceneSave(captured) }
-        } else if pendingSceneName != nil,
-                  ProcessInfo.processInfo.systemUptime - sceneSaveStarted > 5 {
-            pendingSceneName = nil
-            errorMessage = "The audio engine did not provide a scene snapshot. Resume audio and try saving again."
         }
         guard pendingSceneName == nil else { return }
         let selectedArp = arpSelectedMode, selectedLatch = latchSelectedMode
@@ -290,12 +286,21 @@ extension OberVaveModel {
         }
         pendingSceneName = clean
         pendingSceneURL = asNew ? nil : sceneFileURL
-        sceneSaveStarted = ProcessInfo.processInfo.systemUptime
+        sceneSaveMonitor.start { [weak self] in
+            guard let self else { return true }
+            self.syncRackState()
+            return self.pendingSceneName == nil
+        } onTimeout: { [weak self] in
+            guard let self else { return }
+            self.pendingSceneName = nil
+            self.pendingSceneURL = nil
+            self.errorMessage = "The audio engine did not provide a scene snapshot. Resume audio and try saving again."
+        }
     }
 
     private func finishSceneSave(_ captured: ov_scene_config) {
         guard let name = pendingSceneName else { return }
-        defer { pendingSceneName = nil }
+        defer { pendingSceneName = nil; pendingSceneURL = nil }
         do {
             let slots = withUnsafeBytes(of: captured.slots) { raw in
                 Array(raw.bindMemory(to: ov_rack_slot.self))
@@ -393,6 +398,10 @@ struct RackSceneView: View {
                         Spacer()
                         Button("New Scene", role: .destructive) { confirmsNew = true }
                     }
+                    .buttonStyle(.bordered)
+                    if model.pendingSceneName != nil {
+                        ProgressView("Saving scene…")
+                    }
                     Button("Import Scene from Files") { importsScene = true }
                     if let status = model.sceneStatus { Text(status).foregroundStyle(.secondary) }
                     Text("Scenes store all sounds, MIDI channels, overlapping key zones, mixer levels, tempo and independent arpeggiator settings. Files are in On My iPad > OberVave > OberVave Scenes.")
@@ -482,6 +491,7 @@ private struct RackInstrumentEditor: View {
     let adding: Bool
     let onSave: (RackInstrument) -> Bool
     @Environment(\.dismiss) private var dismiss
+    @State private var learnsLow: Bool?
 
     var body: some View {
         NavigationStack {
@@ -494,10 +504,20 @@ private struct RackInstrumentEditor: View {
                     }
                 }
                 Section("Keyboard Zone (inclusive)") {
-                    Stepper("Low: \(rackNoteName(instrument.lowNote)) [\(instrument.lowNote)]",
-                            value: $instrument.lowNote, in: 0...instrument.highNote)
-                    Stepper("High: \(rackNoteName(instrument.highNote)) [\(instrument.highNote)]",
-                            value: $instrument.highNote, in: instrument.lowNote...127)
+                    KeyboardZoneRange(low: $instrument.lowNote, high: $instrument.highNote,
+                                      color: MIDIChannelColors.color(instrument.channel))
+                    HStack {
+                        Button(learnsLow == true ? "CANCEL LOW" : "LEARN LOW") { toggleLearn(low: true) }
+                            .tint(learnsLow == true ? .orange : .accentColor)
+                        Spacer()
+                        Button(learnsLow == false ? "CANCEL HIGH" : "LEARN HIGH") { toggleLearn(low: false) }
+                            .tint(learnsLow == false ? .orange : .accentColor)
+                    }
+                    .buttonStyle(.bordered)
+                    if learnsLow != nil {
+                        Text("Play a note on MIDI channel \(instrument.channel) to set the \(learnsLow == true ? "low" : "high") boundary.")
+                            .font(.footnote).foregroundStyle(.orange)
+                    }
                     Text("Instruments on the same channel may overlap to create layers. Notes outside the zone are ignored; sustain, pitch bend and CC follow the channel.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
@@ -516,7 +536,105 @@ private struct RackInstrumentEditor: View {
                     Button(adding ? "Add" : "Apply") { if onSave(instrument) { dismiss() } }
                 }
             }
+            .onReceive(Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()) { _ in
+                guard let low = learnsLow else { return }
+                let learned = ov_take_key_learn()
+                guard learned != 0 else { return }
+                setBoundary(Int(learned - 1), low: low)
+                learnsLow = nil
+            }
+            .onChange(of: instrument.channel) { _ in cancelLearn() }
+            .onDisappear { cancelLearn() }
         }
+    }
+
+    private func toggleLearn(low: Bool) {
+        if learnsLow == low { cancelLearn() }
+        else { learnsLow = low; ov_key_learn(UInt32(instrument.channel)) }
+    }
+
+    private func cancelLearn() {
+        learnsLow = nil
+        ov_key_learn(0)
+    }
+
+    private func setBoundary(_ note: Int, low: Bool) {
+        if low { instrument.lowNote = min(note, instrument.highNote) }
+        else { instrument.highNote = max(note, instrument.lowNote) }
+    }
+}
+
+private struct KeyboardZoneRange: View {
+    @Binding var low: Int
+    @Binding var high: Int
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text("LOW  \(rackNoteName(low)) [\(low)]")
+                Spacer()
+                Text("HIGH  \(rackNoteName(high)) [\(high)]")
+            }
+            .font(.caption.monospaced())
+            GeometryReader { geometry in
+                let width = max(1, geometry.size.width - 28)
+                VStack(spacing: 8) {
+                    Canvas { context, size in
+                        let unit = size.width / 75
+                        for black in [false, true] {
+                            for note in 0...127 where KeyboardZoneLayout.isBlack(note) == black {
+                                let x = Double(KeyboardZoneLayout.whiteIndex(note)) * unit
+                                let rect = CGRect(x: black ? x - unit * 0.32 : x,
+                                    y: 0, width: black ? unit * 0.64 : unit,
+                                    height: black ? size.height * 0.62 : size.height)
+                                let path = Path(rect)
+                                let active = (low...high).contains(note)
+                                context.fill(path, with: .color(active ? color.opacity(black ? 0.65 : 1) : black ? .black : .white))
+                                context.stroke(path, with: .color(.black.opacity(0.6)), lineWidth: 0.5)
+                            }
+                        }
+                    }
+                    .frame(height: 48)
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.secondary.opacity(0.25)).frame(height: 8)
+                        let start = KeyboardZoneLayout.position(low) * width
+                        let end = KeyboardZoneLayout.position(high) * width
+                        Capsule().fill(color).frame(width: max(2, end - start), height: 8).offset(x: start)
+                        handle(low: true, width: width)
+                        handle(low: false, width: width)
+                    }
+                    .frame(height: 44)
+                }
+                .padding(.horizontal, 14)
+            }
+            .frame(height: 100)
+            .coordinateSpace(name: "zoneRange")
+        }
+    }
+
+    private func handle(low isLow: Bool, width: CGFloat) -> some View {
+        let note = isLow ? low : high
+        return Image(systemName: isLow ? "arrowtriangle.right.fill" : "arrowtriangle.left.fill")
+            .font(.system(size: 16, weight: .bold))
+            .foregroundStyle(color)
+            .frame(width: 28, height: 24)
+            .background(Color.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 5))
+            .contentShape(Rectangle())
+            .offset(x: KeyboardZoneLayout.position(note) * width - 14, y: isLow ? -10 : 10)
+            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("zoneRange"))
+                .onChanged { value in
+                    let note = KeyboardZoneLayout.note(at: (value.location.x - 14) / width)
+                    if isLow { low = min(note, high) }
+                    else { high = max(note, low) }
+                })
+            .accessibilityLabel(isLow ? "Low note" : "High note")
+            .accessibilityValue(rackNoteName(note))
+            .accessibilityAdjustableAction { direction in
+                let delta = direction == .increment ? 1 : -1
+                if isLow { low = max(0, min(high, low + delta)) }
+                else { high = min(127, max(low, high + delta)) }
+            }
     }
 }
 

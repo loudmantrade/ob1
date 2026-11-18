@@ -22,11 +22,142 @@ and have been removed. The original emulator's MIT notice is preserved in
 
 ## Scenes and multitimbral rack
 
+LFO Rate displays Hz to two decimal places, calculated from the DSP phase
+increment table and the 44.1 kHz / 16-sample control rate. The parameter's
+0-127 scale is nonlinear; correcting the readout does not change saved sounds.
+All LFO controls are on **LFO / MOD**, not split between OB-1 and MORE:
+waveform, rate, delay, phase, pitch/PWM depths and oscillator targets,
+cutoff/volume depths, Legacy Wheel depth/switch, and the modulation matrix.
+The controls at the top use the parameter's 0-127 scale (not a linear physical
+percentage); the matrix below uses signed percentages. The page scrolls as
+one unit and the control panels wrap to fit the available width.
+PWM warns when a targeted oscillator has no pulse wave enabled.
+With **Legacy Wheel** enabled (the default), Mod Wheel/CC1 independently adds
+the same LFO to both oscillators' pitch and filter cutoff; it is not a master
+scaling control for PWM or tremolo.
+
+### Modulation matrix
+
+The matrix on **LFO / MOD** provides eight independent routes per instrument. Each row has
+editable SOURCE, DESTINATION and signed DEPTH (-100% to +100%). ZERO centers
+the amount; RESET clears that row; CLEAR MATRIX clears all rows after confirmation
+without changing the original patch modulation or the Legacy Wheel switch.
+
+Sources: LFO, Mod Wheel/CC1, Velocity, Aftertouch, Filter Env, Amp Env, and
+LFO x Wheel. Aftertouch uses channel pressure, with polyphonic key pressure
+overriding it for the corresponding note. MIDI sources follow the instrument's
+channel; raw CC1 remains a source even if its knob mapping is removed.
+LFO (including per-voice phase/delay) is bipolar; wheel, velocity and envelopes
+are unipolar. LFO x Wheel scales the LFO by the physical/on-screen wheel.
+
+Any source can target OSC 1/2 pitch (24 semitones per route at full depth),
+OSC 1/2 PWM (about 47 percentage points of pulse width), cutoff (96 semitones),
+resonance (127 parameter units), volume (100% of envelope-scaled gain) or pan
+(64 pan units). Negative depth reverses the effect. Routes add before clamping
+to the destination's safe range. Volume modulation cannot bypass the amp
+envelope; PWM requires a pulse wave and shows a warning otherwise.
+Multiple routes may share a destination.
+
+Existing dedicated LFO/envelope/velocity controls remain additive. Turn off
+**LEGACY WHEEL -> PITCH + CUTOFF** when assigning CC1 freely to avoid the old
+fixed vibrato/filter sweep. The original LFO-depth knobs still apply.
+
+All routes and Legacy Wheel are saved in user presets and scenes. Old
+65-parameter scenes/presets initialize the new routes to OFF with neutral
+depth and keep Legacy Wheel ON, preserving their prior sound. New matrix
+parameters have no automatic CC assignments. Scene JSON arrays now have 202
+parameters/CC entries; old application versions cannot load new scenes.
+
+### Controllers
+
+**CONTROLLERS** provides 16 routes per instrument, saved in presets and scenes.
+Inputs are CC0-127, 14-bit Pitch Bend, Channel Aftertouch and Poly Aftertouch.
+Targets are all 65 original sound parameters, including envelopes, effects,
+LFO and arpeggiator settings (not master mixer or routing configuration).
+
+- **VALUE** writes the parameter through **MIN/MAX**, expressed as percentages
+  of its full range. MIN greater than MAX reverses the response. VALUE changes
+  are stored as the new base parameter values.
+- **MOD** adds **DEPTH** (-100% to +100% of the full target range) without
+  overwriting the base value. ZERO centers depth; disabling the route removes
+  the offset. Multiple offsets sum before clamping. CC/pressure are unipolar;
+  Pitch Bend is bipolar with an exact center. Discrete outputs use integer
+  parameter steps. Envelope time/sustain changes follow the engine's normal
+  segment/note update rules.
+- Poly pressure MOD is per-note for voice parameters; shared effects, LFO and
+  arpeggiator parameters use the last received pressure. Poly VALUE always
+  writes the shared base parameter. A new Note On resets that note's pressure.
+- **OVERRIDE** explicitly bypasses the input's old assignments/native action.
+  For CC1 it also suppresses legacy vibrato/cutoff, but raw wheel/pressure
+  remain available to matrix/custom routes. Without OVERRIDE, mappings coexist.
+  This includes service CCs (bank, sustain, volume and panic/reset); use with
+  care. Notes, Program Change, transport and the on-screen PANIC are unchanged.
+- **LEARN** listens for the first controller on this instrument's MIDI channel,
+  ignoring notes. It cancels after 15 seconds, on navigation/instrument selection
+  changes, or with CANCEL. RESET resets one route; RESET ROUTES confirms before
+  clearing all routes, preserving sound values and existing CC assignments.
+
+Example: CC1 / MOD WHEEL -> LFO Rate, MOD, DEPTH +25%, OVERRIDE on. The wheel
+then raises rate by up to a quarter of its parameter range, without the original
+vibrato/cutoff action. Use VALUE with a narrower MIN/MAX to set absolute limits.
+The existing per-preset CC assignments are also editable in this tab.
+Old 65- and 90-parameter scenes/presets receive disabled controller routes.
+
+In **MIDI Connections > Sustain Pedal**, **Invert Sustain polarity** supports
+pedals/keyboards that send CC64 0 on press and 127 on release. Normal is the
+default. After polarity correction, values 96-127 arm pedal-down and 0-31
+release it; 32-95 retain the prior state (hysteresis). An UP without a preceding
+DOWN does not clear Latch. State is independent per MIDI channel.
+The last incoming raw CC64, MIDI channel and
+interpreted DOWN/UP state are shown live, even with the connection sheet open.
+Latch must survive DOWN and clears released notes only on DOWN-to-UP.
+The polarity setting is saved on this iPad, applies to all channels, and is
+not part of scenes or the AU. After changing it with notes released, cycle
+the pedal once; the new interpretation applies to subsequent pedal messages.
+
+The arpeggiator mode menu includes **CHORD**, **HOLD RETRIGGER** and
+**HOLD LEGATO** in addition to
+Up/Down/Up-Down/Random/Played. Chord triggers all chord notes together on
+each rhythmic step, following Division, Gate, Octaves and first-note Master
+Sync. Polyphony remains limited by the patch's voice mode and eight voices.
+Both Hold modes play the chord continuously, without Gate/Division retriggers or octave
+expansion. Its first chord follows first-note Master Sync; subsequent Note On
+events immediately replace released notes with the keys physically down at
+that moment plus the new key, even when Latch is Add. With Latch or Sustain
+enabled, released keys continue sounding until a new key, Latch Off or Sustain
+release; physically held keys remain. Without either, keys release normally.
+Latch Off clears released Hold notes even if the pedal is still down.
+**Hold Retrigger** restarts all chord notes on every chord update.
+**Hold Legato** releases only removed notes and triggers only added notes;
+common notes keep their voices, oscillator/filter state and envelopes, including
+on Sustain release or Latch Off when some keys are still physically held.
+The usual eight-voice limit and patch voice mode still apply.
+The original saved Hold mode retains value 7 and means Hold Retrigger;
+Hold Legato is appended as value 8. Both persist in scenes and user presets.
+The default remembered Latch mode is **Replace** (Latch is not enabled
+automatically). Explicitly saved Add selections remain Add. Existing arp mode
+numbers are unchanged; Chord and Hold are appended and saved with scenes.
+
+Saving waits for an audio-thread snapshot using a model-owned timer that
+continues while the scene editor is presented. A progress indicator is shown
+while editing is briefly disabled. Success or file-write failure unlocks the
+editor; if audio does not provide a snapshot within five seconds, an explicit
+error is reported and editing is restored.
+
 The top **Scenes & Instruments** button opens the rack. A scene contains zero
 to **16 independent synth instances**. **Add Instrument** allocates an OberVave
 instance, initially on the first unused MIDI channel. Before adding it, choose
 its name, channel (1-16), inclusive low/high MIDI notes, mixer level and pan.
 **Edit** changes those settings later; **Remove** unloads that instance.
+The keyboard zone editor shows the full MIDI keyboard (0-127) above a range
+bar. Drag LOW/HIGH markers to the corresponding key positions; both endpoints
+are inclusive and cannot cross. The channel color highlights the selected
+range. **LEARN LOW / LEARN HIGH** arms a one-shot learn for the next external
+Note On on that instrument's MIDI channel, including notes outside its current
+zone. Note Off, zero-velocity Note On and on-screen keys do not trigger learn.
+The note still reaches normal synth routing. Tap the active learn button to
+cancel; closing the editor or changing channel also cancels it. Changes remain
+a draft until **Add / Apply**; **Cancel** preserves the original routing.
 Multiple instances may use the same channel and overlapping note ranges:
 outside the overlap they form a split, inside it they form a layer.
 Changing channel/range releases that instance's old held notes to avoid stuck
@@ -34,7 +165,7 @@ notes. Sustain, pitch bend, bank/program changes and CC maps follow the MIDI
 channel; note ranges filter Note On, not controllers or needed Note Off.
 
 Select an instrument in the top menu (or tap its name in the rack) to edit it
-with the existing OB-1/MORE/EFFECTS panel and preset library. Each instance has
+with the OB-1/MORE/EFFECTS/LFO / MOD/CONTROLLERS panel and preset library. Each instance has
 its own eight voices, FX buffers, sound, CC map, ARP/Latch state, division,
 Master Sync and Start Grid. The master clock, MIDI connections/input buffer,
 audio device, latency compensation and master output are shared. Updating or

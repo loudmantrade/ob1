@@ -1,6 +1,51 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
 
+enum KeyboardZoneLayout {
+    static func isBlack(_ note: Int) -> Bool { [1, 3, 6, 8, 10].contains(note % 12) }
+
+    static func whiteIndex(_ note: Int) -> Int {
+        note / 12 * 7 + [0, 1, 1, 2, 2, 3, 4, 4, 5, 5, 6, 6][note % 12]
+    }
+
+    static func position(_ note: Int) -> Double {
+        (Double(whiteIndex(note)) + (isBlack(note) ? 0 : 0.5)) / 75
+    }
+
+    static func note(at position: Double) -> Int {
+        var nearest = 0
+        for note in 1...127 where abs(Self.position(note) - position) < abs(Self.position(nearest) - position) {
+            nearest = note
+        }
+        return nearest
+    }
+}
+
+final class SceneSaveMonitor {
+    private var timer: Timer?
+
+    func start(timeout: TimeInterval = 5, interval: TimeInterval = 0.05,
+               poll: @escaping () -> Bool, onTimeout: @escaping () -> Void) {
+        timer?.invalidate()
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            if poll() {
+                timer.invalidate()
+                self.timer = nil
+            } else if ProcessInfo.processInfo.systemUptime >= deadline {
+                timer.invalidate()
+                self.timer = nil
+                onTimeout()
+            }
+        }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    deinit { timer?.invalidate() }
+}
+
 struct RackInstrument: Codable, Equatable, Identifiable {
     var id: Int { slot }
     var slot: Int
@@ -18,7 +63,7 @@ struct RackInstrument: Codable, Equatable, Identifiable {
     var sync = false
     var grid = 2
     var arpMode = 1
-    var latchMode = 1
+    var latchMode = 2
 
     static func oberVave(slot: Int, channel: Int) -> RackInstrument {
         RackInstrument(slot: slot, name: "OberVave \(slot + 1)", channel: channel,
@@ -33,7 +78,7 @@ struct RackInstrument: Codable, Equatable, Identifiable {
               (1...16).contains(channel), (0...127).contains(lowNote),
               (lowNote...127).contains(highNote), levelDB.isFinite, (-48...0).contains(levelDB),
               pan.isFinite, (-1...1).contains(pan), (0..<768).contains(programIndex),
-              (0...5).contains(grid), (1...5).contains(arpMode), (1...2).contains(latchMode),
+              (0...5).contains(grid), (1...8).contains(arpMode), (1...2).contains(latchMode),
               parameters.count == Int(ov_parameter_count()), cc.count == parameters.count else {
             throw SceneError.invalid("Invalid instrument configuration or unsupported engine.")
         }
@@ -69,6 +114,34 @@ struct RackInstrument: Codable, Equatable, Identifiable {
 enum SceneError: LocalizedError {
     case invalid(String)
     var errorDescription: String? { switch self { case .invalid(let message): message } }
+}
+
+extension RackInstrument {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        slot = try c.decode(Int.self, forKey: .slot)
+        name = try c.decode(String.self, forKey: .name)
+        engine = try c.decode(Int.self, forKey: .engine)
+        channel = try c.decode(Int.self, forKey: .channel)
+        lowNote = try c.decode(Int.self, forKey: .lowNote)
+        highNote = try c.decode(Int.self, forKey: .highNote)
+        levelDB = try c.decode(Double.self, forKey: .levelDB)
+        pan = try c.decode(Double.self, forKey: .pan)
+        muted = try c.decode(Bool.self, forKey: .muted)
+        programIndex = try c.decode(Int.self, forKey: .programIndex)
+        parameters = try c.decode([Int].self, forKey: .parameters)
+        cc = try c.decode([Int].self, forKey: .cc)
+        sync = try c.decode(Bool.self, forKey: .sync)
+        grid = try c.decode(Int.self, forKey: .grid)
+        arpMode = try c.decode(Int.self, forKey: .arpMode)
+        latchMode = try c.decode(Int.self, forKey: .latchMode)
+        if [65, 90].contains(parameters.count) && cc.count == parameters.count {
+            for p in parameters.count..<Int(ov_parameter_count()) {
+                parameters.append(Int(ov_rack_factory_parameter(17, UInt32(p))))
+                cc.append(Int(ov_rack_default_cc(UInt32(p))))
+            }
+        }
+    }
 }
 
 struct RackSceneDocument: Codable {

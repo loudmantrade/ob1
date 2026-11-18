@@ -27,7 +27,7 @@ std::array<uint8_t, NPARAM> defaultCCs()
     for (uint32_t p = 0; p < NPARAM; ++p)
         if (PDEF[p].cc) result[p] = PDEF[p].cc;
     uint32_t next = 20;
-    for (uint32_t p = 0; p < NPARAM; ++p) {
+    for (uint32_t p = 0; p < P_MOD1_SRC; ++p) {
         if (PDEF[p].cc) continue;
         while (next < 120 &&
                (next == 64 || std::find(result.begin(), result.end(), next) != result.end())) ++next;
@@ -107,6 +107,8 @@ struct SynthEngine {
     virtual void parameter(uint32_t index, uint8_t value) = 0;
     virtual uint8_t parameter(uint32_t index) const = 0;
     virtual void midi(uint8_t status, uint8_t d1, uint8_t d2) = 0;
+    virtual void controllerInput(uint8_t status, uint8_t d1, uint8_t d2) = 0;
+    virtual bool controllerOverride(uint32_t source) const = 0;
     virtual void stop() = 0;
     virtual void sync(bool enabled, uint32_t grid) = 0;
     virtual void render(const Timing& timing, int32_t* output) = 0;
@@ -122,12 +124,11 @@ struct OberVaveEngine final : SynthEngine {
     }
     void parameter(uint32_t p, uint8_t v) override { dsp.apply_parameter(p, v); }
     uint8_t parameter(uint32_t p) const override { return dsp.live_p[0].v[p]; }
+    void controllerInput(uint8_t s, uint8_t d1, uint8_t d2) override { dsp.controller_input(s, d1, d2); }
+    bool controllerOverride(uint32_t source) const override { return dsp.controller_override(source); }
     void midi(uint8_t s, uint8_t d1, uint8_t d2) override
     {
-        if ((s & 0xF0) == 0xB0) {
-            if (d1 == 7) dsp.ctl_cc7 = d2;
-            if (d1 == 64) dsp.ctl_sustain = d2 >= 64;
-        } else dsp.midi(s, d1, d2);
+        dsp.midi(s, d1, d2, false, false);
         dsp.engine_events();
     }
     void stop() override { dsp.engine_transport_stop(); }
@@ -143,7 +144,7 @@ struct OberVaveEngine final : SynthEngine {
         dsp.phaseAdvance = timing.advance;
         // Firmware adds its dry signal to the output; each instance needs a clean bus.
         std::fill_n(out, CTL * 2, 0);
-        dsp.engine_audio(out, CTL);
+        dsp.render_audio(out, CTL);
     }
     uint32_t voiceLevel(uint32_t voice) const override { return std::clamp(int32_t(dsp.ui_vlevel[voice]), 0, 32767); }
 };
@@ -214,6 +215,10 @@ ov_scene_config capturedScene {};
 std::atomic<uint32_t> captureState {0};
 std::array<std::atomic<uint32_t>, 128> keyboardHeld {};
 uint8_t midiStatus = 0, midiData[2] {}, midiCount = 0;
+std::atomic<uint32_t> keyLearn {0};
+std::atomic<uint32_t> controllerLearnSlot {0}, controllerLearned {0};
+std::atomic<uint32_t> sustainInverted {0}, sustainInput {0};
+std::atomic<uint32_t> sustainDownChannels {0};
 std::mutex parserMutex;
 
 enum class Kind { MIDI, Parameter, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
@@ -290,6 +295,7 @@ void setProgram(uint32_t slot, uint32_t index)
 void stopAll()
 {
     for (auto& inst : scene->slots) if (inst) inst->stop();
+    sustainDownChannels.store(0);
     stopGeneration.fetch_add(1, std::memory_order_relaxed);
 }
 void midi(uint8_t status, uint8_t d1, uint8_t d2)
@@ -304,9 +310,26 @@ void midi(uint8_t status, uint8_t d1, uint8_t d2)
         return;
     }
     const uint32_t channel = status & 15, kind = status & 0xF0;
+    uint32_t pedalValue = d2;
+    if (kind == 0xB0 && d1 == 64) {
+        const uint32_t value = sustainInverted.load() ? 127 - d2 : d2;
+        const uint32_t bit = 1u << channel;
+        if (value >= 96) sustainDownChannels.fetch_or(bit);
+        else if (value <= 31) sustainDownChannels.fetch_and(~bit);
+        pedalValue = sustainDownChannels.load() & bit ? 127 : 0;
+    }
     for (uint32_t slot = 0; slot < capacity; ++slot) {
         auto* inst = scene->slots[slot].get();
         if (!inst || inst->config.channel != channel + 1) continue;
+        const auto source = Engine::controller_source(status, d1);
+        const bool overridden = inst->engine->controllerOverride(source);
+        if (source) {
+            uint32_t armed = slot + 1;
+            if (controllerLearnSlot.compare_exchange_strong(armed, 0)) controllerLearned.store(source);
+            inst->engine->controllerInput(status, d1, d2);
+            for (uint32_t p = 0; p < CONTROLLER_TARGETS; ++p)
+                inst->config.parameters[p] = inst->engine->parameter(p);
+        }
         if (kind == 0x80 || kind == 0x90) {
             auto& held = inst->activeNotes[channel][d1];
             const bool on = kind == 0x90 && d2;
@@ -327,20 +350,23 @@ void midi(uint8_t status, uint8_t d1, uint8_t d2)
                 snapshots[slot].learned.store(((inst->learn + 1) << 8) | (d1 + 1));
                 inst->learn = -1;
             }
-            if (d1 == 0) inst->bankMSB = d2;
-            if (d1 == 32) inst->bankLSB = d2;
+            if (d1 == 0 && !overridden) inst->bankMSB = d2;
+            if (d1 == 32 && !overridden) inst->bankLSB = d2;
             // Handle performance controllers once; the per-patch map is applied below.
-            if (d1 == 7 || d1 == 64 || d1 == 120 || d1 == 123) {
-                if (d1 == 120 || d1 == 123) inst->stop();
-                else inst->engine->midi(status, d1, d2);
+            if (d1 == 1 || d1 == 7 || d1 == 64 || d1 == 120 || d1 == 121 || d1 == 123) {
+                if ((d1 == 120 || d1 == 123) && !overridden) inst->stop();
+                else inst->engine->midi(status, d1, d1 == 64 ? pedalValue : d2);
             }
-            for (uint32_t p = 0; p < NPARAM; ++p) if (inst->config.cc[p] == d1) {
+            if (!overridden) for (uint32_t p = 0; p < NPARAM; ++p) if (inst->config.cc[p] == d1) {
                 const auto value = (uint32_t(d2) * PDEF[p].max + 63) / 127;
                 inst->config.parameters[p] = value;
                 inst->engine->parameter(p, value);
             }
             publish(slot);
-        } else inst->engine->midi(status, d1, d2);
+        } else {
+            inst->engine->midi(status, d1, d2);
+            publish(slot);
+        }
     }
 }
 void apply(const Command& c)
@@ -509,10 +535,16 @@ void command(Kind kind, uint32_t a = 0, uint32_t b = 0)
     c.b = b;
     enqueue(c);
 }
-void send(uint32_t status, uint32_t d1, uint32_t d2, uint32_t frame, bool timed)
+void send(uint32_t status, uint32_t d1, uint32_t d2, uint32_t frame, bool timed, bool external = true)
 {
     if (!((status >= 0x80 && status < 0xF0 && d1 <= 127 && d2 <= 127) ||
           status == 0xF8 || status == 0xFA || status == 0xFB || status == 0xFC)) return;
+    if ((status & 0xF0) == 0xB0 && d1 == 64)
+        sustainInput.store(0x10000 | ((status & 15) << 8) | d2);
+    if (external && (status & 0xF0) == 0x90 && d2 != 0) {
+        uint32_t channel = (status & 15) + 1;
+        keyLearn.compare_exchange_strong(channel, 0x100 | d1);
+    }
     Command c;
     c.a = status; c.b = d1; c.c = d2; c.due = frame; c.scheduled = timed;
     enqueue(c);
@@ -641,6 +673,7 @@ uint32_t ov_rack_take_error(void) { return rack::error.exchange(0); }
 uint32_t ov_program_count(void) { return 768; }
 uint32_t ov_parameter_count(void) { return rack::NPARAM; }
 uint32_t ov_parameter_max(uint32_t p) { return p < rack::NPARAM ? rack::PDEF[p].max : 0; }
+double ov_lfo_rate_hz(uint32_t value) { return obervave::lfo_rate_hz(value); }
 uint32_t ov_parameter_value(uint32_t p)
 { return p < rack::NPARAM ? rack::snapshots[rack::selected.load()].parameters[p].load() : 0; }
 uint32_t ov_parameter_cc(uint32_t p)
@@ -702,7 +735,7 @@ void ov_keyboard_note_on(uint32_t note, uint32_t velocity, uint32_t channels)
     if (note > 127 || velocity < 1 || velocity > 127) return;
     const auto mask = channels & 0xFFFF;
     rack::keyboardHeld[note].fetch_or(mask);
-    for (uint32_t ch = 0; ch < 16; ++ch) if (mask & (1u << ch)) ov_midi_message(0x90 | ch, note, velocity);
+    for (uint32_t ch = 0; ch < 16; ++ch) if (mask & (1u << ch)) rack::send(0x90 | ch, note, velocity, 0, false, false);
 }
 void ov_note_off(uint32_t note)
 {
@@ -720,6 +753,22 @@ void ov_keyboard_control(uint32_t status, uint32_t d1, uint32_t d2)
     for (uint32_t ch = 0; ch < 16; ++ch) if (mask & (1u << ch)) ov_midi_message((status & 0xF0) | ch, d1, d2);
 }
 void ov_all_notes_off(void) { rack::panic.store(1); }
+void ov_set_sustain_inverted(uint32_t inverted) { rack::sustainInverted.store(inverted != 0); }
+uint32_t ov_sustain_input(void) { return rack::sustainInput.load(); }
+uint32_t ov_sustain_down_channels(void) { return rack::sustainDownChannels.load(); }
+void ov_controller_learn(uint32_t armed)
+{
+    rack::controllerLearned.store(0);
+    rack::controllerLearnSlot.store(armed ? rack::selected.load() + 1 : 0);
+}
+uint32_t ov_controller_learned(void) { return rack::controllerLearned.exchange(0); }
+void ov_key_learn(uint32_t channel) { rack::keyLearn.store(channel <= 16 ? channel : 0); }
+uint32_t ov_take_key_learn(void)
+{
+    auto value = rack::keyLearn.load();
+    if (value < 0x100 || !rack::keyLearn.compare_exchange_strong(value, 0)) return 0;
+    return (value & 127) + 1;
+}
 static void midiByte(uint32_t value, uint32_t frame, bool timed)
 {
     using namespace rack;

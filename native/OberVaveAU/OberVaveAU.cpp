@@ -7,13 +7,18 @@
 #include "Engine.h"
 #include "UIBridge.h"
 
+extern "C" double ov_lfo_rate_hz(UInt32 value) { return obervave::lfo_rate_hz(value); }
+
 namespace {
 using namespace obervave;
-constexpr UInt32 kProgram = NPARAM, kMaster = NPARAM + 1, kPan = NPARAM + 2;
-constexpr UInt32 kSync = NPARAM + 3, kGrid = NPARAM + 4;
-constexpr UInt32 kArpSelection = NPARAM + 5, kLatchSelection = NPARAM + 6, kCount = NPARAM + 7;
+constexpr UInt32 kProgram = kOberVaveProgram, kMaster = kOberVaveMaster, kPan = kOberVavePan;
+constexpr UInt32 kSync = kOberVaveSync, kGrid = kOberVaveGrid;
+constexpr UInt32 kArpSelection = kOberVaveArpSelection, kLatchSelection = kOberVaveLatchSelection;
+constexpr UInt32 kCount = kOberVaveParameterCount;
+constexpr UInt32 parameterID(UInt32 p) { return p < P_MOD1_SRC ? p : p + 7; }
+constexpr UInt32 parameterIndex(UInt32 id) { return id < kProgram ? id : id >= kOberVaveModulationBase ? id - 7 : NPARAM; }
 constexpr UInt32 kPrograms = NFACT + NVIBE;
-static_assert(kProgram == kOberVaveProgram && kCount == kOberVaveParameterCount);
+static_assert(P_MOD1_SRC == kProgram && parameterID(NPARAM - 1) + 1 == kCount);
 constexpr unsigned kTaps = 32, kPhases = 1024;
 constexpr double kResampleDelay = 16.0;
 const char* const names[] = {
@@ -32,7 +37,19 @@ const char* const names[] = {
     "Chorus Rate", "Chorus Depth", "Chorus Mix", "Delay Time", "Delay Feedback", "Delay Tone", "Delay Mix",
     "Reverb Size", "Reverb Damping", "Reverb Pre-delay", "Reverb Mix", "Arp Latch", "Arp Velocity",
     "Factory Program", "Master Volume", "Master Pan", "Arp Master Sync", "Arp Start Grid",
-    "Arp Selected Mode", "Latch Selected Mode"
+    "Arp Selected Mode", "Latch Selected Mode",
+#define MOD_NAMES(n) "Mod " #n " Source", "Mod " #n " Destination", "Mod " #n " Amount",
+    MOD_NAMES(1) MOD_NAMES(2) MOD_NAMES(3) MOD_NAMES(4)
+    MOD_NAMES(5) MOD_NAMES(6) MOD_NAMES(7) MOD_NAMES(8)
+#undef MOD_NAMES
+    "Legacy Wheel Pitch and Cutoff",
+#define CTL_NAMES(n) "Controller " #n " Input", "Controller " #n " Target", "Controller " #n " Mode", \
+    "Controller " #n " Min", "Controller " #n " Max", "Controller " #n " Depth", "Controller " #n " Override",
+    CTL_NAMES(1) CTL_NAMES(2) CTL_NAMES(3) CTL_NAMES(4)
+    CTL_NAMES(5) CTL_NAMES(6) CTL_NAMES(7) CTL_NAMES(8)
+    CTL_NAMES(9) CTL_NAMES(10) CTL_NAMES(11) CTL_NAMES(12)
+    CTL_NAMES(13) CTL_NAMES(14) CTL_NAMES(15) CTL_NAMES(16)
+#undef CTL_NAMES
 };
 static_assert(sizeof(names) / sizeof(*names) == kCount);
 
@@ -49,8 +66,8 @@ public:
         Globals()->UseIndexedParameters(kCount);
         for (UInt32 i = 0; i < kCount; ++i) store(i, 0);
         store(kArpSelection, A_UP);
-        store(kLatchSelection, 1);
-        for (UInt32 i = 0; i < NPARAM; ++i) store(i, PDEF[i].def);
+        store(kLatchSelection, 2);
+        for (UInt32 i = 0; i < NPARAM; ++i) store(parameterID(i), PDEF[i].def);
         loadProgram(17);
         store(kMaster, 1);
         store(kSync, 1);
@@ -61,12 +78,14 @@ public:
     OSStatus GetPropertyInfo(AudioUnitPropertyID id, AudioUnitScope scope,
                              AudioUnitElement bus, UInt32& size, bool& writable) override
     {
-        if (id == kAudioUnitProperty_CocoaUI || id == kOberVaveMeters || id == kOberVaveKeyboard) {
+        if (id == kAudioUnitProperty_CocoaUI || id == kOberVaveMeters || id == kOberVaveKeyboard ||
+            id == kOberVaveControllerLearn || id == kOberVavePanic) {
             if (scope != kAudioUnitScope_Global) return kAudioUnitErr_InvalidScope;
             if (bus != 0) return kAudioUnitErr_InvalidElement;
             size = id == kAudioUnitProperty_CocoaUI ? sizeof(AudioUnitCocoaViewInfo) :
-                id == kOberVaveMeters ? sizeof(OberVaveMeters) : sizeof(OberVaveKeyboardEvent);
-            writable = id == kOberVaveKeyboard;
+                id == kOberVaveMeters ? sizeof(OberVaveMeters) :
+                id == kOberVaveControllerLearn || id == kOberVavePanic ? sizeof(UInt32) : sizeof(OberVaveKeyboardEvent);
+            writable = id != kAudioUnitProperty_CocoaUI && id != kOberVaveMeters;
             return noErr;
         }
         return MusicDeviceBase::GetPropertyInfo(id, scope, bus, size, writable);
@@ -75,6 +94,14 @@ public:
                          void* data) override
     {
         if (scope == kAudioUnitScope_Global && bus == 0) {
+            if (id == kOberVavePanic) {
+                *static_cast<UInt32*>(data) = panicRequested.load();
+                return noErr;
+            }
+            if (id == kOberVaveControllerLearn) {
+                *static_cast<UInt32*>(data) = learnedController.exchange(0);
+                return noErr;
+            }
             if (id == kAudioUnitProperty_CocoaUI) return OberVaveCocoaViewInfo(data);
             if (id == kOberVaveMeters) {
                 auto& meter = *static_cast<OberVaveMeters*>(data);
@@ -91,6 +118,19 @@ public:
     OSStatus SetProperty(AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitElement bus,
                          const void* data, UInt32 size) override
     {
+        if (id == kOberVaveControllerLearn || id == kOberVavePanic) {
+            if (scope != kAudioUnitScope_Global) return kAudioUnitErr_InvalidScope;
+            if (bus != 0) return kAudioUnitErr_InvalidElement;
+            if (size != sizeof(UInt32) || *static_cast<const UInt32*>(data) > 1)
+                return kAudioUnitErr_InvalidPropertyValue;
+            if (id == kOberVavePanic) {
+                panicRequested.store(*static_cast<const UInt32*>(data));
+            } else {
+                learnedController.store(0);
+                learnController.store(*static_cast<const UInt32*>(data));
+            }
+            return noErr;
+        }
         if (id != kOberVaveKeyboard)
             return MusicDeviceBase::SetProperty(id, scope, bus, data, size);
         if (scope != kAudioUnitScope_Global) return kAudioUnitErr_InvalidScope;
@@ -139,9 +179,10 @@ public:
         info.unit = kAudioUnitParameterUnit_Indexed;
         info.minValue = minimum(id);
         info.maxValue = maximum(id);
-        info.defaultValue = id < NPARAM ? PDEF[id].def :
-            id == kProgram ? 17 : id == kGrid ? 2 :
-            id == kMaster || id == kSync || id == kArpSelection || id == kLatchSelection ? 1 : 0;
+        const auto p = parameterIndex(id);
+        info.defaultValue = p < NPARAM ? PDEF[p].def :
+            id == kProgram ? 17 : id == kGrid || id == kLatchSelection ? 2 :
+            id == kMaster || id == kSync || id == kArpSelection ? 1 : 0;
         if (id == kMaster) info.unit = kAudioUnitParameterUnit_LinearGain;
         if (id == kPan) info.unit = kAudioUnitParameterUnit_Pan;
         return noErr;
@@ -192,8 +233,8 @@ public:
         else if (id == kArpSelection) { options = ARP_NAME + 1; count = NARPMODE - 1; }
         else if (id == kLatchSelection) { options = LATCH_NAME + 1; count = 2; }
         else if (id == kGrid) { options = grid; count = 6; }
-        else if (id < NPARAM) {
-            switch (PDEF[id].kind) {
+        else if (parameterIndex(id) < NPARAM) {
+            switch (PDEF[parameterIndex(id)].kind) {
             case K_WAVE: options = WAVE_NAME; count = 4; break;
             case K_FTYPE: options = FTYPE_NAME; count = NFTYPE; break;
             case K_MODE: options = MODE_NAME; count = 4; break;
@@ -204,6 +245,8 @@ public:
             case K_TO: options = TO_NAME; count = 3; break;
             case K_DDIV: options = DDIV_NAME; count = NDDIV; break;
             case K_LATCH: options = LATCH_NAME; count = 3; break;
+            case K_MSRC: options = MOD_SOURCE_NAME; count = NMODSRC; break;
+            case K_MDST: options = MOD_DEST_NAME; count = NMODDST; break;
             default: return kAudioUnitErr_InvalidProperty;
             }
         } else return kAudioUnitErr_InvalidProperty;
@@ -257,13 +300,14 @@ public:
             }
         }
         store(kArpSelection, A_UP);
-        store(kLatchSelection, 1);
+        store(kLatchSelection, 2);
+        for (UInt32 p = P_MOD1_SRC; p < NPARAM; ++p) store(parameterID(p), PDEF[p].def);
         const auto status = MusicDeviceBase::RestoreState(state);
         if (status != noErr) return status;
         if (!hasArpSelection) Globals()->SetParameter(kArpSelection,
             std::max(1.f, Globals()->GetParameter(P_ARP_MODE)));
         if (!hasLatchSelection) Globals()->SetParameter(kLatchSelection,
-            std::max(1.f, Globals()->GetParameter(P_ARP_LATCH)));
+            Globals()->GetParameter(P_ARP_LATCH) > 0 ? Globals()->GetParameter(P_ARP_LATCH) : 2.f);
         for (UInt32 id = 0; id < kCount; ++id) {
             const auto value = Globals()->GetParameter(id);
             if (!std::isfinite(value) || value < minimum(id) || value > maximum(id))
@@ -318,7 +362,7 @@ public:
         auto* left = static_cast<float*>(buffers.mBuffers[0].mData);
         auto* right = static_cast<float*>(buffers.mBuffers[1].mData);
         for (UInt32 i = 0; i < NPARAM; ++i)
-            engine->apply_parameter(i, UInt32(values[i].load(std::memory_order_relaxed)));
+            engine->apply_parameter(i, UInt32(values[parameterID(i)].load(std::memory_order_relaxed)));
         auto read = keyRead.load(std::memory_order_relaxed);
         const auto write = keyWrite.load(std::memory_order_acquire);
         for (; read != write; ++read) {
@@ -393,6 +437,8 @@ private:
     std::array<Event, 2048> events{};
     std::array<OberVaveKeyboardEvent, 256> keyboard{};
     std::atomic<uint32_t> keyRead{0}, keyWrite{0};
+    std::atomic<UInt32> learnController{0}, learnedController{0};
+    std::atomic<UInt32> panicRequested{0};
     std::atomic<float> peaks[2]{}, voiceLevels[8]{}, displayTempo{120};
     std::atomic<UInt32> displayHostClock{0};
     size_t eventCount = 0;
@@ -404,7 +450,8 @@ private:
 
     static float maximum(UInt32 id)
     {
-        return id < NPARAM ? PDEF[id].max : id == kProgram ? kPrograms - 1 :
+        const auto p = parameterIndex(id);
+        return p < NPARAM ? PDEF[p].max : id == kProgram ? kPrograms - 1 :
             id == kArpSelection ? NARPMODE - 1 : id == kLatchSelection ? 2 : id == kGrid ? 5 : 1;
     }
     static float minimum(UInt32 id)
@@ -422,7 +469,7 @@ private:
     {
         patch_t patch{};
         patch_from_factory(&patch, &factory(index));
-        for (UInt32 i = 0; i < NPARAM; ++i) store(i, patch.v[i]);
+        for (UInt32 i = 0; i < NPARAM; ++i) store(parameterID(i), patch.v[i]);
         store(kProgram, index);
     }
     void resetEngine()
@@ -437,18 +484,23 @@ private:
     }
     void generateBlock()
     {
+        if (panicRequested.exchange(0)) {
+            engine->ctl_panic = 1;
+            eventCount = 0;
+        }
         size_t used = 0;
         while (used < eventCount && events[used].frame <= generated) {
             const auto event = events[used++];
+            const auto source = Engine::controller_source(event.status, event.d1);
+            if (source && learnController.exchange(0)) learnedController.store(source);
             if ((event.status & 0xF0) == 0xC0 && event.d1 < kPrograms) {
                 loadProgram(event.d1);
-                for (UInt32 p = 0; p < NPARAM; ++p) engine->apply_parameter(p, UInt32(values[p].load()));
+                for (UInt32 p = 0; p < NPARAM; ++p) engine->apply_parameter(p, UInt32(values[parameterID(p)].load()));
                 engine->parts_off(0);
             } else {
                 engine->midi(event.status, event.d1, event.d2);
-                if ((event.status & 0xF0) == 0xB0)
-                    for (UInt32 p = 0; p < NPARAM; ++p)
-                        if (PDEF[p].cc && PDEF[p].cc == event.d1) store(p, engine->live_p[0].v[p]);
+                if (source) for (UInt32 p = 0; p < CONTROLLER_TARGETS; ++p)
+                    store(parameterID(p), engine->live_p[0].v[p]);
             }
         }
         if (used) {
@@ -456,7 +508,7 @@ private:
             eventCount -= used;
         }
         int32_t block[CTL * 2]{};
-        engine->engine_audio(block, CTL);
+        engine->render_audio(block, CTL);
         for (unsigned i = 0; i < CTL; ++i) {
             history[0][(generated + i) & 63] = block[2 * i] / 32768.f;
             history[1][(generated + i) & 63] = block[2 * i + 1] / 32768.f;
