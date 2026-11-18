@@ -102,7 +102,7 @@ feed their own notes through the saved ARP mode.
   everything before that boundary as intro. Count-in instead begins its full
   count on the next bar, then starts the body. Stopping before the body begins
   cancels the take without creating/replacing the cell.
-- Each column header sets **fixed length (1–256 quarter notes)** or **Free
+- Each column header sets **fixed length (1–64 bars of 4/4)** or **Free
   length**, saved with that instrument in the scene. Fixed recording finishes
   and starts playback automatically at the chosen length. Free recording
   grows by **one complete 4/4 bar** whenever the current bar fills, with **no
@@ -110,6 +110,9 @@ feed their own notes through the saved ARP mode.
   current bar's end; the red ring and square persist only until that deadline.
   Repeated taps do not push that deadline later. Fixed length remains a cap:
   a requested bar end never extends past it, even for non-bar-sized limits.
+  Existing scenes keep their exact stored length (including fractional bars);
+  changing the length control selects whole bars. The pattern editor also
+  expresses loop length in bars; individual note timing stays in beats.
   Manual completion skips
   re-playing the just-performed intro; later launches can play it normally.
 - The editor provides quarter-beat step input, an editable note list with

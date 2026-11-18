@@ -115,6 +115,15 @@ struct SceneChecks {
         oldFields.removeValue(forKey: "recordBeats")
         let migrated = try JSONDecoder().decode(RackInstrument.self, from: JSONSerialization.data(withJSONObject: oldFields))
         precondition(migrated.recordBeats == 4)
+        var barLength = migrated
+        for bars in [0, 1, 2, 8, 64] {
+            barLength.setRecordBars(bars)
+            precondition(barLength.recordBeats == bars * 4 && barLength.recordBars == Double(bars))
+            let roundtrip = try JSONDecoder().decode(RackInstrument.self, from: JSONEncoder().encode(barLength))
+            precondition(roundtrip.recordBars == Double(bars))
+        }
+        barLength.recordBeats = 13
+        precondition(barLength.recordBars == 3.25)
         document.instruments[0].recordBeats = 0
         document.instruments[1].recordBeats = 13
         var pattern = SequencerPattern(slot: 0, row: 3, name: "Pickup")

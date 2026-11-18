@@ -87,6 +87,12 @@ struct RackInstrument: Codable, Equatable, Identifiable {
     var arpMode = 1
     var latchMode = 2
     var recordBeats = 4
+    var recordBars: Double { Double(recordBeats) / 4 }
+
+    mutating func setRecordBars(_ bars: Int) {
+        precondition((0...64).contains(bars))
+        recordBeats = bars * 4
+    }
 
     static func oberVave(slot: Int, channel: Int) -> RackInstrument {
         RackInstrument(slot: slot, name: "OberVave \(slot + 1)", channel: channel,

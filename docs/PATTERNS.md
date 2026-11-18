@@ -176,7 +176,12 @@ deadline; later chord inputs never re-anchor the clock while waiting for ARP.
 next bar, recording the pre-boundary region as intro. `CountIn` counts 4 or 8
 quarter-note clicks; on a playing scene counting starts at its next bar and
 the whole count is retained. The metronome is synthesized on the shared audio
-clock. Column settings select fixed quarters or free length. Free takes have
+clock. Column settings select fixed length or Free. Fixed length is
+expressed in whole 4/4 bars (1–64); the compatible scene/API field
+still stores quarters (bars × 4). Existing fractional-bar scenes are displayed
+without changing their timing until explicitly edited. The pattern editor
+also uses bars for loop length, retaining beat units for individual notes.
+Free takes have
 no 256-quarter deadline; their displayed length grows in complete 3,840-tick
 bars. A second tap requests the current body's bar end instead of immediately
 finalizing. The recorder keeps capturing until that immutable deadline and

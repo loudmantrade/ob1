@@ -560,11 +560,11 @@ extension OberVaveModel {
             errorMessage = "Could not apply the pattern tap."
         }
     }
-    func setRecordLength(slot: Int, beats: Int) {
-        guard (0...256).contains(beats), let index = instruments.firstIndex(where: { $0.slot == slot }) else {
+    func setRecordLength(slot: Int, bars: Int) {
+        guard (0...64).contains(bars), let index = instruments.firstIndex(where: { $0.slot == slot }) else {
             errorMessage = "Invalid recording length."; return
         }
-        instruments[index].recordBeats = beats
+        instruments[index].setRecordBars(bars)
     }
     func stopColumn(_ slot: Int, arp: Bool) {
         if ov_seq_stop(UInt32(slot), arp ? 1 : 0) == 0 { errorMessage = "Could not stop the instrument.";  }
@@ -642,30 +642,31 @@ private struct SequencerRecordLengthControl: View {
     @ObservedObject var model: OberVaveModel
     let slot: Int
     @State private var showsLength = false
-    private var beats: Int { model.instruments.first { $0.slot == slot }?.recordBeats ?? 4 }
+    private var bars: Double { model.instruments.first { $0.slot == slot }?.recordBars ?? 1 }
+    private var lengthLabel: String { bars.formatted(.number.precision(.fractionLength(0...2))) + (bars == 1 ? " bar" : " bars") }
 
     var body: some View {
-        Button(beats == 0 ? "FREE LENGTH" : "\(beats) beats") { showsLength = true }
+        Button(bars == 0 ? "FREE LENGTH" : lengthLabel) { showsLength = true }
             .font(.system(size: 10, design: .monospaced))
             .accessibilityLabel("Recording length for instrument \(slot + 1)")
             .popover(isPresented: $showsLength, arrowEdge: .top) {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Recording length").font(.headline)
                     Picker("Length", selection: Binding(
-                        get: { beats == 0 },
-                        set: { model.setRecordLength(slot: slot, beats: $0 ? 0 : 4) }
+                        get: { bars == 0 },
+                        set: { model.setRecordLength(slot: slot, bars: $0 ? 0 : 1) }
                     )) {
                         Text("Fixed").tag(false)
                         Text("Free").tag(true)
                     }.pickerStyle(.segmented)
-                    if beats > 0 {
-                        Stepper("\(beats) quarter notes", value: Binding(
-                            get: { max(1, beats) }, set: { model.setRecordLength(slot: slot, beats: $0) }
-                        ), in: 1...256)
+                    if bars > 0 {
+                        Stepper(lengthLabel, value: Binding(
+                            get: { max(1, Int(bars.rounded(.up))) }, set: { model.setRecordLength(slot: slot, bars: $0) }
+                        ), in: 1...64)
                     }
-                    Text(beats == 0
-                        ? "Length grows one bar at a time. Tap again to finish at the end of the bar and play. There is no 256-beat automatic cutoff."
-                        : "Recording ends automatically after \(beats) beats and starts the loop. Tap earlier to finish at the end of the current bar, without exceeding this limit.")
+                    Text(bars == 0
+                        ? "Length grows one bar at a time. Tap again to finish at the end of the bar and play. There is no automatic length cutoff."
+                        : "Recording ends automatically after \(lengthLabel) and starts the loop. One bar is four quarter notes. Tap earlier to finish at the end of the current bar.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(20).frame(width: 300)
@@ -1156,9 +1157,9 @@ private struct SequencerPatternEditor: View {
                 Section("Pattern") {
                     TextField("Name", text: $pattern.name)
                     Stepper(
-                        "Length: \(Double(pattern.length) / 960, specifier: "%.2f") beats",
-                        value: Binding(get: { max(1, Int(pattern.length / 960)) }, set: { pattern.length = Int64($0) * 960 }),
-                        in: 1...Int(SequencerPattern.maxTicks / 960))
+                        "Length: \(Double(pattern.length) / 3840, specifier: "%.2f") bars",
+                        value: Binding(get: { max(1, Int((pattern.length + 3839) / 3840)) }, set: { pattern.length = Int64($0) * 3840 }),
+                        in: 1...Int(SequencerPattern.maxTicks / 3840))
                     Toggle("Loop", isOn: $pattern.loop)
                     Toggle("Play intro once", isOn: $pattern.introEnabled)
                     Stepper(
