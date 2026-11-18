@@ -105,6 +105,15 @@ independent meter, pan, Mute/Solo and ARP Stop. Editing includes steps and a
 numeric note list; full piano roll and external MIDI routing remain separate
 increments. Scheduling retains the existing 16-sample synthesis resolution.
 
+The pad recording workflow now starts directly on **+** and completes/loops on
+the second tap. Header Record mode selects Wait for note, Count-in (4/8 audible
+ticks) or Immediate; playing scenes supply bar-aligned pickup boundaries,
+while Count-in always counts complete bars. Per-instrument fixed/free lengths
+persist in scenes. Free recording has no 256-quarter automatic cutoff;
+version 2 JSON patterns support extended tick lengths and migrate old cells.
+Publication and automatic playback happen on audio into preallocated storage;
+the UI completion mailbox is a mirror, not part of playback timing.
+
 6. Add a validated, bounded pattern model: integer PPQ ticks (960 per quarter),
    stable note IDs, original timing plus optional quantization, length/loop,
    velocity and explicit logical destination context.

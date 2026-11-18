@@ -15,10 +15,11 @@ JSON fields. See [the standalone guide](../ios/OberVave/README.md#seq-pattern-la
   notes remain separate records, including notes with identical timing.
 - Musical positions/durations use signed 64-bit integer ticks, **960 PPQ**,
   not floating point beats or audio/UI timers.
-- Pattern length is 1 through **245,760 ticks** (256 quarters, or 64 bars
-  of 4/4). Every note starts in `[-intro, length)`; intro is 0–3,840 ticks.
+- Pattern length/duration is 1 through **2^38 ticks**. Fixed recording presets
+  remain 1–256 quarters; free recording does not stop at that preset limit.
+  Every note starts in `[-intro, length)`; intro is 0–11,520 ticks.
   Negative starts are one-shot pickup notes; `introEnabled=false` skips them
-  without deleting the data. Duration is 1 through 245,760
+  without deleting the data. Duration is 1 through 2^38
   ticks, independently of pattern length: a note can cross a loop boundary
   or extend over multiple iterations of a short pattern.
 - The model does not assume 4/4 for scheduling; "64 bars" only illustrates
@@ -94,7 +95,7 @@ Half-grid ties round forward. Percentage rounding is nearest tick, with ties
 away from the original position. A start cannot quantize past the pattern's
 last tick: if its nearest grid is outside the pattern, the last grid strictly
 inside the pattern is used. Thus a near-end note never wraps unexpectedly to
-the beginning or disappears. Derived duration is clamped to 1…245,760 ticks,
+the beginning or disappears. Derived duration is clamped to 1…2^38 ticks,
 so quantizing very short notes never yields zero/negative Note Ons.
 Long notes keep their end past the pattern boundary; ends are not loop-wrapped.
 
@@ -119,7 +120,8 @@ earlier working patterns: restore validates the entire snapshot before copying.
 
 These are not a serialized struct ABI: **never write raw C++ object bytes**
 to a scene/file. Padding, bool representation and endianness are not a format.
-The standalone codec encodes named fields and a version with fixed 960 PPQ,
+The standalone codec uses pattern schema version 2 with fixed 960 PPQ,
+explicitly migrates version 1, and rejects unsupported versions. It
 decodes validated types off audio, and preserves originals and explicit stage.
 Logical routing is pinned to the cell's column. Each whole-cell publication is
 a new document lifetime; its next editing ID is reconstructed above all saved
@@ -150,11 +152,25 @@ clip continues until its replacement's pickup begins.
 Output events bypass ARP without changing saved parameters and share bounded
 pitch ownership with generated ARP events. Recording output observes actual
 ARP releases and direct releases after Sustain, not precomputed gate times.
-Recording finalizes open notes on completion/Stop, sorts originals and
-publishes through a one-result mailbox; the UI validates/publishes the result
-as an immutable cell. Overflow reports an error and does not publish a
+Recording finalizes open notes on completion/Stop and sorts originals. A
+control-thread-preallocated destination receives the recorder's validated,
+canonical data on audio, replacing the immutable cell without allocation or
+quadratic snapshot validation. Automatic/manual completion queues main-loop
+playback on that same audio boundary, skipping pickup already performed.
+The one-result mailbox only mirrors the saved/cancelled/failed result to the UI;
+UI polling never re-publishes or restarts the take. Overflow reports an error and does not publish a
 success-shaped partial take. Scheduling is at 16-sample control resolution,
 not per-sample voice synthesis. No UI timer schedules or records events.
+
+`WaitForNote` arms without a deadline until the first routed live Note On;
+`Immediate` starts on arm when stopped. During scene playback both join the
+next bar, recording the pre-boundary region as intro. `CountIn` counts 4 or 8
+quarter-note clicks; on a playing scene counting starts at its next bar and
+the whole count is retained. The metronome is synthesized on the shared audio
+clock. Column settings select fixed quarters or free length. Free takes have
+no 256-quarter deadline; manual completion sets the body length from elapsed
+ticks and safely represents notes pressed on the finishing boundary. Stopping
+before the body cancels the take. Global/column Stop never auto-starts it.
 
 ## Verification
 

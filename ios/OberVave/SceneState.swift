@@ -64,6 +64,7 @@ struct RackInstrument: Codable, Equatable, Identifiable {
     var grid = 2
     var arpMode = 1
     var latchMode = 2
+    var recordBeats = 4
 
     static func oberVave(slot: Int, channel: Int) -> RackInstrument {
         RackInstrument(slot: slot, name: "OberVave \(slot + 1)", channel: channel,
@@ -79,6 +80,7 @@ struct RackInstrument: Codable, Equatable, Identifiable {
               (lowNote...127).contains(highNote), levelDB.isFinite, (-48...0).contains(levelDB),
               pan.isFinite, (-1...1).contains(pan), (0..<768).contains(programIndex),
               (0...5).contains(grid), (1...8).contains(arpMode), (1...2).contains(latchMode),
+              (0...256).contains(recordBeats),
               parameters.count == Int(ov_parameter_count()), cc.count == parameters.count else {
             throw SceneError.invalid("Invalid instrument configuration or unsupported engine.")
         }
@@ -135,6 +137,7 @@ extension RackInstrument {
         grid = try c.decode(Int.self, forKey: .grid)
         arpMode = try c.decode(Int.self, forKey: .arpMode)
         latchMode = try c.decode(Int.self, forKey: .latchMode)
+        recordBeats = try c.decodeIfPresent(Int.self, forKey: .recordBeats) ?? 4
         if [65, 90].contains(parameters.count) && cc.count == parameters.count {
             for p in parameters.count..<Int(ov_parameter_count()) {
                 parameters.append(Int(ov_rack_factory_parameter(17, UInt32(p))))
@@ -184,6 +187,17 @@ struct RackSceneDocument: Codable {
     }
 }
 
+enum SequencerRecordMode: Int, CaseIterable {
+    case waitForNote, countIn, immediate
+    var title: String {
+        switch self {
+        case .waitForNote: "Wait for note"
+        case .countIn: "Count-in"
+        case .immediate: "Immediate"
+        }
+    }
+}
+
 struct SequencerNote: Codable, Equatable, Identifiable {
     var id: UInt64
     var start: Int64
@@ -194,8 +208,9 @@ struct SequencerNote: Codable, Equatable, Identifiable {
 }
 
 struct SequencerPattern: Codable, Equatable, Identifiable {
+    static let maxTicks: Int64 = 1 << 38
     var id: Int { slot * 8 + row }
-    var version = 1
+    var version = 2
     var slot: Int
     var row: Int
     var name: String
@@ -207,13 +222,13 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
     var notes: [SequencerNote] = []
 
     func validate() throws {
-        guard version == 1, (0..<16).contains(slot), (0..<8).contains(row),
-              (1...245760).contains(length), (0...3840).contains(intro),
+        guard version == 2, (0..<16).contains(slot), (0..<8).contains(row),
+              (1...Self.maxTicks).contains(length), (0...11520).contains(intro),
               (0...3840).contains(quantize), !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               name.utf8.count <= 96, !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
               notes.count <= 1024, Set(notes.map(\.id)).count == notes.count,
               notes.allSatisfy({ $0.id > 0 && $0.id < UInt64.max && $0.start >= -intro && $0.start < length &&
-                  (1...245760).contains($0.duration) && (0...127).contains($0.pitch) && (1...127).contains($0.velocity) }) else {
+                  (1...Self.maxTicks).contains($0.duration) && (0...127).contains($0.pitch) && (1...127).contains($0.velocity) }) else {
             throw SceneError.invalid("Invalid pattern name, timing, note ID, capacity or MIDI value.")
         }
     }
@@ -238,6 +253,26 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
     }
 
     init(slot: Int, row: Int, name: String) { self.slot = slot; self.row = row; self.name = name }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let incomingVersion = try c.decode(Int.self, forKey: .version)
+        guard incomingVersion == 1 || incomingVersion == 2 else {
+            throw SceneError.invalid("This pattern version is not supported.")
+        }
+        slot = try c.decode(Int.self, forKey: .slot)
+        row = try c.decode(Int.self, forKey: .row)
+        name = try c.decode(String.self, forKey: .name)
+        length = try c.decode(Int64.self, forKey: .length)
+        intro = try c.decode(Int64.self, forKey: .intro)
+        introEnabled = try c.decode(Bool.self, forKey: .introEnabled)
+        loop = try c.decode(Bool.self, forKey: .loop)
+        quantize = try c.decode(Int.self, forKey: .quantize)
+        notes = try c.decode([SequencerNote].self, forKey: .notes)
+        if incomingVersion == 1 && (length > 245760 || notes.contains { $0.duration > 245760 } || intro > 3840) {
+            throw SceneError.invalid("Invalid version 1 pattern timing.")
+        }
+        try validate()
+    }
     init(core clip: ov_seq_clip) {
         slot = Int(clip.slot); row = Int(clip.row)
         name = withUnsafeBytes(of: clip.name) { raw in

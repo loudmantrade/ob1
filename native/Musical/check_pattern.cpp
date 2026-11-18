@@ -153,7 +153,7 @@ static void checkQuantization()
     NoteID id;
     assert(pattern->add({}, id) == ok);
     uint64_t compared = 0;
-    for (const Tick length : {1, 13, 3871, int(maxPatternTicks)}) {
+    for (const Tick length : std::array<Tick, 4> {1, 13, 3871, maxPatternTicks}) {
         PatternNote note {};
         assert(pattern->edit(id, note) == ok && pattern->length(length) == ok);
         for (const Tick grid : {0, 1, 2, 3, 5, 7, 60, 80, 120, 160, 240, 320, 480, 640, 960, 1920, 3840})

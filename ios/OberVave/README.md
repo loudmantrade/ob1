@@ -67,24 +67,43 @@ the corresponding column. Launch options are **FREE**, next **BEAT**, and next
 **BAR** (currently 4/4). Playback uses the audio-owned shared tempo/MIDI clock
 with 16-sample control resolution; UI refresh timers do not schedule music.
 
-- Tap an empty pad to create a pattern; tap a filled pad to launch it.
+- Empty pads show only **+**. Tap to arm/start recording, then tap the same pad
+  again to finish and immediately play the loop. A filled pad launches its loop.
+  Finishing and playback start are audio-owned, without waiting for UI polling.
   Hold a pad for edit, duplicate, delete, recording and column Stop.
-  Active pads show progress; queued pads show a clock.
+  Hold an empty pad for the manual editor. Active pads show progress; queued
+  pads show a clock; recording pads show WAIT, count-in beats or REC.
+- The header **Record mode** button selects **Wait for note**, **Count-in** or
+  **Immediate**, plus Input/Output capture. Wait for note arms indefinitely on a
+  stopped scene; the first live Note On starts beat one. Immediate starts beat
+  one at the tap. Count-in counts **1 or 2 complete 4/4 bars** with **4 or 8
+  audible metronome clicks**; playing during the count becomes one-shot intro.
+  When a scene is playing, Wait for note/Immediate join its next bar and record
+  everything before that boundary as intro. Count-in instead begins its full
+  count on the next bar, then starts the body. Stopping before the body begins
+  cancels the take without creating/replacing the cell.
+- Each column header sets **fixed length (1–256 quarter notes)** or **Free
+  length**, saved with that instrument in the scene. Fixed recording finishes
+  and starts playback automatically at the chosen length. Free recording
+  continues until the second pad tap, with **no automatic 256-beat cutoff**;
+  the elapsed body length becomes the loop length. Manual completion skips
+  re-playing the just-performed intro; later launches can play it normally.
 - The editor provides quarter-beat step input, an editable note list with
   pitch/velocity/start/duration, loop length and non-destructive playback
   quantization. It is not a full piano-roll editor. Changes to an active cell
   stop its previous playback safely; tap the pad to launch the edited version.
-- The **intro marker** reserves up to four beats before zero. Negative-start
+- The **intro marker** reserves up to twelve beats before zero (two full
+  count-in bars plus up to one bar waiting for scene alignment). Negative-start
   notes play once before the main loop, not on subsequent iterations.
   A quantized launch chooses a downbeat allowing the whole intro to play.
   Row launches share the same downbeat even with different intro lengths.
   Copies retain intro data; **Disable Intro** skips it without deleting notes.
-- Hold a pad, choose **Record Loop** or **Record Intro + Loop**, then confirm
-  **Record Output** (actual ARP/direct-note events, replay bypasses ARP) or
-  **Record Input** (replay through the current ARP). Existing playback continues
-  for monitoring. Recording replaces that cell's notes with one loop beginning
-  at the next bar; intro mode also captures performance between arming and that
-  bar. **FINISH REC**, column Stop and global Stop finalize open notes early.
+- **Output** captures actual ARP/direct-note events and replays without another
+  ARP pass; **Input** captures performance for replay through the current ARP.
+  Existing playback continues for monitoring. Hold a filled pad and confirm
+  **Record Again** to replace its notes using the current Record mode.
+  **FINISH REC** also finishes/plays the take; column Stop and global Stop
+  finalize it without auto-starting playback.
   Only one cell records at a time; playback is independent on every column.
 - Every column has a volume fader, independent peak meter, pan knob (drag
   vertically, double-tap to center), **M**, **S**, and **ARP Stop**. Mute/Solo
@@ -96,8 +115,12 @@ with 16-sample control resolution; UI refresh timers do not schedule music.
   save/load. Scene sounds and all cells are validated/prepared off audio and
   replaced together by one audio command; invalid cells leave the old scene.
 
-Limits: eight cells per instrument, 1,024 notes per cell, 256 beats per loop,
-960 PPQ; the basic step strip shows the first 256 steps. Notes elsewhere and
+Limits: eight cells per instrument, 1,024 notes per cell and 960 PPQ.
+Pattern version 2 extends length/duration to **2^38 ticks**, allowing free takes
+beyond 256 beats; version 1 patterns migrate explicitly. The tick bound is a
+representational safety guard, not a Free-length auto-stop. Note capacity
+overflow fails explicitly and never publishes a partial successful take.
+The basic step strip shows the first 256 steps. Notes elsewhere and
 negative intro notes remain editable in the note list/numeric fields.
 Playback has 256 simultaneous note owners per column; capacity failures are
 reported and use the existing safe-stop path, never silent note eviction.

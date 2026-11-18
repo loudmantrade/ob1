@@ -12,7 +12,7 @@ namespace ob1::music {
 using PatternID = uint32_t;
 constexpr uint32_t patternVersion = 1, patternCapacity = 16, patternNoteCapacity = 1024;
 constexpr uint32_t patternNameBytes = 96;
-constexpr Tick maxPatternTicks = ticksPerQuarter * 256;
+constexpr Tick maxPatternTicks = INT64_C(1) << 38;
 
 enum class PatternError : uint8_t {
     None, InvalidVersion, InvalidName, InvalidLength, InvalidQuantization,
@@ -111,7 +111,7 @@ inline PatternError validatePattern(const PatternData& data)
         return PatternError::InvalidName;
     if (!data.id) return PatternError::InvalidCounter;
     if (data.length < 1 || data.length > maxPatternTicks) return PatternError::InvalidLength;
-    if (data.intro < 0 || data.intro > ticksPerQuarter * 4) return PatternError::InvalidLength;
+    if (data.intro < 0 || data.intro > ticksPerQuarter * 12) return PatternError::InvalidLength;
     const auto quantization = validatePatternQuantization(data.quantization);
     if (quantization != PatternError::None) return quantization;
     if (data.count > patternNoteCapacity) return PatternError::Full;
@@ -249,6 +249,7 @@ public:
 
 private:
     friend class PatternStore;
+    friend class ClipRecorder;
     PatternData data_ {};
 
     uint32_t find(NoteID id) const

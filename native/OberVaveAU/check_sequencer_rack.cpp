@@ -154,7 +154,125 @@ static void checkRecording()
     std::puts("PASS production recording: actual output Off after Sustain release, negative pickup, mailbox roundtrip, input recording, Stop finalizes gates and output replay bypasses saved ARP mode");
 }
 
+static void checkPadRecording()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
+    auto result = std::make_unique<ov_seq_clip>();
+    auto take = [&](uint32_t expected) {
+        assert(ov_seq_record_ready() && ov_seq_record_result() == expected);
+        assert(ov_seq_read_record(result.get()) && !ov_seq_record_ready());
+    };
+    auto stop = [&] { assert(ov_rack_stop_all()); render(); };
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_arm(0, 0, 0, 1, 1, 1)); render();
+    assert(ov_seq_record_phase() == 1 && ov_seq_recording_slot() == 0 && !rack::clips[0][0]);
+    render(rack::clock.length() * 8);
+    assert(ov_seq_record_phase() == 1 && !ov_seq_record_ready());
+    // Neither a pattern on another column nor its generated output is a first live note.
+    auto backing = std::make_unique<ov_seq_clip>(clip(1, 0));
+    backing->notes[0].pitch = 48;
+    assert(ov_seq_set_clip(backing.get())); assert(ov_seq_launch(1, 0, 0)); render();
+    assert(ov_seq_record_phase() == 1);
+    ov_note_on(60, 100); render();
+    assert(ov_seq_record_phase() == 3 && rack::recorder.origin % (3840 * music::tickUnit) == 0);
+    render(1024); ov_note_off(60); render();
+    render(rack::clock.length());
+    assert(ov_seq_recording_slot() == -1 && ov_seq_active(0) == 0);
+    assert(rack::clips[0][0] && rack::clips[0][0]->pattern.data().notes[0].start == 0);
+    assert(rack::clips[0][0]->pattern.data().length == 960);
+    // Autoplay happens on audio before the UI even reads its completion mailbox.
+    assert(rack::players[0].clip == &rack::clips[0][0]->pattern);
+    take(1);
+    assert(result->count == 1 && result->notes[0].start == 0 && result->length == 960);
+    stop();
+
+    assert(ov_seq_arm(0, 1, 0, 1, 0, 1)); render();
+    assert(ov_seq_finish_record()); render();
+    take(2);
+    assert(!rack::clips[0][1] && ov_seq_active(0) == -1);
+    assert(ov_seq_arm(0, 1, 2, 1, 0, 1)); render();
+    assert(ov_seq_record_phase() == 3 && rack::recorder.freeLength);
+    ov_note_on(64, 100); render(2048); ov_note_off(64); render(2048);
+    assert(ov_seq_finish_record()); render();
+    assert(ov_seq_active(0) == 1 && rack::clips[0][1]);
+    take(1);
+    assert(result->length > 100 && result->length < 960 && result->intro == 0);
+    const auto length = result->length;
+    assert(rack::players[0].clip->data().length == length);
+    stop();
+    assert(ov_seq_arm(0, 5, 2, 1, 0, 1)); render();
+    ov_note_on(64, 100); render();
+    // Advance the same audio clocks without synthesizing five minutes of unchanged DSP.
+    const auto elapsed = rack::clock.length() * 600;
+    rack::musicalPosition.advance(elapsed, rack::clock.length());
+    rack::clock.frame += elapsed; rack::processedFrames += elapsed;
+    render();
+    assert(ov_seq_record_phase() == 3 && !ov_seq_record_ready());
+    const auto overnight = FS * 60u * 60u * 15u;
+    rack::musicalPosition.advance(overnight, rack::clock.length());
+    rack::clock.frame += overnight; rack::processedFrames += overnight;
+    const auto beforeWrap = rack::musicalPosition.value;
+    render();
+    assert(rack::musicalPosition.value >= beforeWrap && ov_seq_record_phase() == 3);
+    ov_note_off(64); render();
+    assert(ov_seq_finish_record()); render();
+    take(1);
+    assert(result->length >= 600 * 960 && result->notes[0].duration > 256 * 960);
+    assert(ov_seq_active(0) == 5);
+    stop();
+
+    // Count-in on a stopped scene emits audible clicks without any playing notes.
+    assert(ov_seq_arm(0, 2, 1, 2, 1, 1)); render();
+    assert(ov_seq_record_phase() == 2 && ov_seq_record_remaining() == 8);
+    assert(rack::clickFrames > 0);
+    double clickEnergy = 0;
+    for (uint32_t i = 0; i < CTL; ++i) clickEnergy += std::abs(rack::output[0][i]);
+    assert(clickEnergy > 0);
+    ov_note_on(67, 100); render(2048); ov_note_off(67); render();
+    assert(rack::recorder.data.intro > 3840 && rack::recorder.data.notes[0].start < 0);
+    const auto body = rack::recorder.origin;
+    while (rack::musicalPosition.value < body) render();
+    assert(ov_seq_record_phase() == 3 && ov_seq_record_remaining() == 0);
+    ov_note_on(72, 100); render(1024); ov_note_off(72); render();
+    render(rack::clock.length());
+    take(1);
+    assert(ov_seq_active(0) == 2 && result->count == 2 && result->intro > 3840);
+    assert(result->notes[0].start < 0 && result->notes[1].start >= 0);
+    // The just-recorded pickup is retained, but is not repeated by automatic looping.
+    for (const auto& note : rack::players[0].active) if (note.used) assert(note.on.data1 != 67);
+    stop();
+
+    for (uint32_t mode : {0u, 2u, 1u}) {
+        assert(ov_seq_launch(1, 0, 0)); render();
+        assert(ov_seq_arm(0, 3, mode, 1, 1, 0)); render();
+        const auto bar = 3840 * music::tickUnit;
+        assert(!rack::recorder.waiting && rack::recorder.origin % bar == 0);
+        if (mode == 1) {
+            assert(rack::recorder.origin - rack::recorder.countStart == bar);
+            assert(rack::recorder.countStart >= rack::musicalPosition.value);
+        } else {
+            assert(rack::recorder.origin - rack::musicalPosition.value < bar);
+        }
+        ov_note_on(60, 100); render(1024); ov_note_off(60); render();
+        stop();
+        take(2); // Stopping before the body cancels, without replacing existing cells.
+        assert(!rack::clips[0][3] && ov_seq_active(1) == -1);
+    }
+    // Overflow cannot publish a partial take or start its loop.
+    assert(ov_seq_arm(0, 4, 2, 1, 0, 0)); render();
+    rack::recorder.overflow = true;
+    assert(ov_seq_finish_record()); render();
+    take(3);
+    assert(!rack::clips[0][4] && ov_seq_active(0) == -1 && ov_rack_take_error() == 1);
+    assert(!ov_seq_arm(0, 0, 3, 1, 4, 1) && ov_rack_take_error() == 2);
+    assert(!ov_seq_arm(0, 0, 1, 3, 4, 1) && ov_rack_take_error() == 2);
+    assert(!ov_seq_arm(0, 0, 1, 1, 257, 1) && ov_rack_take_error() == 2);
+    assert(!ov_rack_take_error());
+    std::puts("PASS pad recording: empty-cell arm, first live note at zero, fixed-length auto-publish/play without UI, free-length second-tap looping, 8 audible count-in ticks/pickup, scene-aligned modes, cancellation/Stop and overflow");
+}
+
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); ov_rack_collect();
 }

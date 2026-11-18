@@ -124,11 +124,20 @@ extension OberVaveModel {
 
     func syncRackState() {
         if ov_seq_record_ready() != 0 {
+            let result = ov_seq_record_result()
             var clip = ov_seq_clip()
             if ov_seq_read_record(&clip) != 0 {
-                let pattern = SequencerPattern(core: clip)
                 recordingPattern = nil
-                if instruments.contains(where: { $0.slot == pattern.slot }) { _ = storePattern(pattern) }
+                if result == 1 {
+                    let pattern = SequencerPattern(core: clip)
+                    do {
+                        try pattern.validate()
+                        if instruments.contains(where: { $0.slot == pattern.slot }) {
+                            patterns.removeAll { $0.id == pattern.id }
+                            patterns.append(pattern)
+                        }
+                    } catch { errorMessage = error.localizedDescription }
+                }
             }
         }
         sequencerRevision &+= 1
@@ -443,16 +452,26 @@ extension OberVaveModel {
             errorMessage = "Could not queue synchronized row launch."
         }
     }
-    func recordPattern(_ pattern: SequencerPattern, output: Bool, intro: Bool) {
+    func recordPattern(slot: Int, row: Int) {
         guard recordingPattern == nil else { errorMessage = "Finish the current recording first."; return }
-        if ov_seq_record(UInt32(pattern.slot), UInt32(pattern.row), output ? 1 : 0, intro ? 1 : 0) != 0 {
-            recordingPattern = pattern.id
+        guard let instrument = instruments.first(where: { $0.slot == slot }) else {
+            errorMessage = "The recording instrument is unavailable."; return
+        }
+        if ov_seq_arm(UInt32(slot), UInt32(row), UInt32(recordMode.rawValue), UInt32(recordCountBars),
+                      UInt32(instrument.recordBeats), recordOutput ? 1 : 0) != 0 {
+            recordingPattern = slot * 8 + row
         } else {
             errorMessage = "Could not arm recording."
         }
     }
     func finishPatternRecording() {
         if ov_seq_finish_record() == 0 { errorMessage = "Could not finish recording.";  }
+    }
+    func setRecordLength(slot: Int, beats: Int) {
+        guard (0...256).contains(beats), let index = instruments.firstIndex(where: { $0.slot == slot }) else {
+            errorMessage = "Invalid recording length."; return
+        }
+        instruments[index].recordBeats = beats
     }
     func stopColumn(_ slot: Int, arp: Bool) {
         if ov_seq_stop(UInt32(slot), arp ? 1 : 0) == 0 { errorMessage = "Could not stop the instrument.";  }
@@ -474,12 +493,100 @@ extension OberVaveModel {
     }
 }
 
+struct SequencerRecordModeControl: View {
+    @ObservedObject var model: OberVaveModel
+    @State private var showsModes = false
+
+    var body: some View {
+        Button { showsModes = true } label: {
+            VStack(spacing: 2) {
+                Text("Record mode").font(.caption.bold())
+                Text(model.recordMode.title).font(.system(size: 9, design: .monospaced))
+            }
+            .padding(.horizontal, 10).frame(height: 44)
+            .foregroundStyle(.white)
+            .background(Color.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showsModes, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Record mode").font(.headline)
+                Picker("Start", selection: $model.recordMode) {
+                    ForEach(SequencerRecordMode.allCases, id: \.rawValue) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }.pickerStyle(.segmented)
+                if model.recordMode == .countIn {
+                    Picker("Count-in", selection: $model.recordCountBars) {
+                        Text("1 bar · 4 ticks").tag(1)
+                        Text("2 bars · 8 ticks").tag(2)
+                    }.pickerStyle(.segmented)
+                }
+                Picker("Capture", selection: $model.recordOutput) {
+                    Text("Output · after ARP").tag(true)
+                    Text("Input · before ARP").tag(false)
+                }.pickerStyle(.segmented)
+                Text(help).font(.caption).foregroundStyle(.secondary)
+                Text("During scene playback, Wait for note and Immediate join the next bar and capture the pickup. Count-in counts full bars. Tap the recording pad again to finish and play.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(20).frame(width: 380)
+            .disabled(model.recordingPattern != nil)
+            .preferredColorScheme(.dark)
+        }
+    }
+
+    private var help: String {
+        switch model.recordMode {
+        case .waitForNote: "Arm with +. The first played note starts the loop at beat one."
+        case .countIn: "Audible metronome counts one or two bars. Playing during the count-in becomes a one-shot intro."
+        case .immediate: "Start the loop immediately when the scene is stopped."
+        }
+    }
+}
+
+private struct SequencerRecordLengthControl: View {
+    @ObservedObject var model: OberVaveModel
+    let slot: Int
+    @State private var showsLength = false
+    private var beats: Int { model.instruments.first { $0.slot == slot }?.recordBeats ?? 4 }
+
+    var body: some View {
+        Button(beats == 0 ? "FREE LENGTH" : "\(beats) beats") { showsLength = true }
+            .font(.system(size: 10, design: .monospaced))
+            .accessibilityLabel("Recording length for instrument \(slot + 1)")
+            .popover(isPresented: $showsLength, arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Recording length").font(.headline)
+                    Picker("Length", selection: Binding(
+                        get: { beats == 0 },
+                        set: { model.setRecordLength(slot: slot, beats: $0 ? 0 : 4) }
+                    )) {
+                        Text("Fixed").tag(false)
+                        Text("Free").tag(true)
+                    }.pickerStyle(.segmented)
+                    if beats > 0 {
+                        Stepper("\(beats) quarter notes", value: Binding(
+                            get: { max(1, beats) }, set: { model.setRecordLength(slot: slot, beats: $0) }
+                        ), in: 1...256)
+                    }
+                    Text(beats == 0
+                        ? "Record until you tap the pad again. There is no 256-beat automatic cutoff."
+                        : "Recording ends automatically after \(beats) beats and starts the loop. Tap earlier to finish manually.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(20).frame(width: 300)
+                .disabled(model.recordingPattern != nil || model.pendingSceneName != nil)
+                .preferredColorScheme(.dark)
+            }
+    }
+}
+
 struct SequencerView: View {
     @ObservedObject var model: OberVaveModel
     @State private var editing: SequencerPattern?
     @State private var deleting: SequencerPattern?
     @State private var replacing: SequencerPattern?
-    @State private var recordIntro = false
     @State private var meters = [Double](repeating: 0, count: 16)
     private let width: CGFloat = 110
     private let padHeight: CGFloat = 54
@@ -507,12 +614,15 @@ struct SequencerView: View {
                         HStack(alignment: .top, spacing: 8) {
                             ForEach(model.instruments) { instrument in
                                 VStack(spacing: 6) {
-                                    Text(instrument.name).lineLimit(1).font(.caption.bold()).frame(height: 24)
+                                    VStack(spacing: 2) {
+                                        Text(instrument.name).lineLimit(1).font(.caption.bold())
+                                        SequencerRecordLengthControl(model: model, slot: instrument.slot)
+                                    }.frame(height: 54)
                                     ForEach(0..<8, id: \.self) { row in pad(instrument, row: row) }
                                 }.frame(width: width)
                             }
                             VStack(spacing: 6) {
-                                Text("ROW").font(.caption.bold()).frame(height: 24)
+                                Text("ROW").font(.caption.bold()).frame(height: 54)
                                 ForEach(0..<8, id: \.self) { row in
                                     Button {
                                         model.launchRow(row)
@@ -559,11 +669,12 @@ struct SequencerView: View {
             isPresented: Binding(
                 get: { replacing != nil }, set: { if !$0 { replacing = nil } })
         ) {
-            Button("Record Output") { if let replacing { model.recordPattern(replacing, output: true, intro: recordIntro) } }
-            Button("Record Input") { if let replacing { model.recordPattern(replacing, output: false, intro: recordIntro) } }
+            Button("Record", role: .destructive) {
+                if let replacing { model.recordPattern(slot: replacing.slot, row: replacing.row) }
+            }
         } message: {
             Text(
-                "Records one loop from the next bar. Intro mode also captures playing before that bar. Existing playback continues for monitoring."
+                "Uses Record mode and this column's fixed/free length. Finishing starts loop playback. Existing playback continues for monitoring."
             )
         }
         .onReceive(Timer.publish(every: 0.04, on: .main, in: .common).autoconnect()) { _ in
@@ -578,13 +689,16 @@ struct SequencerView: View {
         let pattern = model.pattern(slot: instrument.slot, row: row)
         let active = Int(ov_seq_active(UInt32(instrument.slot))) == row
         let queued = Int(ov_seq_pending(UInt32(instrument.slot))) == row
-        let recording = model.recordingPattern == pattern?.id && pattern != nil
+        let recording = model.recordingPattern == instrument.slot * 8 + row
+        let phase = ov_seq_record_phase()
         let color = MIDIChannelColors.color(instrument.channel)
         return Button {
-            if pattern != nil {
+            if recording {
+                model.finishPatternRecording()
+            } else if pattern != nil {
                 model.launchPattern(slot: instrument.slot, row: row)
             } else {
-                editing = SequencerPattern(slot: instrument.slot, row: row, name: "Pattern \(row + 1)")
+                model.recordPattern(slot: instrument.slot, row: row)
             }
         } label: {
             VStack(spacing: 3) {
@@ -592,9 +706,15 @@ struct SequencerView: View {
                     Image(
                         systemName: recording
                             ? "record.circle.fill" : queued ? "clock" : active ? "play.fill" : pattern == nil ? "plus" : "square.grid.2x2")
-                    Text(pattern?.name ?? "EMPTY").lineLimit(1).font(.caption.bold())
+                    if let pattern {
+                        Text(pattern.name).lineLimit(1).font(.caption.bold())
+                    }
                 }
-                if let pattern {
+                if recording {
+                    Text(phase == 1 ? "WAIT FOR NOTE" : phase == 2 ? "COUNT \(ov_seq_record_remaining())"
+                        : phase == 4 ? "BAR \(ov_seq_record_remaining())" : "REC · TAP TO LOOP")
+                        .font(.system(size: 9, design: .monospaced))
+                } else if let pattern {
                     Text("\(pattern.notes.count) notes\(pattern.introEnabled && pattern.intro > 0 ? " · INTRO" : "")")
                         .font(.system(size: 9, design: .monospaced))
                 }
@@ -609,7 +729,7 @@ struct SequencerView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
-            "\(instrument.name), row \(row + 1), \(pattern?.name ?? "empty")\(queued ? ", queued" : active ? ", playing" : "")"
+            "\(instrument.name), row \(row + 1), \(recording ? "finish recording and play loop" : pattern?.name ?? "record pattern")\(queued ? ", queued" : active ? ", playing" : "")"
         )
         .contextMenu {
             if let pattern {
@@ -618,12 +738,7 @@ struct SequencerView: View {
                 Button(pattern.introEnabled ? "Disable Intro" : "Enable Intro") {
                     var changed = pattern; changed.introEnabled.toggle(); _ = model.storePattern(changed)
                 }
-                Button("Record Loop…", systemImage: "record.circle") {
-                    recordIntro = false; replacing = pattern
-                }
-                Button("Record Intro + Loop…", systemImage: "record.circle.fill") {
-                    recordIntro = true; replacing = pattern
-                }
+                Button("Record Again…", systemImage: "record.circle") { replacing = pattern }
                 Button("Stop Column", systemImage: "stop.fill") { model.stopColumn(instrument.slot, arp: false) }
                 Button("Delete", role: .destructive) { deleting = pattern }
             } else {
@@ -719,12 +834,13 @@ private struct SequencerPatternEditor: View {
                     TextField("Name", text: $pattern.name)
                     Stepper(
                         "Length: \(Double(pattern.length) / 960, specifier: "%.2f") beats",
-                        value: Binding(get: { Int(pattern.length / 960) }, set: { pattern.length = Int64($0) * 960 }), in: 1...256)
+                        value: Binding(get: { max(1, Int(pattern.length / 960)) }, set: { pattern.length = Int64($0) * 960 }),
+                        in: 1...Int(SequencerPattern.maxTicks / 960))
                     Toggle("Loop", isOn: $pattern.loop)
                     Toggle("Play intro once", isOn: $pattern.introEnabled)
                     Stepper(
                         "Intro marker: \(Double(pattern.intro) / 960, specifier: "%.2f") beats before bar",
-                        value: Binding(get: { Int(pattern.intro / 240) }, set: { pattern.intro = Int64($0) * 240 }), in: 0...16)
+                        value: Binding(get: { Int(pattern.intro / 240) }, set: { pattern.intro = Int64($0) * 240 }), in: 0...48)
                     Picker("Playback quantization", selection: $pattern.quantize) {
                         Text("Original timing").tag(0)
                         Text("1/8").tag(480); Text("1/16").tag(240); Text("1/32").tag(120)
@@ -807,9 +923,9 @@ private struct SequencerPatternEditor: View {
     }
     private func applyNote() {
         guard start.isFinite, duration.isFinite, start >= -Double(pattern.intro) / 960,
-            start < Double(pattern.length) / 960, duration >= 1.0 / 960, duration <= 256
+            start < Double(pattern.length) / 960, duration >= 1.0 / 960, duration <= Double(SequencerPattern.maxTicks) / 960
         else {
-            message = "Start must fit inside the intro/loop; duration must be 1 tick to 256 beats."; return
+            message = "Start must fit inside the intro/loop; duration must fit the supported tick range."; return
         }
         var changed = pattern
         guard selectedNote != nil || (changed.notes.map(\.id).max() ?? 0) < UInt64.max - 1 else {

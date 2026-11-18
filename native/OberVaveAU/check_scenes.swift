@@ -67,6 +67,14 @@ struct SceneChecks {
         var document = original
         let legacy = try JSONDecoder().decode(RackSceneDocument.self, from: JSONEncoder().encode(document))
         precondition(legacy.patterns == nil)
+        guard var oldFields = try JSONSerialization.jsonObject(with: JSONEncoder().encode(document.instruments[0])) as? [String: Any] else {
+            fatalError("Instrument must encode as a JSON object")
+        }
+        oldFields.removeValue(forKey: "recordBeats")
+        let migrated = try JSONDecoder().decode(RackInstrument.self, from: JSONSerialization.data(withJSONObject: oldFields))
+        precondition(migrated.recordBeats == 4)
+        document.instruments[0].recordBeats = 0
+        document.instruments[1].recordBeats = 13
         var pattern = SequencerPattern(slot: 0, row: 3, name: "Pickup")
         pattern.intro = 480
         pattern.notes = [
@@ -77,6 +85,7 @@ struct SceneChecks {
         try document.validate()
         let decoded = try JSONDecoder().decode(RackSceneDocument.self, from: JSONEncoder().encode(document))
         precondition(decoded.patterns == document.patterns)
+        precondition(decoded.instruments[0].recordBeats == 0 && decoded.instruments[1].recordBeats == 13)
         precondition(SequencerPattern(core: pattern.coreClip()) == pattern)
         document.patterns = [pattern, pattern]; rejects(document)
         document.patterns = [pattern]; document.patterns?[0].slot = Int.max; rejects(document)
@@ -84,6 +93,25 @@ struct SceneChecks {
         document.patterns = [pattern]; document.patterns?[0].notes[0].start = -481; rejects(document)
         document.patterns = [pattern]; document.patterns?[0].notes[1].id = 1; rejects(document)
         document.patterns = [pattern]; document.patterns?[0].notes[0].velocity = 128; rejects(document)
+        document.patterns = [pattern]; document.instruments[0].recordBeats = 257; rejects(document)
+        document.instruments[0].recordBeats = 0
+        pattern.intro = 11520; pattern.notes[0].start = -11520
+        document.patterns = [pattern]; try document.validate()
+        document.patterns?[0].intro = 11521; rejects(document)
+        document.patterns = [pattern]
+        document.patterns?[0].length = 960 * 1000
+        document.patterns?[0].notes[0].duration = 960 * 600
+        let longScene = try JSONDecoder().decode(RackSceneDocument.self, from: JSONEncoder().encode(document))
+        try longScene.validate()
+        precondition(longScene.patterns?[0].length == 960 * 1000)
+        precondition(longScene.patterns?[0].notes[0].duration == 960 * 600)
+        guard var oldPattern = try JSONSerialization.jsonObject(with: JSONEncoder().encode(pattern)) as? [String: Any] else {
+            fatalError("Pattern must encode as a JSON object")
+        }
+        oldPattern["version"] = 1; oldPattern["intro"] = 480
+        oldPattern["notes"] = [["id": 1, "start": -480, "duration": 720, "pitch": 60, "velocity": 100, "output": true]]
+        let migratedPattern = try JSONDecoder().decode(SequencerPattern.self, from: JSONSerialization.data(withJSONObject: oldPattern))
+        precondition(migratedPattern.version == 2 && migratedPattern.intro == 480)
         document.patterns = [pattern]; document.instruments.removeAll { $0.slot == 0 }; rejects(document)
         print("PASS sequencer scene migration, JSON/core pickup roundtrip and invalid cells/IDs/notes/missing instruments")
     }

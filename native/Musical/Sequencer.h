@@ -7,6 +7,7 @@ namespace ob1::music {
 constexpr uint32_t sequencerRows = 8;
 constexpr int64_t tickUnit = INT64_C(1) << 20;
 enum class LaunchGrid : uint8_t { Free, Beat, Bar };
+enum class RecordMode : uint8_t { WaitForNote, CountIn, Immediate };
 
 // Audio-owner clock: fractional remainders survive blocks, not rounded step intervals.
 class MusicalPosition {
@@ -48,11 +49,13 @@ public:
         const auto step = ticksPerQuarter * tickUnit * (grid == LaunchGrid::Bar ? 4 : 1);
         return (earliest + step - 1) / step * step;
     }
-    void queue(int32_t nextRow, const Pattern* next, int64_t now, LaunchGrid grid, int64_t groupOrigin = -1)
+    void queue(int32_t nextRow, const Pattern* next, int64_t now, LaunchGrid grid, int64_t groupOrigin = -1,
+               bool playIntro = true)
     {
         queued_ = next;
         pendingRow = nextRow;
-        const auto intro = next && next->data().introEnabled ? next->data().intro * tickUnit : 0;
+        queuedIntro_ = playIntro;
+        const auto intro = playIntro && next && next->data().introEnabled ? next->data().intro * tickUnit : 0;
         pendingOrigin = groupOrigin >= 0 ? groupOrigin : boundary(now + intro, grid);
         pendingStart = pendingOrigin - intro;
     }
@@ -81,9 +84,11 @@ public:
             const auto nextRow = pendingRow;
             const auto nextOrigin = pendingOrigin;
             const auto start = pendingStart;
+            const auto intro = queuedIntro_;
             if (!stop(frame, sink)) return false;
             if (++generation == 0) return false;
             clip = next; row = next ? nextRow : -1; origin = nextOrigin; previous = start - 1;
+            playIntro_ = intro;
         }
         for (auto& note : active) if (note.used && note.off <= now) {
             auto off = note.on;
@@ -96,7 +101,7 @@ public:
         const auto length = data.length * tickUnit;
         for (uint32_t i = 0; i < data.count; ++i) {
             const auto& note = data.notes[i];
-            if (note.start < 0 && !data.introEnabled) continue;
+            if (note.start < 0 && (!data.introEnabled || !playIntro_)) continue;
             PatternTiming timing;
             if (clip->timingAt(i, timing) != PatternError::None) return false;
             int64_t onset = origin + timing.start * tickUnit;
@@ -133,6 +138,7 @@ public:
 private:
     const Pattern* queued_ = nullptr;
     NoteID nextNote_ = 1;
+    bool queuedIntro_ = true, playIntro_ = true;
 };
 
 class ClipRecorder {
@@ -141,6 +147,9 @@ public:
     uint32_t slot = 0, row = 0;
     int64_t origin = 0, stopAt = 0;
     PatternData data {};
+    bool waiting = false, freeLength = false, cancelled = false;
+    int64_t countStart = 0;
+    uint32_t countBeats = 0;
 
     void begin(uint32_t instrument, uint32_t cell, const PatternData& settings,
                int64_t now, bool recordOutput, bool intro)
@@ -151,11 +160,62 @@ public:
         origin = ClipPlayer::boundary(now, LaunchGrid::Bar);
         stopAt = origin + data.length * tickUnit;
         running = true; started = false; overflow = false; held_ = {};
+        waiting = freeLength = cancelled = false; countBeats = 0; lastClick_ = -1;
+        cancelBeforeBody_ = false;
+    }
+
+    void arm(uint32_t instrument, uint32_t cell, const PatternData& settings, int64_t now,
+             RecordMode mode, uint32_t bars, uint32_t beats, bool scenePlaying, bool recordOutput)
+    {
+        begin(instrument, cell, settings, now, recordOutput, false);
+        cancelBeforeBody_ = true;
+        freeLength = beats == 0;
+        data.length = beats ? Tick(beats) * ticksPerQuarter : maxPatternTicks;
+        data.loop = true;
+        waiting = mode == RecordMode::WaitForNote && !scenePlaying;
+        origin = scenePlaying ? ClipPlayer::boundary(now, LaunchGrid::Bar) : now;
+        if (mode == RecordMode::CountIn) {
+            countStart = origin; countBeats = bars * 4;
+            origin += int64_t(countBeats) * ticksPerQuarter * tickUnit;
+        }
+        withIntro = mode == RecordMode::CountIn || scenePlaying;
+        data.introEnabled = withIntro;
+        stopAt = waiting || freeLength ? INT64_MAX : origin + data.length * tickUnit;
+    }
+
+    void firstNote(int64_t now)
+    {
+        if (!running || !waiting) return;
+        origin = now; stopAt = freeLength ? INT64_MAX : origin + data.length * tickUnit; waiting = false;
+    }
+
+    uint32_t phase(int64_t now) const
+    {
+        if (!running) return 0;
+        if (waiting) return 1;
+        if (now >= origin) return 3;
+        return countBeats && now >= countStart ? 2 : 4;
+    }
+    uint32_t remaining(int64_t now) const
+    {
+        if (!running || waiting || now >= origin) return 0;
+        const auto boundary = countBeats && now < countStart ? countStart : origin;
+        return uint32_t((boundary - now + ticksPerQuarter * tickUnit - 1) / (ticksPerQuarter * tickUnit));
+    }
+    int32_t click(int64_t now)
+    {
+        if (!running || waiting || !countBeats || now < countStart || now >= origin) return -1;
+        const auto beat = (now - countStart) / (ticksPerQuarter * tickUnit);
+        if (beat <= lastClick_) return -1;
+        lastClick_ = beat;
+        return int32_t(beat % 4);
     }
 
     bool capture(const Event& event, int64_t now)
     {
         if (!running || !isNote(event) || event.source.kind == SourceKind::Pattern) return true;
+        if (waiting) return true;
+        if (now - origin >= maxPatternTicks * tickUnit) { overflow = true; return false; }
         if (now < origin && !withIntro) return true;
         if (now >= stopAt) return true;
         if (event.kind == Kind::NoteOn) {
@@ -172,11 +232,28 @@ public:
     }
     void finish(int64_t now)
     {
+        cancelled = waiting || (cancelBeforeBody_ && now <= origin);
+        if (cancelled) { running = false; held_ = {}; return; }
+        if (freeLength) {
+            data.length = std::max((now - origin + tickUnit - 1) / tickUnit, Tick(1));
+            if (data.length > maxPatternTicks) { overflow = true; running = false; held_ = {}; return; }
+            for (uint32_t i = 0; i < data.count; ++i) data.length = std::max(data.length, data.notes[i].start + 1);
+            for (const auto& held : held_) if (held.used)
+                data.length = std::max(data.length, (held.start - origin) / tickUnit + 1);
+        }
         for (auto& held : held_) if (held.used) close(held, std::min(now, stopAt));
         std::sort(data.notes.begin(), data.notes.begin() + data.count, patternNoteBefore);
         running = false;
     }
+    bool publish(Pattern& pattern) const
+    {
+        if (running || overflow || cancelled) return false;
+        pattern.data_ = data;
+        return true;
+    }
 private:
+    int64_t lastClick_ = -1;
+    bool cancelBeforeBody_ = false;
     struct Pending { Event on {}; int64_t start = 0; bool used = false; };
     std::array<Pending, 256> held_ {};
     static bool same(const Event& a, const Event& b)
@@ -188,13 +265,17 @@ private:
         if (data.count == patternNoteCapacity) { overflow = true; held.used = false; return; }
         const auto duration = std::max((now - held.start) / tickUnit, Tick(1));
         if (duration > maxPatternTicks) { overflow = true; held.used = false; return; }
-        auto& note = data.notes[data.count++];
-        note.id = data.nextNote++;
+        auto& note = data.notes[data.count];
+        note.id = data.nextNote;
         note.start = (held.start - origin) / tickUnit;
         note.duration = duration;
         note.pitch = held.on.data1; note.velocity = held.on.data2;
         note.channel = held.on.channel;
         note.routing = {Target::Instruments, uint16_t(1u << slot), output ? Stage::Output : Stage::Input};
+        if (validatePatternNote(note, data.length, ticksPerQuarter * 12) != PatternError::None) {
+            note = {}; overflow = true; held.used = false; return;
+        }
+        ++data.count; ++data.nextNote;
         data.intro = std::max(data.intro, -note.start);
         held.used = false;
     }

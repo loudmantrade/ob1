@@ -360,6 +360,9 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var sequencerRevision = 0
     @Published var launchGrid = 2
     @Published var recordingPattern: Int?
+    @Published var recordMode = SequencerRecordMode.waitForNote
+    @Published var recordCountBars = 1
+    @Published var recordOutput = true
     var keyboardStopGeneration: UInt32 = 0
     var sceneFileURL: URL?
     var pendingSceneURL: URL?
@@ -1646,6 +1649,7 @@ struct ContentView: View {
             .accessibilityLabel("Stop all playback")
             .accessibilityHint("Releases all notes and stops all arpeggiators, preserving effect tails.")
             SynthTempoControl(model: model)
+            SequencerRecordModeControl(model: model)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Transport")

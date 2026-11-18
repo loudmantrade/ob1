@@ -159,7 +159,87 @@ static void checkRecording()
     std::puts("PASS recorder: negative pickup/cross-zero duration, stop finalization, input/output routing, source overlap, ignores own playback and explicit bounded overflow");
 }
 
+static void checkRecordModes()
+{
+    auto recorder = std::make_unique<ClipRecorder>();
+    auto settings = std::make_unique<Pattern>(makePattern());
+    auto recorded = std::make_unique<Pattern>();
+    recorder->arm(1, 2, settings->data(), 123 * tickUnit, RecordMode::WaitForNote, 1, 4, false, true);
+    assert(recorder->waiting && recorder->phase(10000 * tickUnit) == 1 && recorder->stopAt == INT64_MAX);
+    assert(recorder->capture(note(Kind::NoteOn), 500 * tickUnit) && !recorder->started);
+    recorder->firstNote(2000 * tickUnit);
+    assert(!recorder->waiting && recorder->origin == 2000 * tickUnit && recorder->stopAt == 5840 * tickUnit);
+    assert(recorder->capture(note(Kind::NoteOn), 2000 * tickUnit));
+    assert(recorder->capture(note(Kind::NoteOff), 2240 * tickUnit));
+    recorder->finish(recorder->stopAt);
+    assert(recorder->data.notes[0].start == 0 && recorder->data.notes[0].duration == 240);
+    assert(recorder->data.length == 3840 && recorder->publish(*recorded));
+    assert(validatePattern(recorded->data()) == PatternError::None);
+
+    recorder->arm(0, 0, settings->data(), 0, RecordMode::WaitForNote, 1, 0, false, true);
+    recorder->finish(10000 * tickUnit);
+    assert(recorder->cancelled && !recorder->publish(*recorded));
+    for (auto mode : {RecordMode::WaitForNote, RecordMode::Immediate}) {
+        recorder->arm(0, 0, settings->data(), 3500 * tickUnit, mode, 1, 3, true, true);
+        assert(!recorder->waiting && recorder->origin == 3840 * tickUnit);
+        assert(recorder->capture(note(Kind::NoteOn), 3600 * tickUnit));
+        assert(recorder->capture(note(Kind::NoteOff), 3900 * tickUnit));
+        recorder->finish(recorder->stopAt);
+        assert(recorder->data.length == 2880 && recorder->data.intro == 240);
+        assert(recorder->data.notes[0].start == -240 && recorder->data.notes[0].duration == 300);
+        assert(recorder->publish(*recorded) && validatePattern(recorded->data()) == PatternError::None);
+    }
+    recorder->arm(0, 0, settings->data(), 0, RecordMode::Immediate, 1, 0, false, true);
+    assert(recorder->capture(note(Kind::NoteOn), 960 * tickUnit));
+    recorder->finish(960 * tickUnit);
+    assert(recorder->data.length == 961 && recorder->data.notes[0].duration == 1);
+    assert(recorder->publish(*recorded) && validatePattern(recorded->data()) == PatternError::None);
+    recorder->arm(0, 0, settings->data(), 0, RecordMode::Immediate, 1, 0, false, true);
+    assert(recorder->stopAt == INT64_MAX);
+    assert(recorder->capture(note(Kind::NoteOn), 0));
+    assert(recorder->capture(note(Kind::NoteOff), 960 * 600 * tickUnit));
+    assert(recorder->running && recorder->data.notes[0].duration == 960 * 600);
+    recorder->finish(960 * 1000 * tickUnit);
+    assert(recorder->data.length == 960 * 1000 && recorder->publish(*recorded));
+    assert(validatePattern(recorded->data()) == PatternError::None);
+
+    for (const uint32_t bars : {1u, 2u}) {
+        recorder->arm(0, 0, settings->data(), 3500 * tickUnit, RecordMode::CountIn, bars, 4, true, true);
+        assert(recorder->countStart == 3840 * tickUnit);
+        assert(recorder->origin == (3840 + bars * 3840) * tickUnit);
+        assert(recorder->click(3500 * tickUnit) == -1);
+        uint32_t clicks = 0;
+        for (auto tick = Tick(3500); tick <= 3840 + bars * 3840; ++tick) {
+            const auto click = recorder->click(tick * tickUnit);
+            if (click >= 0) { assert(click == int32_t(clicks % 4)); ++clicks; }
+        }
+        assert(clicks == bars * 4);
+        assert(recorder->remaining(recorder->countStart) == bars * 4);
+        assert(recorder->capture(note(Kind::NoteOn), 3500 * tickUnit));
+        assert(recorder->capture(note(Kind::NoteOff), recorder->origin + 100 * tickUnit));
+        assert(recorder->phase(recorder->origin) == 3 && recorder->remaining(recorder->origin) == 0);
+        recorder->finish(recorder->stopAt);
+        assert(recorder->data.intro == 340 + bars * 3840);
+        assert(recorder->publish(*recorded) && validatePattern(recorded->data()) == PatternError::None);
+    }
+    recorder->arm(0, 0, settings->data(), 123 * tickUnit, RecordMode::Immediate, 1, 0, false, true);
+    assert(recorder->origin == 123 * tickUnit && recorder->freeLength && !recorder->withIntro);
+    assert(recorder->capture(note(Kind::NoteOn), 123 * tickUnit));
+    recorder->finish(123 * tickUnit + 1500 * tickUnit + tickUnit / 2);
+    assert(recorder->data.length == 1501 && recorder->data.notes[0].duration == 1500);
+    assert(recorder->publish(*recorded) && validatePattern(recorded->data()) == PatternError::None);
+    // Autoplay starts at the main loop, not a second performance of the pickup.
+    auto intro = std::make_unique<Pattern>(makePattern(240));
+    ClipPlayer player;
+    std::vector<Event> output;
+    auto sink = [&](const Event& event) { output.push_back(event); return true; };
+    player.queue(0, intro.get(), 5000 * tickUnit, LaunchGrid::Free, -1, false);
+    assert(player.process(5000 * tickUnit, 1, 0, 0, sink));
+    assert(output.size() == 1 && output[0].data1 == 64);
+    std::puts("PASS record modes: Wait arms without timing out, first-note zero, cancellation, live-scene pickup, exact 4/8 clicks and full count-in bars, fixed/free lengths and no duplicate intro on autoplay");
+}
+
 int main()
 {
-    checkPosition(); checkPlayback(); checkRecording();
+    checkPosition(); checkPlayback(); checkRecording(); checkRecordModes();
 }

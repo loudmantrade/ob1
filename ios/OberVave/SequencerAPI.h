@@ -27,7 +27,12 @@ int ov_seq_launch_row(uint32_t row, uint32_t grid);
 int ov_seq_stop(uint32_t slot, uint32_t arp);
 int ov_seq_solo(uint32_t slot, uint32_t enabled);
 int ov_seq_record(uint32_t slot, uint32_t row, uint32_t output, uint32_t intro);
+/* mode: 0 Wait for note, 1 Count-in, 2 Immediate; beats: 0 free, 1..256 fixed. */
+int ov_seq_arm(uint32_t slot, uint32_t row, uint32_t mode, uint32_t count_bars, uint32_t beats, uint32_t output);
 int ov_seq_finish_record(void);
+uint32_t ov_seq_record_phase(void); /* 0 idle, 1 waiting for note, 2 count-in, 3 body, 4 waiting for scene bar */
+uint32_t ov_seq_record_remaining(void);
+uint32_t ov_seq_record_result(void); /* 1 saved, 2 cancelled, 3 failed; read before mailbox */
 /* Recording completion mailbox: poll, then read on the control thread. */
 uint32_t ov_seq_record_ready(void);
 int ov_seq_read_record(ov_seq_clip* clip);
