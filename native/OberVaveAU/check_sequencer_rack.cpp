@@ -54,11 +54,15 @@ static void checkRack()
     }
     assert(ov_rack_load_sequenced(scene.get(), patterns->data(), patterns->size()));
     render();
+    ov_midi_message(0x90, 67, 100); render();
+    for (uint32_t slot = 0; slot < rack::capacity; ++slot)
+        assert(engine(slot).arpeggiator.processor().heldCount() > 0);
     assert(ov_seq_launch_row(0, 0)); render();
     for (uint32_t slot = 0; slot < rack::capacity; ++slot) {
         assert(ov_seq_active(slot) == 0 && gate(slot));
         assert(engine(slot).arpeggiator.inputOwnerCount() == 0);
         assert(engine(slot).arpeggiator.processor().activeCount() == 0);
+        assert(engine(slot).arpeggiator.processor().heldCount() == 0);
         assert(engine(slot).parameter(rack::P_ARP_MODE) == rack::A_UP);
         assert(rack::players[slot].origin == rack::players[0].origin);
     }
@@ -194,12 +198,29 @@ static void checkPadRecording()
     assert(ov_seq_arm(0, 1, 2, 1, 0, 1)); render();
     assert(ov_seq_record_phase() == 3 && rack::recorder.freeLength);
     ov_note_on(64, 100); render(2048); ov_note_off(64); render(2048);
+    assert(ov_seq_record_length() == 3840);
     assert(ov_seq_finish_record()); render();
+    assert(ov_seq_record_phase() == 5 && !ov_seq_record_ready() && !rack::clips[0][1]);
+    const auto finishAt = rack::recorder.stopAt;
+    assert(finishAt == rack::recorder.origin + 3840 * music::tickUnit);
+    assert(ov_seq_finish_record()); render();
+    assert(rack::recorder.stopAt == finishAt);
+    ov_note_on(67, 100); render(1024); ov_note_off(67); render();
+    while (rack::recorder.running) render();
     assert(ov_seq_active(0) == 1 && rack::clips[0][1]);
+    assert(rack::players[0].origin == finishAt);
     take(1);
-    assert(result->length > 100 && result->length < 960 && result->intro == 0);
+    assert(result->length == 3840 && result->count == 2 && result->intro == 0);
     const auto length = result->length;
     assert(rack::players[0].clip->data().length == length);
+    stop();
+    assert(ov_seq_arm(0, 6, 2, 1, 6, 0)); render();
+    assert(ov_seq_finish_record()); render();
+    assert(rack::recorder.stopAt == rack::recorder.origin + 3840 * music::tickUnit);
+    assert(ov_seq_record_phase() == 5 && !ov_seq_record_ready());
+    while (rack::recorder.running) render();
+    take(1);
+    assert(result->length == 3840 && ov_seq_active(0) == 6);
     stop();
     assert(ov_seq_arm(0, 5, 2, 1, 0, 1)); render();
     ov_note_on(64, 100); render();
@@ -217,8 +238,10 @@ static void checkPadRecording()
     assert(rack::musicalPosition.value >= beforeWrap && ov_seq_record_phase() == 3);
     ov_note_off(64); render();
     assert(ov_seq_finish_record()); render();
+    assert(ov_seq_record_phase() == 5);
+    while (rack::recorder.running) render();
     take(1);
-    assert(result->length >= 600 * 960 && result->notes[0].duration > 256 * 960);
+    assert(result->length >= 600 * 960 && result->length % 3840 == 0 && result->notes[0].duration > 256 * 960);
     assert(ov_seq_active(0) == 5);
     stop();
 
@@ -272,7 +295,51 @@ static void checkPadRecording()
     std::puts("PASS pad recording: empty-cell arm, first live note at zero, fixed-length auto-publish/play without UI, free-length second-tap looping, 8 audible count-in ticks/pickup, scene-aligned modes, cancellation/Stop and overflow");
 }
 
+static void checkLaunchHandover()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120;
+    for (uint32_t slot = 0; slot < 2; ++slot) {
+        scene->slots[slot] = {1, config(rack::A_UP)};
+        scene->slots[slot].config.parameters[rack::P_ARP_LATCH] = 1;
+    }
+    auto pattern = std::make_unique<ov_seq_clip>(clip(0, 0));
+    pattern->intro = 240; pattern->notes[0].start = -240; pattern->notes[0].duration = 480;
+    assert(ov_rack_load_sequenced(scene.get(), pattern.get(), 1)); render();
+    ov_midi_message(0x90, 67, 100); render(); ov_midi_message(0x80, 67, 0); render();
+    assert(engine(0).arpeggiator.processor().heldCount() && engine(1).arpeggiator.processor().heldCount());
+    assert(ov_seq_launch(0, 0, 2)); render();
+    assert(ov_seq_pending(0) == 0 && engine(0).arpeggiator.processor().heldCount());
+    while (ov_seq_active(0) < 0) render();
+    assert(rack::players[0].previous < rack::players[0].origin);
+    assert(!engine(0).arpeggiator.processor().heldCount() && !engine(0).arpeggiator.processor().activeCount());
+    assert(engine(1).arpeggiator.processor().heldCount());
+    assert(engine(0).parameter(rack::P_ARP_MODE) == rack::A_UP && engine(0).parameter(rack::P_ARP_LATCH) == 1);
+    assert(gate(0));
+    assert(ov_rack_stop_all()); render();
+    // Input-stage clips hand over from live ARP, then feed only their own notes into it.
+    pattern->intro = 0; pattern->notes[0].start = 0; pattern->notes[0].output = 0;
+    assert(ov_seq_set_clip(pattern.get())); render();
+    ov_midi_message(0x90, 69, 100); render();
+    assert(ov_seq_launch(0, 0, 0)); render();
+    assert(engine(0).arpeggiator.processor().heldCount() == 1);
+    uint8_t pitch = 0;
+    assert(engine(0).arpeggiator.processor().heldPitch(0, pitch) && pitch == 60);
+    assert(engine(1).arpeggiator.processor().heldCount() == 1);
+    assert(ov_rack_stop_all()); render();
+    // Recording completion goes through the same actual-launch handover.
+    assert(ov_seq_arm(0, 1, 2, 1, 1, 1)); render();
+    ov_midi_message(0x90, 64, 100); render();
+    render(rack::clock.length());
+    assert(ov_seq_active(0) == 1 && !engine(0).arpeggiator.processor().heldCount());
+    assert(engine(1).arpeggiator.processor().heldCount());
+    assert(ov_seq_record_result() == 1 && ov_seq_read_record(pattern.get()));
+    assert(ov_rack_stop_all()); render();
+    assert(!ov_rack_take_error());
+    std::puts("PASS launch handover: queued ARP plays until pickup starts, then only its logical column stops; row, Input/Output and record-autoplay preserve ARP/Latch modes and other columns");
+}
+
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); ov_rack_collect();
 }

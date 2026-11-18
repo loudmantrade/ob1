@@ -147,7 +147,7 @@ public:
     uint32_t slot = 0, row = 0;
     int64_t origin = 0, stopAt = 0;
     PatternData data {};
-    bool waiting = false, freeLength = false, cancelled = false;
+    bool waiting = false, freeLength = false, cancelled = false, finishQueued = false;
     int64_t countStart = 0;
     uint32_t countBeats = 0;
 
@@ -160,7 +160,7 @@ public:
         origin = ClipPlayer::boundary(now, LaunchGrid::Bar);
         stopAt = origin + data.length * tickUnit;
         running = true; started = false; overflow = false; held_ = {};
-        waiting = freeLength = cancelled = false; countBeats = 0; lastClick_ = -1;
+        waiting = freeLength = cancelled = finishQueued = false; countBeats = 0; lastClick_ = -1;
         cancelBeforeBody_ = false;
     }
 
@@ -189,16 +189,39 @@ public:
         origin = now; stopAt = freeLength ? INT64_MAX : origin + data.length * tickUnit; waiting = false;
     }
 
+    Tick lengthAt(int64_t now) const
+    {
+        if (!freeLength) return data.length;
+        const auto bar = ticksPerQuarter * 4;
+        if (waiting || now < origin) return bar;
+        const auto elapsed = std::max(INT64_C(0), (finishQueued ? stopAt : now) - origin);
+        const auto bars = elapsed / (bar * tickUnit) + (finishQueued ? 0 : 1);
+        return std::max(Tick(1), bars) * bar;
+    }
+
+    void requestFinish(int64_t now)
+    {
+        if (!running || finishQueued || waiting || now < origin) return;
+        const auto bar = ticksPerQuarter * tickUnit * 4;
+        const auto elapsed = std::max(INT64_C(1), now - origin);
+        const auto boundary = origin + (elapsed + bar - 1) / bar * bar;
+        stopAt = std::min(stopAt, boundary);
+        finishQueued = true;
+    }
+
     uint32_t phase(int64_t now) const
     {
         if (!running) return 0;
         if (waiting) return 1;
-        if (now >= origin) return 3;
+        if (now >= origin) return finishQueued ? 5 : 3;
         return countBeats && now >= countStart ? 2 : 4;
     }
     uint32_t remaining(int64_t now) const
     {
-        if (!running || waiting || now >= origin) return 0;
+        if (!running || waiting) return 0;
+        if (finishQueued) return uint32_t(std::max(INT64_C(0), stopAt - now +
+            ticksPerQuarter * tickUnit - 1) / (ticksPerQuarter * tickUnit));
+        if (now >= origin) return 0;
         const auto boundary = countBeats && now < countStart ? countStart : origin;
         return uint32_t((boundary - now + ticksPerQuarter * tickUnit - 1) / (ticksPerQuarter * tickUnit));
     }
@@ -232,8 +255,10 @@ public:
     }
     void finish(int64_t now)
     {
+        now = std::min(now, stopAt);
         cancelled = waiting || (cancelBeforeBody_ && now <= origin);
         if (cancelled) { running = false; held_ = {}; return; }
+        if (finishQueued && !freeLength) data.length = std::min(data.length, (stopAt - origin) / tickUnit);
         if (freeLength) {
             data.length = std::max((now - origin + tickUnit - 1) / tickUnit, Tick(1));
             if (data.length > maxPatternTicks) { overflow = true; running = false; held_ = {}; return; }

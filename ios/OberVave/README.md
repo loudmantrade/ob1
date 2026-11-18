@@ -67,8 +67,16 @@ the corresponding column. Launch options are **FREE**, next **BEAT**, and next
 **BAR** (currently 4/4). Playback uses the audio-owned shared tempo/MIDI clock
 with 16-sample control resolution; UI refresh timers do not schedule music.
 
+Starting a nonempty pattern automatically stops the live arpeggio of that
+logical instrument, preserving ARP/Latch settings and FX tails. A queued
+launch leaves the arpeggio playing until the actual pickup/body start. This
+also applies to row launches and record-to-loop transitions. Other instruments
+are unaffected, even if they share its MIDI channel. Input-stage patterns then
+feed their own notes through the saved ARP mode.
+
 - Empty pads show only **+**. Tap to arm/start recording, then tap the same pad
-  again to finish and immediately play the loop. A filled pad launches its loop.
+  again to queue completion at the end of the current body bar and start the
+  loop on that boundary. Recording continues until then. A filled pad launches its loop.
   Finishing and playback start are audio-owned, without waiting for UI polling.
   Hold a pad for edit, duplicate, delete, recording and column Stop.
   Hold an empty pad for the manual editor. Active pads show progress; queued
@@ -85,8 +93,12 @@ with 16-sample control resolution; UI refresh timers do not schedule music.
 - Each column header sets **fixed length (1–256 quarter notes)** or **Free
   length**, saved with that instrument in the scene. Fixed recording finishes
   and starts playback automatically at the chosen length. Free recording
-  continues until the second pad tap, with **no automatic 256-beat cutoff**;
-  the elapsed body length becomes the loop length. Manual completion skips
+  grows by **one complete 4/4 bar** whenever the current bar fills, with **no
+  automatic 256-beat cutoff**. A short second tap queues finishing at the
+  current bar's end; **LOOP IN** shows the remaining beats and the final length.
+  Repeated taps do not push that deadline later. Fixed length remains a cap:
+  a requested bar end never extends past it, even for non-bar-sized limits.
+  Manual completion skips
   re-playing the just-performed intro; later launches can play it normally.
 - The editor provides quarter-beat step input, an editable note list with
   pitch/velocity/start/duration, loop length and non-destructive playback

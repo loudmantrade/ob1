@@ -148,6 +148,10 @@ blocks; tempo and external phase come from the existing rack clock.
 Launch bar size is currently four quarter notes. The shared row downbeat is
 chosen late enough for the longest enabled pickup. Each column's current
 clip continues until its replacement's pickup begins.
+At that actual launch boundary the rack stops the column's live arpeggiator
+before delivering the pattern's first notes, including row launches and
+recording auto-play. Queuing alone does not interrupt it. ARP/Latch modes,
+FX memory and other logical columns (including shared MIDI channels) survive.
 
 Output events bypass ARP without changing saved parameters and share bounded
 pitch ownership with generated ARP events. Recording output observes actual
@@ -168,8 +172,12 @@ next bar, recording the pre-boundary region as intro. `CountIn` counts 4 or 8
 quarter-note clicks; on a playing scene counting starts at its next bar and
 the whole count is retained. The metronome is synthesized on the shared audio
 clock. Column settings select fixed quarters or free length. Free takes have
-no 256-quarter deadline; manual completion sets the body length from elapsed
-ticks and safely represents notes pressed on the finishing boundary. Stopping
+no 256-quarter deadline; their displayed length grows in complete 3,840-tick
+bars. A second tap requests the current body's bar end instead of immediately
+finalizing. The recorder keeps capturing until that immutable deadline and
+starts the loop at it, even if the UI has not polled. Fixed length is an upper
+limit on that deadline. Body lengths and held-note releases use the exact
+musical deadline, not the slightly later control-block time. Stopping
 before the body cancels the take. Global/column Stop never auto-starts it.
 
 ## Verification

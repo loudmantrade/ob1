@@ -106,7 +106,9 @@ numeric note list; full piano roll and external MIDI routing remain separate
 increments. Scheduling retains the existing 16-sample synthesis resolution.
 
 The pad recording workflow now starts directly on **+** and completes/loops on
-the second tap. Header Record mode selects Wait for note, Count-in (4/8 audible
+the second tap's queued end-of-bar boundary. Free length grows in whole bars;
+fixed length remains the upper limit. Capture continues to the boundary and
+playback begins there without UI polling. Header Record mode selects Wait for note, Count-in (4/8 audible
 ticks) or Immediate; playing scenes supply bar-aligned pickup boundaries,
 while Count-in always counts complete bars. Per-instrument fixed/free lengths
 persist in scenes. Free recording has no 256-quarter automatic cutoff;

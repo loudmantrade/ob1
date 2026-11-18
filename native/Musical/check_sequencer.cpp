@@ -159,6 +159,46 @@ static void checkRecording()
     std::puts("PASS recorder: negative pickup/cross-zero duration, stop finalization, input/output routing, source overlap, ignores own playback and explicit bounded overflow");
 }
 
+static void checkBarCompletion()
+{
+    auto recorder = std::make_unique<ClipRecorder>();
+    auto settings = std::make_unique<Pattern>(makePattern());
+    recorder->arm(0, 0, settings->data(), 123 * tickUnit, RecordMode::Immediate, 1, 0, false, false);
+    const auto origin = recorder->origin;
+    assert(recorder->lengthAt(origin) == 3840);
+    assert(recorder->lengthAt(origin + 3839 * tickUnit) == 3840);
+    assert(recorder->lengthAt(origin + 3840 * tickUnit) == 7680);
+    assert(recorder->lengthAt(origin + 7680 * tickUnit) == 11520);
+    recorder->requestFinish(origin + 4000 * tickUnit);
+    assert(recorder->running && recorder->finishQueued && recorder->phase(origin + 4000 * tickUnit) == 5);
+    assert(recorder->stopAt == origin + 7680 * tickUnit && recorder->lengthAt(origin + 4000 * tickUnit) == 7680);
+    recorder->requestFinish(origin + 7000 * tickUnit);
+    assert(recorder->stopAt == origin + 7680 * tickUnit);
+    assert(recorder->capture(note(Kind::NoteOn), origin + 5000 * tickUnit));
+    assert(recorder->capture(note(Kind::NoteOff), origin + 6000 * tickUnit));
+    assert(recorder->capture(note(Kind::NoteOn, 64), origin + 7000 * tickUnit));
+    assert(recorder->capture(note(Kind::NoteOn, 67), recorder->stopAt));
+    recorder->finish(recorder->stopAt + tickUnit / 2);
+    assert(recorder->data.length == 7680 && recorder->data.count == 2);
+    assert(recorder->data.notes[1].duration == 680 && validatePattern(recorder->data) == PatternError::None);
+    for (const uint32_t beats : {2u, 6u, 12u}) {
+        recorder->arm(0, 0, settings->data(), origin, RecordMode::Immediate, 1, beats, false, false);
+        const auto limit = recorder->stopAt;
+        recorder->requestFinish(origin + 100 * tickUnit);
+        assert(recorder->stopAt == std::min(limit, origin + 3840 * tickUnit));
+        recorder->finish(recorder->stopAt + tickUnit);
+        assert(recorder->data.length == std::min(Tick(beats) * 960, Tick(3840)));
+    }
+    recorder->arm(0, 0, settings->data(), origin, RecordMode::WaitForNote, 1, 0, false, false);
+    assert(recorder->lengthAt(origin + 20000 * tickUnit) == 3840);
+    recorder->requestFinish(origin);
+    assert(!recorder->finishQueued);
+    recorder->arm(0, 0, settings->data(), origin, RecordMode::Immediate, 1, 0, false, false);
+    recorder->requestFinish(origin + 3840 * tickUnit);
+    assert(recorder->stopAt == origin + 3840 * tickUnit);
+    std::puts("PASS bar completion: free length grows by whole bars, tap queues immutable boundary, capture continues until it, exact-tick cutoff, fixed cap/early finish and waiting state");
+}
+
 static void checkRecordModes()
 {
     auto recorder = std::make_unique<ClipRecorder>();
@@ -241,5 +281,5 @@ static void checkRecordModes()
 
 int main()
 {
-    checkPosition(); checkPlayback(); checkRecording(); checkRecordModes();
+    checkPosition(); checkPlayback(); checkRecording(); checkRecordModes(); checkBarCompletion();
 }

@@ -527,7 +527,7 @@ struct SequencerRecordModeControl: View {
                     Text("Input · before ARP").tag(false)
                 }.pickerStyle(.segmented)
                 Text(help).font(.caption).foregroundStyle(.secondary)
-                Text("During scene playback, Wait for note and Immediate join the next bar and capture the pickup. Count-in counts full bars. Tap the recording pad again to finish and play.")
+                Text("During scene playback, Wait for note and Immediate join the next bar and capture the pickup. Count-in counts full bars. Tap the recording pad again to finish at the end of the bar and play.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .padding(20).frame(width: 380)
@@ -571,8 +571,8 @@ private struct SequencerRecordLengthControl: View {
                         ), in: 1...256)
                     }
                     Text(beats == 0
-                        ? "Record until you tap the pad again. There is no 256-beat automatic cutoff."
-                        : "Recording ends automatically after \(beats) beats and starts the loop. Tap earlier to finish manually.")
+                        ? "Length grows one bar at a time. Tap again to finish at the end of the bar and play. There is no 256-beat automatic cutoff."
+                        : "Recording ends automatically after \(beats) beats and starts the loop. Tap earlier to finish at the end of the current bar, without exceeding this limit.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(20).frame(width: 300)
@@ -674,7 +674,7 @@ struct SequencerView: View {
             }
         } message: {
             Text(
-                "Uses Record mode and this column's fixed/free length. Finishing starts loop playback. Existing playback continues for monitoring."
+                "Uses Record mode and this column's fixed/free length. Tap again to finish at the end of the bar and start the loop. Existing playback continues for monitoring."
             )
         }
         .onReceive(Timer.publish(every: 0.04, on: .main, in: .common).autoconnect()) { _ in
@@ -712,7 +712,10 @@ struct SequencerView: View {
                 }
                 if recording {
                     Text(phase == 1 ? "WAIT FOR NOTE" : phase == 2 ? "COUNT \(ov_seq_record_remaining())"
-                        : phase == 4 ? "BAR \(ov_seq_record_remaining())" : "REC · TAP TO LOOP")
+                        : phase == 4 ? "BAR \(ov_seq_record_remaining())"
+                        : phase == 5 ? "LOOP IN \(ov_seq_record_remaining())" : "REC · TAP TO LOOP")
+                        .font(.system(size: 9, design: .monospaced))
+                    Text("\(Double(ov_seq_record_length()) / 960, specifier: "%.0f") BEATS")
                         .font(.system(size: 9, design: .monospaced))
                 } else if let pattern {
                     Text("\(pattern.notes.count) notes\(pattern.introEnabled && pattern.intro > 0 ? " · INTRO" : "")")
@@ -729,7 +732,7 @@ struct SequencerView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
-            "\(instrument.name), row \(row + 1), \(recording ? "finish recording and play loop" : pattern?.name ?? "record pattern")\(queued ? ", queued" : active ? ", playing" : "")"
+            "\(instrument.name), row \(row + 1), \(recording ? "finish recording at end of bar and play loop" : pattern?.name ?? "record pattern")\(queued ? ", queued" : active ? ", playing" : "")"
         )
         .contextMenu {
             if let pattern {
