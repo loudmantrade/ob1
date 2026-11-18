@@ -598,6 +598,28 @@ private struct SequencerRecordLengthControl: View {
     }
 }
 
+private struct SequencerNoteDiagram: View {
+    let pattern: SequencerPattern
+
+    var body: some View {
+        Canvas { context, size in
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let radius = max(0, min(size.width, size.height) / 2 - 3)
+            var dots = Path()
+            for note in pattern.notes where note.start >= 0 || pattern.introEnabled {
+                let phase = Double((note.start % pattern.length + pattern.length) % pattern.length) / Double(pattern.length)
+                let angle = phase * 2 * Double.pi - Double.pi / 2
+                let distance = radius * Double(note.pitch) / 127
+                let point = CGPoint(x: center.x + cos(angle) * distance,
+                                    y: center.y + sin(angle) * distance)
+                dots.addEllipse(in: CGRect(x: point.x - 1.5, y: point.y - 1.5, width: 3, height: 3))
+            }
+            context.fill(dots, with: .foreground)
+        }
+        .accessibilityHidden(true)
+    }
+}
+
 struct SequencerView: View {
     @ObservedObject var model: OberVaveModel
     @State private var editing: SequencerPattern?
@@ -706,36 +728,26 @@ struct SequencerView: View {
         let active = Int(ov_seq_active(UInt32(instrument.slot))) == row
         let queued = Int(ov_seq_pending(UInt32(instrument.slot))) == row
         let recording = model.recordingPattern == instrument.slot * 8 + row
-        let stopping = active && ov_seq_stopping(UInt32(instrument.slot)) != 0
         let phase = ov_seq_record_phase()
         let color = MIDIChannelColors.color(instrument.channel)
         return Button {
             model.tapPattern(slot: instrument.slot, row: row)
         } label: {
-            VStack(spacing: 3) {
-                HStack {
-                    Image(
-                        systemName: recording
-                            ? "record.circle.fill" : stopping ? "stop.fill" : queued ? "clock" : active ? "play.fill" : pattern == nil ? "plus" : "square.grid.2x2")
-                    if let pattern {
-                        Text(pattern.name).lineLimit(1).font(.caption.bold())
-                    }
-                }
+            Group {
                 if recording {
-                    Text(phase == 1 ? "WAIT FOR NOTE" : phase == 2 ? "COUNT \(ov_seq_record_remaining())"
-                        : phase == 4 ? "BAR \(ov_seq_record_remaining())"
-                        : phase == 5 ? "LOOP IN \(ov_seq_record_remaining())" : "REC · TAP TO LOOP")
-                        .font(.system(size: 9, design: .monospaced))
-                    Text("\(Double(ov_seq_record_length()) / 960, specifier: "%.0f") BEATS")
-                        .font(.system(size: 9, design: .monospaced))
-                } else if stopping {
-                    Text("STOP AT BAR").font(.system(size: 9, design: .monospaced))
+                    VStack(spacing: 3) {
+                        Image(systemName: "record.circle.fill")
+                        Text(phase == 1 ? "WAIT FOR NOTE" : phase == 2 ? "COUNT \(ov_seq_record_remaining())"
+                            : phase == 4 ? "BAR \(ov_seq_record_remaining())"
+                            : phase == 5 ? "LOOP IN \(ov_seq_record_remaining())" : "REC · TAP TO LOOP")
+                            .font(.system(size: 9, design: .monospaced))
+                        Text("\(Double(ov_seq_record_length()) / 960, specifier: "%.0f") BEATS")
+                            .font(.system(size: 9, design: .monospaced))
+                    }
                 } else if let pattern {
-                    Text("\(pattern.notes.count) notes\(pattern.introEnabled && pattern.intro > 0 ? " · INTRO" : "")")
-                        .font(.system(size: 9, design: .monospaced))
-                }
-                if active {
-                    ProgressView(value: Double(ov_seq_position(UInt32(instrument.slot))), total: 65535).tint(color)
+                    SequencerNoteDiagram(pattern: pattern)
+                } else {
+                    Image(systemName: "plus")
                 }
             }
             .padding(.horizontal, 5).frame(width: width, height: padHeight)

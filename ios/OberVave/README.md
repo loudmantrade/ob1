@@ -78,7 +78,13 @@ feed their own notes through the saved ARP mode.
   again to queue completion at the end of the current body bar and start the
   loop on that boundary. Recording continues until then, without confirmation
   dialogs. Tap a stopped filled pad to launch it; tap a playing pad to queue
-  its Stop at the next bar boundary (**STOP AT BAR**). Repeat taps do not
+  its Stop at the next bar boundary. Recorded pads show only a circular dot
+  diagram: note start time runs clockwise from the top, and distance from
+  the center is proportional to MIDI pitch (0 at the center, 127 outside).
+  There are no names, counts, icons or progress bars on recorded pads;
+  playback and queued actions retain their background/border highlighting.
+  Enabled pickup notes wrap around the same circular timeline.
+  Repeat taps do not
   postpone completion/Stop. Short taps are resolved on audio against the
   actual pad state, even before the UI reads recording completion.
   Finishing and playback start are audio-owned, without waiting for UI polling.
