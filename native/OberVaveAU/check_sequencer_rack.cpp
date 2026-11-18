@@ -22,6 +22,7 @@ void operator delete(void* pointer, std::size_t) noexcept { ::operator delete(po
 void operator delete[](void* pointer, std::size_t) noexcept { ::operator delete(pointer); }
 #include "../../ios/OberVave/SynthRack.cpp"
 
+namespace rack { auto& recorder = recordings[0].recorder; }
 namespace music = ob1::music;
 static void render(uint32_t frames = CTL)
 {
@@ -430,7 +431,7 @@ static void checkConsecutiveTakes()
         ov_note_on(60 + slot, 100); render(2048); ov_note_off(60 + slot); render();
         assert(ov_seq_tap(slot, 0, 2, 1, 0, 1, 0)); render();
         assert(ov_seq_record_phase() == 5);
-        while (rack::recorder.running) render();
+        while (rack::recordings[slot].recorder.running) render();
         assert(ov_seq_record_phase() == 0 && ov_seq_recording_slot() == -1);
         assert(!ov_seq_record_state());
         origins[slot] = rack::players[slot].origin;
@@ -525,7 +526,7 @@ static void checkPatternMove()
         assert(ov_seq_read_edit(&copied)); return copied.success;
     };
     assert(ov_seq_arm(1, 1, 1, 1, 0, 1)); render();
-    assert(!remove() && rack::clips[1][1] && rack::recorder.running);
+    assert(!remove() && rack::clips[1][1] && rack::recordings[1].recorder.running);
     assert(ov_seq_finish_record()); render(); // Before the aligned body: cancel, preserving the original.
     auto cancelled = std::make_unique<ov_seq_clip>();
     assert(ov_seq_record_result() == 2 && ov_seq_read_record(cancelled.get()));
@@ -688,6 +689,110 @@ static void checkWaitDuringPlayback()
     std::puts("PASS Wait during playback: multiple bars/pattern notes/other channels do not trigger, Input and compensated ARP Output start at first note, no clock reset, full take and loop handover");
 }
 
+static void checkGroupedRecording()
+{
+    for (uint32_t output : {0u, 1u}) {
+        auto scene = std::make_unique<ov_scene_config>();
+        scene->tempo = 120;
+        for (uint32_t slot = 0; slot < 3; ++slot) {
+            scene->slots[slot] = {1, config(output ? rack::A_UP : 0)};
+            scene->slots[slot].config.channel = slot == 2 ? 2 : 1;
+        }
+        scene->slots[3] = {1, config()};
+        scene->slots[3].config.channel = 3;
+        assert(ov_rack_load(scene.get())); render();
+        if (output) {
+            auto backing = std::make_unique<ov_seq_clip>(clip(3, 0));
+            assert(ov_seq_set_clip(backing.get()) && ov_seq_launch(3, 0, 0)); render();
+        }
+        const auto playingAnchor = rack::sequencerAnchor;
+        assert(ov_seq_tap(0, 0, 0, 1, 0, output, 0));
+        assert(ov_seq_tap(1, 2, 0, 1, 0, output, 0)); render();
+        assert(ov_seq_tap(2, 4, 0, 1, 0, output, 0)); render();
+        render(rack::clock.length() * 8);
+        for (uint32_t slot = 0; slot < 3; ++slot)
+            assert((ov_seq_record_state_for_slot(slot) & 7) == 1);
+        // A second cell in the same column is rejected without disturbing the group.
+        assert(ov_seq_arm(1, 3, 0, 1, 0, output)); render();
+        assert(ov_rack_take_error() == 2 && rack::recordings[1].recorder.row == 2);
+        ov_midi_message(0x90, 60, 100);
+        ov_midi_message(0x91, 67, 100); render();
+        while (!rack::recordings[0].recorder.started || !rack::recordings[1].recorder.started ||
+               !rack::recordings[2].recorder.started) render();
+        const auto origin = rack::recordings[0].recorder.origin;
+        for (uint32_t slot = 0; slot < 3; ++slot) {
+            assert(rack::recordings[slot].recorder.origin == origin);
+        }
+        if (output) assert(rack::sequencerAnchor == playingAnchor && ov_seq_active(3) == 0);
+        render(2048);
+        assert(ov_seq_tap(1, 2, 0, 1, 0, output, 0)); render();
+        assert((ov_seq_record_state_for_slot(1) & 7) == 5);
+        assert((ov_seq_record_state_for_slot(0) & 7) == 3 && (ov_seq_record_state_for_slot(2) & 7) == 3);
+        while (ov_seq_record_state_for_slot(1)) render();
+        auto result = std::make_unique<ov_seq_clip>();
+        assert(ov_seq_read_record(result.get()) && result->slot == 1 && result->row == 2);
+        assert(result->length == 3840 && result->count && ov_seq_active(1) == 2);
+        assert(result->notes[0].pitch == 60 && result->notes[0].start == 0);
+        assert(ov_seq_record_state_for_slot(0) && ov_seq_record_state_for_slot(2));
+        render(1024);
+        assert(ov_seq_finish_record()); render();
+        assert((ov_seq_record_state_for_slot(0) & 7) == 5 && (ov_seq_record_state_for_slot(2) & 7) == 5);
+        while (ov_seq_record_state()) render();
+        uint32_t mask = 0;
+        while (ov_seq_read_record(result.get())) {
+            assert(result->slot != 1 && result->count && result->length % 3840 == 0);
+            assert(result->notes[0].pitch == (result->slot == 2 ? 67 : 60) && result->notes[0].start == 0);
+            mask |= 1u << result->slot;
+        }
+        assert(mask == 5 && ov_seq_active(0) == 0 && ov_seq_active(2) == 4);
+        assert(ov_rack_stop_all()); render();
+        assert(!ov_rack_take_error());
+    }
+    // Count-in additions join the original deadline, not another full count.
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120;
+    for (uint32_t slot = 0; slot < rack::capacity; ++slot) scene->slots[slot] = {1, config()};
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_arm(0, 0, 1, 1, 4, 0)); render();
+    render(rack::clock.length());
+    for (uint32_t slot = 1; slot < rack::capacity; ++slot)
+        assert(ov_seq_arm(slot, 0, 1, 1, 4, 0));
+    render();
+    for (uint32_t slot = 1; slot < rack::capacity; ++slot)
+        assert(rack::recordings[slot].recorder.origin == rack::recordings[0].recorder.origin);
+    // Every active take owns a completion reservation, even with no unread results.
+    assert(!rack::completionSpace());
+    const auto body = rack::recordings[0].recorder.origin;
+    while (rack::musicalPosition.value < body) render();
+    ov_midi_message(0x90, 72, 100); render(2048);
+    ov_midi_message(0x80, 72, 0); render();
+    while (ov_seq_record_state()) render();
+    assert(ov_seq_arm(0, 1, 0, 1, 4, 0)); render();
+    assert(ov_rack_take_error() == 4 && !ov_seq_record_state());
+    auto result = std::make_unique<ov_seq_clip>();
+    uint32_t completions = 0;
+    while (ov_seq_read_record(result.get())) {
+        assert(result->count == 1 && result->notes[0].pitch == 72 && result->length == 3840);
+        assert(ov_seq_active(result->slot) == 0);
+        ++completions;
+    }
+    assert(completions == rack::capacity && !ov_seq_record_state());
+    assert(ov_rack_stop_all()); render();
+    for (uint32_t slot = 0; slot < rack::capacity; ++slot)
+        assert(ov_seq_arm(slot, 1, 0, 1, 0, 0));
+    render();
+    assert(ov_seq_finish_record()); render();
+    completions = 0;
+    while (ov_seq_record_ready()) {
+        assert(ov_seq_record_result() == 2 && ov_seq_read_record(result.get()));
+        assert(!rack::clips[result->slot][1]);
+        ++completions;
+    }
+    assert(completions == rack::capacity && !ov_seq_record_state());
+    assert(!ov_rack_take_error());
+    std::puts("PASS grouped recording: simultaneous and staggered arming, shared Wait trigger, layered and multichannel Input/ARP Output, individual/all finish, one take per column, 16 aligned count-ins and reserved completions");
+}
+
 static void checkRecordingMetronomeAndTransport()
 {
     auto scene = std::make_unique<ov_scene_config>();
@@ -755,5 +860,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

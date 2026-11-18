@@ -34,11 +34,15 @@ int ov_seq_tap(uint32_t slot, uint32_t row, uint32_t mode, uint32_t count_bars, 
 int ov_seq_finish_record(void);
 uint32_t ov_seq_record_phase(void); /* 0 idle, 1 waiting for note, 2 count-in, 3 body, 4 waiting for scene bar, 5 finishing at bar */
 uint32_t ov_seq_record_state(void); /* coherent snapshot: phase in bits 0..2; (cell ID + 1) in bits 3..10; 0 idle */
+/* One active take per slot; legacy getters above report the first active slot. */
+uint32_t ov_seq_record_state_for_slot(uint32_t slot);
+uint32_t ov_seq_record_progress_for_slot(uint32_t slot);
+uint32_t ov_seq_record_remaining_for_slot(uint32_t slot);
 uint32_t ov_seq_record_remaining(void);
 int64_t ov_seq_record_length(void); /* current length in 960-PPQ ticks */
 uint32_t ov_seq_record_result(void); /* 1 saved, 2 cancelled, 3 failed; read before mailbox */
-/* Single control-thread consumer; bounded FIFO. The audio recorder reserves a result entry when armed.
-   Rack error 4 rejects a new take if all 16 completion entries are unread. */
+/* Single control-thread consumer; bounded FIFO. Each armed recorder reserves a result entry.
+   Rack error 4 rejects a new take if unread completions + active takes occupy all 16 entries. */
 uint32_t ov_seq_record_ready(void);
 int ov_seq_read_record(ov_seq_clip* clip);
 int ov_seq_read_completion(ov_seq_clip* clip, uint32_t* result, uint64_t* epoch);

@@ -323,9 +323,14 @@ std::unique_ptr<SequencerClip> prepareClip(const ov_seq_clip& input)
 }
 std::array<music::ClipPlayer, capacity> players;
 music::MusicalPosition musicalPosition;
-music::ClipRecorder recorder;
-std::unique_ptr<RecordingRequest> recordingDestination;
-bool recordingAutoplay = false;
+struct Recording {
+    music::ClipRecorder recorder;
+    std::unique_ptr<RecordingRequest> destination;
+    bool autoplay = false;
+    std::atomic<uint32_t> state {0}, remaining {0}, progress {0};
+    std::atomic<int64_t> length {0};
+};
+std::array<Recording, capacity> recordings;
 bool recordingClockPrimed = false;
 constexpr uint32_t completionCapacity = 16;
 struct Completion { ov_seq_clip clip {}; uint32_t result = 0; uint64_t epoch = 0, revision = 0; };
@@ -334,7 +339,9 @@ std::atomic<uint32_t> completionRead {0}, completionWrite {0};
 std::atomic<uint64_t> sceneEpoch {0};
 bool completionSpace()
 {
-    return completionWrite.load(std::memory_order_relaxed) - completionRead.load(std::memory_order_acquire) < completionCapacity;
+    uint32_t reserved = 0;
+    for (const auto& recording : recordings) reserved += recording.recorder.running;
+    return completionWrite.load(std::memory_order_relaxed) - completionRead.load(std::memory_order_acquire) + reserved < completionCapacity;
 }
 std::atomic<uint32_t> recordingPhase {0}, recordingRemaining {0}, recordingProgress {0};
 std::atomic<uint32_t> recorderState {0};
@@ -353,6 +360,7 @@ std::atomic<int32_t> recordingRow {-1};
 std::array<std::atomic<uint32_t>, capacity> stoppingRows {};
 uint16_t soloMask = 0;
 void finishRecording(bool autoplay = false);
+void finishRecordingSlot(uint32_t slot, bool autoplay = false);
 void stopSequencer(uint32_t slot);
 void observeInput(uint32_t slot, const music::Event& event);
 
@@ -525,16 +533,31 @@ void encodeClip(uint32_t slot, uint32_t row, const music::PatternData& data, ov_
             note.routing.stage == music::Stage::Output ? 1u : 0u};
     }
 }
+void publishRecording(uint32_t slot)
+{
+    auto& recording = recordings[slot];
+    const auto& recorder = recording.recorder;
+    recording.remaining.store(recorder.remaining(musicalPosition.value));
+    recording.length.store(recorder.running ? recorder.lengthAt(musicalPosition.value) : 0);
+    const auto elapsed = musicalPosition.value - recorder.origin;
+    recording.progress.store(recorder.running && !recorder.waiting && elapsed >= 0 ?
+        uint32_t(double(elapsed % (3840 * music::tickUnit)) * 65535 / double(3840 * music::tickUnit)) : 0);
+    recording.state.store(recorder.running ?
+        ((slot * OV_SEQ_ROWS + recorder.row + 1) << 3) | recorder.phase(musicalPosition.value) : 0);
+}
 void finishRecording(bool autoplay)
 {
+    for (uint32_t slot = 0; slot < capacity; ++slot) finishRecordingSlot(slot, autoplay);
+}
+void finishRecordingSlot(uint32_t slot, bool autoplay)
+{
+    auto& recording = recordings[slot];
+    auto& recorder = recording.recorder;
+    auto& recordingDestination = recording.destination;
     if (!recorder.running) return;
     const auto completion = std::min(musicalPosition.value, recorder.stopAt);
     recorder.finish(musicalPosition.value);
-    recordingSlot.store(-1);
-    recordingRow.store(-1);
-    recordingPhase.store(0); recordingRemaining.store(0);
-    recordingLength.store(0);
-    recorderState.store(0);
+    publishRecording(slot);
     auto& completed = completions[completionWrite.load(std::memory_order_relaxed) % completionCapacity];
     completed.epoch = sceneEpoch.load();
     if (recorder.overflow) {
@@ -550,7 +573,7 @@ void finishRecording(bool autoplay)
         completed.revision = clipRevisions[recorder.slot][recorder.row].fetch_add(1) + 1;
         encodeClip(recorder.slot, recorder.row, recorder.data, completed.clip);
         completed.result = 1;
-        if (autoplay && recordingAutoplay)
+        if (autoplay && recording.autoplay)
             players[recorder.slot].queue(recorder.row, &clips[recorder.slot][recorder.row]->pattern,
                 musicalPosition.value, music::LaunchGrid::Free, completion, false);
     }
@@ -561,22 +584,42 @@ void finishRecording(bool autoplay)
     retire(recordingDestination.release());
     completionWrite.fetch_add(1, std::memory_order_release);
 }
+void requestRecordingFinish(uint32_t slot)
+{
+    auto& recording = recordings[slot];
+    auto& recorder = recording.recorder;
+    if (recording.autoplay && recorder.running && !recorder.overflow &&
+        !recorder.waiting && musicalPosition.value >= recorder.origin)
+        recorder.requestFinish(musicalPosition.value);
+    else finishRecordingSlot(slot, true);
+}
 void alignRecordingClock()
 {
     musicalPosition.value = music::ClipPlayer::boundary(musicalPosition.value, music::LaunchGrid::Bar);
     sequencerAnchor = processedFrames;
 }
+void startWaitingRecordings(bool output)
+{
+    for (auto& recording : recordings) {
+        auto& recorder = recording.recorder;
+        if (recorder.running && recorder.waiting && recorder.output == output)
+            recorder.firstNote(musicalPosition.value);
+    }
+}
 void observeInput(uint32_t slot, const music::Event& event)
 {
+    auto& recorder = recordings[slot].recorder;
     if (recorder.running && recorder.slot == slot && recorder.waiting &&
         event.kind == music::Kind::NoteOn && event.source.kind != music::SourceKind::Pattern) {
         if (!recordingClockPrimed) {
             bool playing = clock.external;
             for (const auto& player : players) playing |= player.row >= 0 || player.pendingRow >= 0;
+            for (const auto& recording : recordings)
+                playing |= recording.recorder.running && !recording.recorder.waiting;
             if (!playing) alignRecordingClock();
             recordingClockPrimed = true;
         }
-        if (!recorder.output) recorder.firstNote(musicalPosition.value);
+        if (!recorder.output) startWaitingRecordings(false);
     }
     if (recorder.running && !recorder.output && recorder.slot == slot &&
         !recorder.capture(event, musicalPosition.value)) { error.store(1); panic.store(1); }
@@ -584,9 +627,10 @@ void observeInput(uint32_t slot, const music::Event& event)
 bool observeOutput(void* context, const music::Event& event) noexcept
 {
     const auto slot = *static_cast<const uint32_t*>(context);
+    auto& recorder = recordings[slot].recorder;
     if (recorder.running && recorder.output && recorder.slot == slot && recorder.waiting &&
         event.kind == music::Kind::NoteOn && event.source.kind != music::SourceKind::Pattern)
-        recorder.firstNote(musicalPosition.value);
+        startWaitingRecordings(true);
     if (recorder.running && recorder.output && recorder.slot == slot &&
         !recorder.capture(event, musicalPosition.value)) { error.store(1); panic.store(1); return false; }
     return true;
@@ -757,8 +801,8 @@ void apply(const Command& c)
     if (c.kind == Kind::SeqEdit) {
         auto* edit = static_cast<EditRequest*>(c.object);
         const auto s = edit->sourceSlot, r = edit->sourceRow, t = edit->targetSlot, u = edit->targetRow;
-        const bool recording = recorder.running &&
-            ((recorder.slot == s && recorder.row == r) || (recorder.slot == t && recorder.row == u));
+        const bool recording = (recordings[s].recorder.running && recordings[s].recorder.row == r) ||
+            (recordings[t].recorder.running && recordings[t].recorder.row == u);
         const bool valid = !recording && edit->epoch == sceneEpoch.load() &&
             scene->slots[s] && scene->slots[t] && clips[s][r] && (!clips[t][u] || edit->mode >= 2) &&
             clipRevisions[s][r].load() == edit->sourceRevision &&
@@ -791,9 +835,9 @@ void apply(const Command& c)
     }
     if (c.kind == Kind::SeqTap) {
         auto* request = static_cast<RecordingRequest*>(c.object);
+        auto& recorder = recordings[c.slot].recorder;
         if (recorder.running && recorder.slot == c.slot && recorder.row == c.a) {
-            Command finish; finish.kind = Kind::SeqFinish;
-            apply(finish);
+            requestRecordingFinish(c.slot);
         } else if (players[c.slot].row == int32_t(c.a)) {
             players[c.slot].requestStop(musicalPosition.value);
         } else if (clips[c.slot][c.a]) {
@@ -808,10 +852,7 @@ void apply(const Command& c)
         return;
     }
     if (c.kind == Kind::SeqFinish) {
-        if (recordingAutoplay && recorder.running && !recorder.overflow &&
-            !recorder.waiting && musicalPosition.value >= recorder.origin)
-            recorder.requestFinish(musicalPosition.value);
-        else finishRecording(true);
+        for (uint32_t slot = 0; slot < capacity; ++slot) requestRecordingFinish(slot);
         return;
     }
     if (c.kind == Kind::SeqRow) {
@@ -828,7 +869,7 @@ void apply(const Command& c)
         return;
     }
     if (c.kind == Kind::SeqClip) {
-        if (recorder.running && recorder.slot == c.slot && recorder.row == c.a) {
+        if (recordings[c.slot].recorder.running && recordings[c.slot].recorder.row == c.a) {
             error.store(2); retire(c.object); return;
         }
         if (players[c.slot].row == int32_t(c.a) || players[c.slot].pendingRow == int32_t(c.a))
@@ -849,7 +890,7 @@ void apply(const Command& c)
             scene->slots[c.slot]->engine->boundary({processedFrames});
             scene->slots[c.slot]->engine->stopArpeggiator();
         } else if (!c.a) {
-            if (recorder.running && recorder.slot == c.slot) finishRecording();
+            finishRecordingSlot(c.slot);
             stopSequencer(c.slot);
         }
         return;
@@ -859,30 +900,38 @@ void apply(const Command& c)
         return;
     }
     if (c.kind == Kind::SeqRecord) {
+        auto& recording = recordings[c.slot];
+        auto& recorder = recording.recorder;
         auto* request = static_cast<RecordingRequest*>(c.object);
         if (recorder.running || !scene->slots[c.slot] ||
             (request->legacy && !clips[c.slot][c.a])) { error.store(2); retire(request); return; }
-        // Reserve one completion entry before accepting a take; the sole producer cannot fill it meanwhile.
+        // Unread results plus all active takes must fit the completion FIFO.
         if (!completionSpace()) { error.store(4); retire(request); return; }
         bool playing = clock.external;
         for (const auto& player : players) playing |= player.row >= 0 || player.pendingRow >= 0;
-        recordingDestination.reset(request);
-        recordingClockPrimed = false;
-        recordingAutoplay = !request->legacy;
+        Recording* joining = nullptr;
+        bool anyRecording = false;
+        for (auto& other : recordings) if (other.recorder.running) {
+            anyRecording = true;
+            if (other.recorder.waiting || musicalPosition.value < other.recorder.origin) joining = &other;
+        }
+        recording.destination.reset(request);
+        if (!anyRecording) recordingClockPrimed = false;
+        recording.autoplay = !request->legacy;
         const auto& settings = clips[c.slot][c.a] ? clips[c.slot][c.a]->pattern.data() : request->pattern.data();
         if (request->legacy)
             recorder.begin(c.slot, c.a, settings, musicalPosition.value, request->output, request->intro);
         else {
-            if (!playing && request->mode != uint32_t(music::RecordMode::WaitForNote)) alignRecordingClock();
+            if (!playing && !anyRecording && request->mode != uint32_t(music::RecordMode::WaitForNote)) alignRecordingClock();
             recorder.arm(c.slot, c.a, settings, musicalPosition.value,
                 music::RecordMode(request->mode), request->bars, request->beats, playing, request->output);
+            if (joining && request->mode == uint32_t(music::RecordMode::CountIn) && joining->recorder.countBeats) {
+                recorder.countStart = joining->recorder.countStart;
+                recorder.origin = joining->recorder.origin;
+                recorder.stopAt = recorder.freeLength ? INT64_MAX : recorder.origin + recorder.data.length * music::tickUnit;
+            }
         }
-        recordingSlot.store(c.slot);
-        recordingRow.store(c.a);
-        recordingPhase.store(recorder.phase(musicalPosition.value));
-        recorderState.store(((c.slot * OV_SEQ_ROWS + c.a + 1) << 3) | recorder.phase(musicalPosition.value));
-        recordingRemaining.store(recorder.remaining(musicalPosition.value));
-        recordingLength.store(recorder.lengthAt(musicalPosition.value));
+        publishRecording(c.slot);
         return;
     }
     if (c.kind == Kind::StopAll) {
@@ -962,7 +1011,7 @@ void apply(const Command& c)
     if (c.slot >= capacity) return;
     auto& pointer = scene->slots[c.slot];
     if (c.kind == Kind::Add || c.kind == Kind::Remove) {
-        if (recorder.running && recorder.slot == c.slot) finishRecording();
+        finishRecordingSlot(c.slot);
         stopSequencer(c.slot);
         for (auto& clip : clips[c.slot]) retire(clip.release());
         for (auto& revision : clipRevisions[c.slot]) revision.fetch_add(1);
@@ -1058,15 +1107,21 @@ void renderBlock()
     musicalPosition.advance(CTL, q);
     musicalPosition.followPhase(clock.external ? int32_t(clock.frame - clock.anchor)
         : int32_t((processedFrames - sequencerAnchor) % (uint64_t(q) * 4)), q);
-    if (recorder.running && musicalPosition.value >= recorder.stopAt) finishRecording(true);
-    recordingPhase.store(recorder.phase(musicalPosition.value));
-    recorderState.store(recorder.running ?
-        ((recorder.slot * OV_SEQ_ROWS + recorder.row + 1) << 3) | recorder.phase(musicalPosition.value) : 0);
-    recordingRemaining.store(recorder.remaining(musicalPosition.value));
-    recordingLength.store(recorder.running ? recorder.lengthAt(musicalPosition.value) : 0);
-    const auto captureElapsed = musicalPosition.value - recorder.origin;
-    recordingProgress.store(recorder.running && !recorder.waiting && captureElapsed >= 0 ?
-        uint32_t(double(captureElapsed % (3840 * music::tickUnit)) * 65535 / double(3840 * music::tickUnit)) : 0);
+    int32_t firstRecording = -1;
+    for (uint32_t slot = 0; slot < capacity; ++slot) {
+        auto& recorder = recordings[slot].recorder;
+        if (recorder.running && musicalPosition.value >= recorder.stopAt) finishRecordingSlot(slot, true);
+        publishRecording(slot);
+        if (recorder.running && firstRecording < 0) firstRecording = int32_t(slot);
+    }
+    const auto state = firstRecording < 0 ? 0 : recordings[firstRecording].state.load();
+    recordingSlot.store(firstRecording);
+    recordingRow.store(firstRecording < 0 ? -1 : int32_t(recordings[firstRecording].recorder.row));
+    recordingPhase.store(state & 7);
+    recorderState.store(state);
+    recordingRemaining.store(firstRecording < 0 ? 0 : recordings[firstRecording].remaining.load());
+    recordingLength.store(firstRecording < 0 ? 0 : recordings[firstRecording].length.load());
+    recordingProgress.store(firstRecording < 0 ? 0 : recordings[firstRecording].progress.load());
     for (uint32_t slot = 0; slot < capacity; ++slot) {
         const auto pending = players[slot].pendingRow;
         if (scene->slots[slot] && pending >= 0 && clips[slot][pending] &&
@@ -1091,7 +1146,11 @@ void renderBlock()
             uint32_t(double(position % (clip->data().length * music::tickUnit)) * 65535 /
                 double(clip->data().length * music::tickUnit)) : 0);
     }
-    const bool recording = recorder.running && !recorder.waiting;
+    const music::ClipRecorder* activeRecording = nullptr;
+    for (const auto& recording : recordings)
+        if (recording.recorder.running && !recording.recorder.waiting &&
+            (!activeRecording || recording.recorder.origin < activeRecording->origin)) activeRecording = &recording.recorder;
+    const bool recording = activeRecording != nullptr;
     bool patternPlaying = false;
     for (const auto& player : players) patternPlaying |= player.row >= 0;
     const bool playing = recording || patternPlaying;
@@ -1099,7 +1158,7 @@ void renderBlock()
         const auto bar = 3840 * music::tickUnit;
         // A new take starts on its actual first sound, which may follow the ARP grid.
         transportOrigin = recording && !patternPlaying && !clock.external
-            ? (recorder.countBeats ? recorder.countStart : recorder.origin)
+            ? (activeRecording->countBeats ? activeRecording->countStart : activeRecording->origin)
             : musicalPosition.value / bar * bar;
     }
     if (playing) {
@@ -1441,6 +1500,18 @@ int ov_seq_tap(uint32_t slot, uint32_t row, uint32_t mode, uint32_t bars, uint32
 }
 uint32_t ov_seq_record_phase(void) { return rack::recordingPhase.load(); }
 uint32_t ov_seq_record_state(void) { return rack::recorderState.load(); }
+uint32_t ov_seq_record_state_for_slot(uint32_t slot)
+{
+    return slot < rack::capacity ? rack::recordings[slot].state.load() : 0;
+}
+uint32_t ov_seq_record_progress_for_slot(uint32_t slot)
+{
+    return slot < rack::capacity ? rack::recordings[slot].progress.load() : 0;
+}
+uint32_t ov_seq_record_remaining_for_slot(uint32_t slot)
+{
+    return slot < rack::capacity ? rack::recordings[slot].remaining.load() : 0;
+}
 uint32_t ov_seq_record_remaining(void) { return rack::recordingRemaining.load(); }
 int64_t ov_seq_record_length(void) { return rack::recordingLength.load(); }
 uint32_t ov_seq_record_result(void)
