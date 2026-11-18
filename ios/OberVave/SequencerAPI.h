@@ -50,7 +50,7 @@ uint32_t ov_seq_position(uint32_t slot); /* 0..65535 */
 int32_t ov_seq_recording_slot(void);
 int32_t ov_seq_recording_row(void);
 uint32_t ov_seq_stopping(uint32_t slot);
-/* Transaction: mode 0 MOVE. Expected immutable source + cell revisions reject stale UI.
+/* Transaction: mode 0 MOVE, 1 COPY. Expected immutable source + cell revisions reject stale UI.
    One control-thread consumer reads acknowledgements. No model mutation before success. */
 typedef struct { uint64_t token; uint32_t success; } ov_seq_edit_result;
 uint64_t ov_seq_cell_revision(uint32_t slot, uint32_t row);

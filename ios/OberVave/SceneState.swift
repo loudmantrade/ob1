@@ -301,6 +301,7 @@ struct PatternTransfer {
     var sourceRevision: UInt64
     var targetRevision: UInt64
     var epoch: UInt64
+    var copying = false
 
     func applying(to patterns: [SequencerPattern]) throws -> [SequencerPattern] {
         guard patterns.first(where: { $0.id == source.id }) == source,
@@ -310,7 +311,7 @@ struct PatternTransfer {
         var moved = source
         moved.slot = destination.slot; moved.row = destination.row
         try moved.validate()
-        return patterns.filter { $0.id != source.id } + [moved]
+        return patterns.filter { copying || $0.id != source.id } + [moved]
     }
 }
 

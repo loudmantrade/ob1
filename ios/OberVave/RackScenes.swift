@@ -449,6 +449,16 @@ extension OberVaveModel {
     }
 
     func movePattern(_ transfer: PatternTransfer) {
+        var move = transfer; move.copying = false
+        submitPatternTransfer(move)
+    }
+
+    func copyPattern(_ transfer: PatternTransfer) {
+        var copy = transfer; copy.copying = true
+        submitPatternTransfer(copy)
+    }
+
+    private func submitPatternTransfer(_ transfer: PatternTransfer) {
         syncRackState()
         guard pendingPatternTransfer == nil, pendingSceneName == nil,
               instruments.contains(where: { $0.slot == transfer.destination.slot }),
@@ -459,9 +469,9 @@ extension OberVaveModel {
             _ = try transfer.applying(to: patterns)
             var source = transfer.source.coreClip()
             patternTransferToken &+= 1
-            guard ov_seq_edit(&source, UInt32(transfer.destination.slot), UInt32(transfer.destination.row), 0,
+            guard ov_seq_edit(&source, UInt32(transfer.destination.slot), UInt32(transfer.destination.row), transfer.copying ? 1 : 0,
                               transfer.epoch, transfer.sourceRevision, transfer.targetRevision, patternTransferToken) != 0 else {
-                throw SceneError.invalid("Could not queue pattern move.")
+                throw SceneError.invalid("Could not queue pattern transfer.")
             }
             pendingPatternTransfer = PendingPatternTransfer(token: patternTransferToken, transfer: transfer)
         } catch { errorMessage = error.localizedDescription }
@@ -480,9 +490,10 @@ extension OberVaveModel {
         guard let row = (0..<8).first(where: { self.pattern(slot: pattern.slot, row: $0) == nil }) else {
             errorMessage = "This instrument already has eight patterns."; return
         }
-        var copy = pattern; copy.row = row
-        copy.name = String((pattern.name + " Copy").prefix(24))
-        _ = storePattern(copy)
+        copyPattern(PatternTransfer(source: pattern, destination: PatternCell(slot: pattern.slot, row: row),
+                                    sourceRevision: ov_seq_cell_revision(UInt32(pattern.slot), UInt32(pattern.row)),
+                                    targetRevision: ov_seq_cell_revision(UInt32(pattern.slot), UInt32(row)),
+                                    epoch: ov_seq_scene_epoch(), copying: true))
     }
 
     func launchPattern(slot: Int, row: Int) {

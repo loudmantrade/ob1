@@ -755,8 +755,11 @@ void apply(const Command& c)
             };
             stopAffected(s, r); stopAffected(t, u);
             retire(clips[t][u].release()); clips[t][u] = std::move(edit->replacement);
-            retire(clips[s][r].release());
-            clipRevisions[s][r].fetch_add(1); clipRevisions[t][u].fetch_add(1);
+            if (edit->mode == 0) {
+                retire(clips[s][r].release());
+                clipRevisions[s][r].fetch_add(1);
+            }
+            clipRevisions[t][u].fetch_add(1);
         }
         const auto write = editWrite.load(std::memory_order_relaxed);
         editResults[write % editCapacity] = {edit->token, valid ? 1u : 0u};
@@ -1292,7 +1295,7 @@ int ov_seq_edit(const ov_seq_clip* source, uint32_t targetSlot, uint32_t targetR
                 uint32_t mode, uint64_t epoch, uint64_t sourceRevision, uint64_t targetRevision, uint64_t token)
 {
     using namespace rack;
-    if (!source || targetSlot >= capacity || targetRow >= OV_SEQ_ROWS || mode != 0 ||
+    if (!source || targetSlot >= capacity || targetRow >= OV_SEQ_ROWS || mode > 1 ||
         (source->slot == targetSlot && source->row == targetRow)) { error.store(2); return 0; }
     try {
         auto edit = std::make_unique<EditRequest>();

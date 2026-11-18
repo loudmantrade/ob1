@@ -156,6 +156,11 @@ struct SceneChecks {
         precondition(moved.count == 1 && moved[0].slot == 1 && moved[0].row == 2 && moved[0].notes == sourcePattern.notes)
         let restored = try JSONDecoder().decode([SequencerPattern].self, from: JSONEncoder().encode(moved))
         precondition(restored == moved)
+        var copy = move; copy.copying = true
+        var copied = try copy.applying(to: [sourcePattern])
+        precondition(copied.count == 2 && copied[1].notes == copied[0].notes)
+        copied[1].notes[0].pitch = 80
+        precondition(copied[0] == sourcePattern && copied[1].notes[0].pitch == 80)
         print("PASS transactional MOVE model: exact note preservation, destination identity and JSON persistence")
         precondition(SynthParameter.allCases.count == Int(ov_parameter_count()))
         precondition(SynthParameter.arpVelocity.audioUnitID == 64)

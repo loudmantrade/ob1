@@ -469,6 +469,16 @@ static void checkPatternMove()
     assert(moved.notes[0].start == 0 && moved.notes[0].duration == 480);
     assert(ov_seq_active(2) == 0 && rack::players[2].origin == unrelatedOrigin);
     assert(!gate(0) && !engine(0).arpeggiator.processor().heldCount());
+    source->slot = 1; source->row = 1;
+    assert(ov_seq_edit(source.get(), 0, 3, 1, ov_seq_scene_epoch(),
+        ov_seq_cell_revision(1, 1), ov_seq_cell_revision(0, 3), 3)); render();
+    ov_seq_edit_result copied {};
+    assert(ov_seq_read_edit(&copied) && copied.success && copied.token == 3);
+    assert(rack::clips[1][1] && rack::clips[0][3]);
+    assert(&rack::clips[1][1]->pattern != &rack::clips[0][3]->pattern);
+    assert(rack::clips[0][3]->pattern.data().notes[0].routing.instruments == 1);
+    assert(ov_seq_delete(0, 3)); render();
+    assert(rack::clips[1][1] && !rack::clips[0][3]);
     assert(!ov_rack_take_error());
     assert(ov_rack_stop_all()); render();
     std::puts("PASS transactional MOVE: stale destination rejection, cross-column retarget, affected-only Stop, immutable publication and acknowledgement");
