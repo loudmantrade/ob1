@@ -355,7 +355,16 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var pendingSceneName: String?
     @Published var keyboardChannelMask: UInt32 = 1
     @Published var keyboardLock = KeyboardLockState()
-    @Published var patterns: [SequencerPattern] = []
+    @Published var patterns: [SequencerPattern] = [] {
+        didSet {
+            let previous = Dictionary(uniqueKeysWithValues: oldValue.map { ($0.id, $0) })
+            noteLayouts = Dictionary(uniqueKeysWithValues: patterns.map { pattern in
+                (pattern.id, previous[pattern.id] == pattern
+                    ? noteLayouts[pattern.id] ?? CircularNoteLayout(pattern) : CircularNoteLayout(pattern))
+            })
+        }
+    }
+    private(set) var noteLayouts: [Int: CircularNoteLayout] = [:]
     @Published var soloSlots: Set<Int> = []
     @Published var sequencerRevision = 0
     @Published var launchGrid = 2

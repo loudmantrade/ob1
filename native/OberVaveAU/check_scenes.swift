@@ -116,7 +116,38 @@ struct SceneChecks {
         print("PASS sequencer scene migration, JSON/core pickup roundtrip and invalid cells/IDs/notes/missing instruments")
     }
 
+    static func checkCircularLayout() {
+        var pattern = SequencerPattern(slot: 0, row: 0, name: "Geometry")
+        precondition(CircularNoteLayout(pattern).arcs.isEmpty)
+        pattern.notes = [SequencerNote(id: 1, start: 0, duration: 1920, pitch: 60, velocity: 100)]
+        var layout = CircularNoteLayout(pattern)
+        precondition(layout.lanes == 1 && layout.arcs.count == 1 && layout.arcs[0].end == 0.5)
+        pattern.notes[0].start = 2880
+        layout = CircularNoteLayout(pattern)
+        precondition(layout.arcs.count == 2 && layout.arcs[0].end == 0.25 && layout.arcs[1].start == 0.75)
+        pattern.notes[0].duration = 20000
+        layout = CircularNoteLayout(pattern)
+        precondition(layout.arcs.count == 1 && layout.arcs[0].start == 0 && layout.arcs[0].end == 1)
+        pattern.notes = (0..<128).map {
+            SequencerNote(id: UInt64($0 + 1), start: 0, duration: 1, pitch: $0, velocity: 100)
+        }
+        layout = CircularNoteLayout(pattern)
+        precondition(layout.lanes == 8 && layout.arcs.count == 8 && layout.arcs[0].end == 1 / 360.0)
+        pattern.intro = 960
+        pattern.notes = [SequencerNote(id: 1, start: -960, duration: 100, pitch: 60, velocity: 100)]
+        precondition(CircularNoteLayout(pattern).arcs.first?.pickup == true)
+        pattern.introEnabled = false
+        precondition(CircularNoteLayout(pattern).arcs.isEmpty)
+        pattern.notes = (0..<1024).map {
+            SequencerNote(id: UInt64($0 + 1), start: Int64($0 * 3), duration: 7000, pitch: $0 % 128, velocity: 100)
+        }
+        let start = Date()
+        for _ in 0..<100 { precondition(CircularNoteLayout(pattern).arcs.count == 8) }
+        print("PASS circular geometry: durations, wraps, bounded multilap arcs, short notes, 128-pitch lane compression, pickup; 100 dense layouts \(Date().timeIntervalSince(start))s")
+    }
+
     static func main() throws {
+        checkCircularLayout()
         precondition(SynthParameter.allCases.count == Int(ov_parameter_count()))
         precondition(SynthParameter.arpVelocity.audioUnitID == 64)
         precondition(SynthParameter.mod1Source.audioUnitID == 72 && SynthParameter.legacyWheel.audioUnitID == 96)

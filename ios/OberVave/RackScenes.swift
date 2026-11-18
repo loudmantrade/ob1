@@ -593,24 +593,51 @@ private struct SequencerRecordLengthControl: View {
     }
 }
 
-private struct SequencerNoteDiagram: View {
-    let pattern: SequencerPattern
+private struct SequencerNoteDiagram: View, Equatable {
+    let layout: CircularNoteLayout
 
     var body: some View {
         Canvas { context, size in
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
-            let radius = max(0, min(size.width, size.height) / 2 - 3)
-            var dots = Path()
-            for note in pattern.notes where note.start >= 0 || pattern.introEnabled {
-                let phase = Double((note.start % pattern.length + pattern.length) % pattern.length) / Double(pattern.length)
-                let angle = phase * 2 * Double.pi - Double.pi / 2
-                let distance = radius * Double(note.pitch) / 127
-                let point = CGPoint(x: center.x + cos(angle) * distance,
-                                    y: center.y + sin(angle) * distance)
-                dots.addEllipse(in: CGRect(x: point.x - 1.5, y: point.y - 1.5, width: 3, height: 3))
+            let radius = max(0, min(size.width, size.height) / 2 - 6)
+            let spacing = radius * 0.65 / Double(max(1, layout.lanes))
+            for arc in layout.arcs {
+                let distance = arc.pickup ? radius * 0.2 : radius * 0.35 + (Double(arc.lane) + 0.5) * spacing
+                var path = Path()
+                path.addArc(center: center, radius: distance,
+                            startAngle: .degrees(arc.start * 360 - 90),
+                            endAngle: .degrees(arc.end * 360 - 90), clockwise: false)
+                context.stroke(path, with: .foreground,
+                               style: StrokeStyle(lineWidth: max(1, min(2, spacing * 0.7)),
+                                                  lineCap: .round, dash: arc.pickup ? [1, 2] : []))
             }
-            context.fill(dots, with: .foreground)
         }
+        .accessibilityHidden(true)
+    }
+}
+
+private struct SequencerCellProgress: View {
+    var position: Double
+    var queued: Bool
+    var stopping: Bool
+    var recording: Bool
+    var waiting: Bool
+
+    var body: some View {
+        ZStack {
+            Circle().strokeBorder(style: StrokeStyle(lineWidth: 1, dash: queued || waiting ? [2, 3] : []))
+                .opacity(0.35)
+            if !waiting {
+                Circle().trim(from: 0, to: max(0.002, min(1, position)))
+                    .stroke(style: StrokeStyle(lineWidth: 2, lineCap: .round)).rotationEffect(.degrees(-90))
+            }
+            if stopping || waiting {
+                Image(systemName: stopping ? "stop.fill" : "clock").font(.system(size: 8))
+            } else if recording {
+                Circle().frame(width: 4, height: 4)
+            }
+        }
+        .frame(width: 46, height: 46)
         .accessibilityHidden(true)
     }
 }
@@ -723,31 +750,28 @@ struct SequencerView: View {
         let active = Int(ov_seq_active(UInt32(instrument.slot))) == row
         let queued = Int(ov_seq_pending(UInt32(instrument.slot))) == row
         let recording = model.recordingPattern == instrument.slot * 8 + row
+        let stopping = active && ov_seq_stopping(UInt32(instrument.slot)) != 0
         let phase = ov_seq_record_phase()
         let color = MIDIChannelColors.color(instrument.channel)
         return Button {
             model.tapPattern(slot: instrument.slot, row: row)
         } label: {
-            Group {
-                if recording {
-                    VStack(spacing: 3) {
-                        Image(systemName: "record.circle.fill")
-                        Text(phase == 1 ? "WAIT FOR NOTE" : phase == 2 ? "COUNT \(ov_seq_record_remaining())"
-                            : phase == 4 ? "BAR \(ov_seq_record_remaining())"
-                            : phase == 5 ? "LOOP IN \(ov_seq_record_remaining())" : "REC · TAP TO LOOP")
-                            .font(.system(size: 9, design: .monospaced))
-                        Text("\(Double(ov_seq_record_length()) / 960, specifier: "%.0f") BEATS")
-                            .font(.system(size: 9, design: .monospaced))
-                    }
-                } else if let pattern {
-                    SequencerNoteDiagram(pattern: pattern)
-                } else {
+            ZStack {
+                if !recording, let pattern, let layout = model.noteLayouts[pattern.id] {
+                    SequencerNoteDiagram(layout: layout).equatable()
+                }
+                if recording || active || queued {
+                    SequencerCellProgress(
+                        position: Double(recording ? ov_seq_record_progress() : ov_seq_position(UInt32(instrument.slot))) / 65535,
+                        queued: queued || recording && phase == 5, stopping: stopping || recording && phase == 5,
+                        recording: recording, waiting: recording && (phase == 1 || phase == 2 || phase == 4) || queued && !active)
+                } else if pattern == nil {
                     Image(systemName: "plus")
                 }
             }
             .padding(.horizontal, 5).frame(width: width, height: padHeight)
-            .foregroundStyle(recording ? Color.red : active ? Color.black : color)
-            .background(active ? color : color.opacity(pattern == nil ? 0.04 : 0.17), in: RoundedRectangle(cornerRadius: 8))
+            .foregroundStyle(recording ? Color.red : color)
+            .background(color.opacity(active ? 0.32 : pattern == nil ? 0.04 : 0.17), in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(queued ? Color.white : color.opacity(0.45), lineWidth: queued ? 2 : 1))
             .contentShape(Rectangle())
         }

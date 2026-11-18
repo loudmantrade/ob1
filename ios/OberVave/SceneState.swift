@@ -289,6 +289,49 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
     }
 }
 
+struct CircularNoteLayout: Equatable {
+    struct Arc: Equatable {
+        var lane: Int
+        var start: Double
+        var end: Double
+        var pickup: Bool
+    }
+    let lanes: Int
+    let arcs: [Arc]
+
+    init(_ pattern: SequencerPattern) {
+        let pitches = Set(pattern.notes.filter { $0.start >= 0 }.map(\.pitch)).sorted()
+        lanes = min(8, pitches.count)
+        let indices = Dictionary(uniqueKeysWithValues: pitches.enumerated().map { ($0.element, $0.offset) })
+        var segments: [Arc] = []
+        for note in pattern.notes where note.start >= 0 || pattern.introEnabled {
+            let pickup = note.start < 0
+            let lane = pickup ? -1 : (indices[note.pitch] ?? 0) * max(1, lanes) / max(1, pitches.count)
+            let start = Double((note.start % pattern.length + pattern.length) % pattern.length) / Double(pattern.length)
+            let extent = min(1, max(1 / 360.0, Double(note.duration) / Double(pattern.length)))
+            if extent >= 1 {
+                segments.append(Arc(lane: lane, start: 0, end: 1, pickup: pickup))
+            } else {
+                segments.append(Arc(lane: lane, start: start, end: min(1, start + extent), pickup: pickup))
+                if start + extent > 1 {
+                    segments.append(Arc(lane: lane, start: 0, end: start + extent - 1, pickup: pickup))
+                }
+            }
+        }
+        // Merge overlaps only within a visual lane; dense pitch sets use at most eight lanes.
+        segments.sort { $0.lane == $1.lane ? $0.start < $1.start : $0.lane < $1.lane }
+        var merged: [Arc] = []
+        for arc in segments {
+            if let last = merged.last, last.lane == arc.lane && arc.start <= last.end {
+                merged[merged.count - 1].end = max(last.end, arc.end)
+            } else {
+                merged.append(arc)
+            }
+        }
+        arcs = merged
+    }
+}
+
 struct SavedRackScene: Identifiable {
     let url: URL
     let name: String

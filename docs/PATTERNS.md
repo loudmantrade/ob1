@@ -195,6 +195,19 @@ cancelled and failed results in order exactly once. Scene epochs prevent an
 old completion from being applied to a newly loaded scene. Recording indicators
 come only from audio-owned recorder state, not an optimistic tap or unread result.
 
+Circular MIDI cells render duration arcs clockwise from 12 o'clock. Sorted
+distinct body pitches occupy up to eight radial lanes; larger pitch sets map
+deterministically into adjacent groups and overlapping arcs within a lane merge.
+Durations of a loop or longer use one full ring, wrapped notes split at zero,
+and notes shorter than one degree receive a one-degree visibility floor.
+Enabled pickup notes are dashed on a separate inner lane, never presented as
+part of the repeating body. Static geometry is cached when immutable patterns
+change; progress refreshes only draw the cached arcs and audio-owned positions.
+Playing cells have a separate outer progress ring; queued launches are dashed,
+queued Stops have a square marker. Recording is red, waiting/count-in uses a
+clock, and queued completion keeps red capture progress with a square until
+the actual boundary. There are no text labels on completed pads.
+
 ## Verification
 
 `musical_patterns` is registered in the existing CTest suite. It can also run
