@@ -63,6 +63,31 @@ struct SceneChecks {
         } catch { }
     }
 
+    static func checkSequencer(_ original: RackSceneDocument) throws {
+        var document = original
+        let legacy = try JSONDecoder().decode(RackSceneDocument.self, from: JSONEncoder().encode(document))
+        precondition(legacy.patterns == nil)
+        var pattern = SequencerPattern(slot: 0, row: 3, name: "Pickup")
+        pattern.intro = 480
+        pattern.notes = [
+            SequencerNote(id: 1, start: -480, duration: 720, pitch: 60, velocity: 100),
+            SequencerNote(id: 2, start: 0, duration: 240, pitch: 64, velocity: 80, output: false)
+        ]
+        document.patterns = [pattern]
+        try document.validate()
+        let decoded = try JSONDecoder().decode(RackSceneDocument.self, from: JSONEncoder().encode(document))
+        precondition(decoded.patterns == document.patterns)
+        precondition(SequencerPattern(core: pattern.coreClip()) == pattern)
+        document.patterns = [pattern, pattern]; rejects(document)
+        document.patterns = [pattern]; document.patterns?[0].slot = Int.max; rejects(document)
+        document.patterns = [pattern]; document.patterns?[0].row = 8; rejects(document)
+        document.patterns = [pattern]; document.patterns?[0].notes[0].start = -481; rejects(document)
+        document.patterns = [pattern]; document.patterns?[0].notes[1].id = 1; rejects(document)
+        document.patterns = [pattern]; document.patterns?[0].notes[0].velocity = 128; rejects(document)
+        document.patterns = [pattern]; document.instruments.removeAll { $0.slot == 0 }; rejects(document)
+        print("PASS sequencer scene migration, JSON/core pickup roundtrip and invalid cells/IDs/notes/missing instruments")
+    }
+
     static func main() throws {
         precondition(SynthParameter.allCases.count == Int(ov_parameter_count()))
         precondition(SynthParameter.arpVelocity.audioUnitID == 64)
@@ -185,6 +210,7 @@ struct SceneChecks {
         var document = RackSceneDocument(name: "Split + Layer", instruments: instruments, tempo: 137,
             masterDB: -9, masterPan: 0.1, keyboardMask: 0x8003, selectedSlot: 7)
         try document.validate()
+        try checkSequencer(document)
         let encoder = JSONEncoder()
         var oldInstrument = RackInstrument.oberVave(slot: 0, channel: 1)
         oldInstrument.parameters = Array(oldInstrument.parameters.prefix(65))

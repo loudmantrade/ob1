@@ -26,11 +26,17 @@ public:
         if (processor_.destination(instrument, channel) != ob1::music::ArpResult::Ok) return false;
         if (!engine_.set_external_arpeggiator(0, true)) return false;
         outputSourceID_ = sourceID;
+        instrument_ = instrument; channel_ = channel;
         eventSink_ = sink;
         eventContext_ = context;
         sourceOwnership_ = ownership == InputOwnership::SourceNotes;
         attached_ = true;
         return view() || fail();
+    }
+
+    void directObserver(EventSink sink, void* context)
+    {
+        directSink_ = sink; directContext_ = context;
     }
 
     bool parameter(uint32_t parameter, uint8_t value, ob1::music::Time time)
@@ -139,7 +145,37 @@ public:
         return clearProcessor();
     }
 
+    bool stopGenerated(ob1::music::Time time)
+    {
+        if (!ready()) return false;
+        time_ = time;
+        if (processor_.settings().mode == ob1::music::ArpMode::Off) return true;
+        auto sink = output();
+        if (processor_.stop(time_, sink) != ob1::music::ArpResult::Ok) return fail();
+        ownership_.clear();
+        engine_.ctl_sustain = 0;
+        sustain_ = false;
+        return true;
+    }
+
     bool faulted() const { return fault_; }
+    bool outputEvent(const ob1::music::Event& event)
+    {
+        namespace music = ob1::music;
+        if (!ready() || !music::isNote(event) || event.routing.stage != music::Stage::Output ||
+            music::validate(event) != music::EventError::None) return false;
+        auto input = event;
+        input.routing.stage = music::Stage::Input;
+        auto sink = [&](const music::Event& note) {
+            if (note.kind == music::Kind::NoteOff && note.source.kind == music::SourceKind::Pattern &&
+                directNotes_[note.data1]) return true;
+            return engine_.external_note(0, note.data1, note.kind == music::Kind::NoteOn ? note.data2 : 0);
+        };
+        const auto result = outputOwnership_.input(input, sink);
+        if (result == music::OwnershipResult::Full || result == music::OwnershipResult::OutputRejected)
+            return fail();
+        return result != music::OwnershipResult::InvalidInput;
+    }
     const ob1::music::ArpeggiatorProcessor& processor() const { return processor_; }
     uint32_t inputOwnerCount() const { return ownership_.count(); }
 
@@ -147,6 +183,31 @@ private:
     Engine& engine_;
     ob1::music::ArpeggiatorProcessor processor_;
     ob1::music::NoteOwnership ownership_;
+    ob1::music::NoteOwnership outputOwnership_;
+    std::array<bool, 128> directNotes_ {};
+    EventSink directSink_ = nullptr;
+    void* directContext_ = nullptr;
+    uint32_t instrument_ = 0, channel_ = 0;
+    bool observeDirect(uint8_t pitch, uint8_t velocity)
+    {
+        if (!directSink_) return true;
+        ob1::music::Event event {};
+        event.kind = velocity ? ob1::music::Kind::NoteOn : ob1::music::Kind::NoteOff;
+        event.source = {ob1::music::SourceKind::System, outputSourceID_};
+        event.routing = {ob1::music::Target::Instruments, uint16_t(1u << instrument_), ob1::music::Stage::Output};
+        event.channel = channel_; event.data1 = pitch; event.data2 = velocity;
+        event.note = uint64_t(pitch) + 1; event.time = time_;
+        return directSink_(directContext_, event) || fail();
+    }
+    bool patternOutput(uint32_t pitch = 128) const
+    {
+        bool found = false;
+        auto visit = [&](const ob1::music::Event& note) {
+            found |= note.source.kind == ob1::music::SourceKind::Pattern && (pitch == 128 || note.data1 == pitch);
+        };
+        outputOwnership_.visit(visit);
+        return found;
+    }
     bool sourceOwnership_ = false;
     ob1::music::Time time_ {}, renderStart_ {};
     ob1::music::ArpSettings previousEffective_ {};
@@ -172,8 +233,7 @@ private:
             auto routed = event;
             routed.source.id = adapter.outputSourceID_;
             if (adapter.eventSink_ && !adapter.eventSink_(adapter.eventContext_, routed)) return false;
-            return adapter.engine_.external_note(0, event.data1,
-                event.kind == ob1::music::Kind::NoteOn ? event.data2 : 0);
+            return adapter.outputEvent(routed);
         }
     };
     Output output()
@@ -188,9 +248,13 @@ private:
     }
     bool direct(uint8_t pitch, uint8_t velocity)
     {
+        const bool observed = velocity || directNotes_[pitch];
+        directNotes_[pitch] = velocity != 0;
+        if (!velocity && patternOutput(pitch)) return !observed || observeDirect(pitch, 0);
         uint8_t last = 0;
         const bool held = processor_.lastHeld(last);
-        return engine_.external_direct_note(0, pitch, velocity, held, last) || fail();
+        if (!engine_.external_direct_note(0, pitch, velocity, held, last)) return fail();
+        return !observed || observeDirect(pitch, velocity);
     }
     struct HeldSnapshot {
         std::array<uint8_t, ob1::music::ArpeggiatorProcessor::heldCapacity> pitches {};
@@ -241,6 +305,8 @@ private:
         auto sink = output();
         if (processor_.stop(time_, sink) != ob1::music::ArpResult::Ok) return fail();
         ownership_.clear();
+        outputOwnership_.clear();
+        directNotes_ = {};
         sustain_ = wasOn_ = false;
         return true;
     }
@@ -271,8 +337,15 @@ private:
             if (self.processor_.restart() != ob1::music::ArpResult::Ok) return false;
             self.restart_ = false;
         }
-        if (current.settings.mode != ob1::music::ArpMode::Off && !self.wasOn_)
-            engine.voices_release_part(0);
+        if (current.settings.mode != ob1::music::ArpMode::Off && !self.wasOn_) {
+            for (uint32_t pitch = 0; pitch < self.directNotes_.size(); ++pitch)
+                if (self.directNotes_[pitch] && !self.observeDirect(pitch, 0)) return self.fail();
+            if (!self.patternOutput()) engine.voices_release_part(0);
+            else for (uint32_t pitch = 0; pitch < self.directNotes_.size(); ++pitch)
+                    if (self.directNotes_[pitch] && !self.outputOwnership_.containsPitch(pitch))
+                        engine.external_note(0, pitch, 0);
+            self.directNotes_ = {};
+        }
         auto sink = self.output();
         if (self.processor_.seed(engine.rnd_state) != ob1::music::ArpResult::Ok ||
             self.processor_.tick(current.clock, sink) != ob1::music::ArpResult::Ok) return false;

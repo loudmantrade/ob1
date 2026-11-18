@@ -123,6 +123,15 @@ extension OberVaveModel {
     var selectedInstrument: RackInstrument? { instruments.first { $0.slot == selectedSlot } }
 
     func syncRackState() {
+        if ov_seq_record_ready() != 0 {
+            var clip = ov_seq_clip()
+            if ov_seq_read_record(&clip) != 0 {
+                let pattern = SequencerPattern(core: clip)
+                recordingPattern = nil
+                if instruments.contains(where: { $0.slot == pattern.slot }) { _ = storePattern(pattern) }
+            }
+        }
+        sequencerRevision &+= 1
         let generation = ov_rack_stop_generation()
         if generation != keyboardStopGeneration {
             keyboardStopGeneration = generation
@@ -131,6 +140,7 @@ extension OberVaveModel {
         ov_rack_collect()
         let failure = ov_rack_take_error()
         if failure != 0 {
+            if ov_seq_recording_slot() < 0 && ov_seq_record_ready() == 0 { recordingPattern = nil }
             errorMessage = failure == 1 ? "The MIDI/control queue or note ownership capacity overflowed. Notes were stopped to prevent stuck notes."
                 : failure == 3 ? "Not enough memory to create the requested instruments."
                 : "The audio rack rejected an invalid configuration."
@@ -235,8 +245,11 @@ extension OberVaveModel {
     }
 
     func removeInstrument(_ slot: Int) {
+        guard recordingPattern == nil else { errorMessage = "Finish recording before removing an instrument."; return }
         guard pendingSceneName == nil, ov_rack_remove(UInt32(slot)) != 0 else { return }
         instruments.removeAll { $0.slot == slot }
+        patterns.removeAll { $0.slot == slot }
+        soloSlots.remove(slot)
         if selectedSlot == slot {
             selectedSlot = instruments.first?.slot ?? 0
             ov_rack_select(UInt32(selectedSlot))
@@ -275,6 +288,9 @@ extension OberVaveModel {
     }
 
     func saveScene(name: String, asNew: Bool = false) {
+        guard recordingPattern == nil else {
+            errorMessage = "Finish pattern recording before saving the scene."; return
+        }
         let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty, clean.count <= 64 else {
             errorMessage = "Enter a scene name of 1 to 64 characters."; return
@@ -313,7 +329,7 @@ extension OberVaveModel {
             }
             let document = RackSceneDocument(name: name, instruments: saved, tempo: Int(captured.tempo),
                 masterDB: masterLevelDB, masterPan: masterPan, keyboardMask: keyboardChannelMask,
-                selectedSlot: instruments.isEmpty ? nil : selectedSlot)
+                selectedSlot: instruments.isEmpty ? nil : selectedSlot, patterns: patterns)
             try document.validate()
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -338,6 +354,8 @@ extension OberVaveModel {
     }
 
     private func applyScene(_ document: RackSceneDocument) throws {
+        try document.validate()
+        guard recordingPattern == nil else { throw SceneError.invalid("Finish recording before loading a scene.") }
         var c = ov_scene_config()
         c.tempo = UInt32(document.tempo)
         withUnsafeMutableBytes(of: &c.slots) { raw in
@@ -347,10 +365,16 @@ extension OberVaveModel {
                 slots[instrument.slot].config = instrument.coreConfig()
             }
         }
-        guard ov_rack_load(&c) != 0 else {
+        let sequenceClips = (document.patterns ?? []).map { $0.coreClip() }
+        let accepted = sequenceClips.withUnsafeBufferPointer {
+            ov_rack_load_sequenced(&c, $0.baseAddress, UInt32($0.count))
+        }
+        guard accepted != 0 else {
             throw SceneError.invalid("Could not allocate this scene. The current scene has been kept.")
         }
         instruments = document.instruments
+        patterns = document.patterns ?? []
+        soloSlots = []
         selectedSlot = document.selectedSlot ?? instruments.first?.slot ?? 0
         ov_rack_select(UInt32(selectedSlot))
         keyboardChannelMask = document.keyboardMask
@@ -373,6 +397,433 @@ extension OberVaveModel {
     }
 }
 
+extension OberVaveModel {
+    func pattern(slot: Int, row: Int) -> SequencerPattern? {
+        patterns.first { $0.slot == slot && $0.row == row }
+    }
+
+    @discardableResult
+    func storePattern(_ pattern: SequencerPattern) -> Bool {
+        guard pendingSceneName == nil else { return false }
+        guard recordingPattern == nil else { errorMessage = "Finish recording before editing patterns."; return false }
+        do {
+            try pattern.validate()
+            var clip = pattern.coreClip()
+            guard ov_seq_set_clip(&clip) != 0 else { throw SceneError.invalid("Could not publish pattern to the audio engine.") }
+            patterns.removeAll { $0.id == pattern.id }
+            patterns.append(pattern)
+            return true
+        } catch { errorMessage = error.localizedDescription; return false }
+    }
+
+    func deletePattern(_ pattern: SequencerPattern) {
+        guard recordingPattern == nil else { errorMessage = "Finish recording before deleting patterns."; return }
+        guard ov_seq_delete(UInt32(pattern.slot), UInt32(pattern.row)) != 0 else {
+            errorMessage = "Could not delete the pattern."; return
+        }
+        patterns.removeAll { $0.id == pattern.id }
+    }
+
+    func duplicatePattern(_ pattern: SequencerPattern) {
+        guard let row = (0..<8).first(where: { self.pattern(slot: pattern.slot, row: $0) == nil }) else {
+            errorMessage = "This instrument already has eight patterns."; return
+        }
+        var copy = pattern; copy.row = row
+        copy.name = String((pattern.name + " Copy").prefix(24))
+        _ = storePattern(copy)
+    }
+
+    func launchPattern(slot: Int, row: Int) {
+        if ov_seq_launch(UInt32(slot), UInt32(row), UInt32(launchGrid)) == 0 {
+            errorMessage = "Could not queue pattern launch."
+        }
+    }
+    func launchRow(_ row: Int) {
+        if ov_seq_launch_row(UInt32(row), UInt32(launchGrid)) == 0 {
+            errorMessage = "Could not queue synchronized row launch."
+        }
+    }
+    func recordPattern(_ pattern: SequencerPattern, output: Bool, intro: Bool) {
+        guard recordingPattern == nil else { errorMessage = "Finish the current recording first."; return }
+        if ov_seq_record(UInt32(pattern.slot), UInt32(pattern.row), output ? 1 : 0, intro ? 1 : 0) != 0 {
+            recordingPattern = pattern.id
+        } else {
+            errorMessage = "Could not arm recording."
+        }
+    }
+    func finishPatternRecording() {
+        if ov_seq_finish_record() == 0 { errorMessage = "Could not finish recording.";  }
+    }
+    func stopColumn(_ slot: Int, arp: Bool) {
+        if ov_seq_stop(UInt32(slot), arp ? 1 : 0) == 0 { errorMessage = "Could not stop the instrument.";  }
+    }
+    func soloColumn(_ slot: Int) {
+        let enabled = !soloSlots.contains(slot)
+        if ov_seq_solo(UInt32(slot), enabled ? 1 : 0) != 0 {
+            if enabled { soloSlots.insert(slot) } else { soloSlots.remove(slot) }
+        } else {
+            errorMessage = "Could not change Solo.";
+        }
+    }
+    func mixColumn(_ slot: Int, level: Double? = nil, pan: Double? = nil, mute: Bool? = nil) {
+        guard var instrument = instruments.first(where: { $0.slot == slot }) else { return }
+        if let level { instrument.levelDB = level }
+        if let pan { instrument.pan = pan }
+        if let mute { instrument.muted = mute }
+        _ = configureInstrument(instrument)
+    }
+}
+
+struct SequencerView: View {
+    @ObservedObject var model: OberVaveModel
+    @State private var editing: SequencerPattern?
+    @State private var deleting: SequencerPattern?
+    @State private var replacing: SequencerPattern?
+    @State private var recordIntro = false
+    @State private var meters = [Double](repeating: 0, count: 16)
+    private let width: CGFloat = 110
+    private let padHeight: CGFloat = 54
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Picker("Launch", selection: $model.launchGrid) {
+                    Text("FREE").tag(0); Text("BEAT").tag(1); Text("BAR").tag(2)
+                }
+                .pickerStyle(.segmented).frame(maxWidth: 290)
+                Spacer()
+                if model.recordingPattern != nil {
+                    Button {
+                        model.finishPatternRecording()
+                    } label: {
+                        Label("FINISH REC", systemImage: "record.circle.fill").foregroundStyle(.red)
+                    }.buttonStyle(.bordered)
+                }
+                Text("HOLD PAD TO EDIT / RECORD").font(.caption2.monospaced()).foregroundStyle(.secondary)
+            }
+            ScrollView(.horizontal) {
+                VStack(spacing: 0) {
+                    ScrollView(.vertical) {
+                        HStack(alignment: .top, spacing: 8) {
+                            ForEach(model.instruments) { instrument in
+                                VStack(spacing: 6) {
+                                    Text(instrument.name).lineLimit(1).font(.caption.bold()).frame(height: 24)
+                                    ForEach(0..<8, id: \.self) { row in pad(instrument, row: row) }
+                                }.frame(width: width)
+                            }
+                            VStack(spacing: 6) {
+                                Text("ROW").font(.caption.bold()).frame(height: 24)
+                                ForEach(0..<8, id: \.self) { row in
+                                    Button {
+                                        model.launchRow(row)
+                                    } label: {
+                                        Label("\(row + 1)", systemImage: "play.fill")
+                                            .frame(width: 62, height: padHeight)
+                                            .background(Color.cyan.opacity(0.13), in: RoundedRectangle(cornerRadius: 8))
+                                    }.buttonStyle(.plain)
+                                        .accessibilityLabel("Launch row \(row + 1) synchronously")
+                                }
+                            }.frame(width: 70)
+                        }
+                    }
+                    Divider().padding(.vertical, 6)
+                    HStack(alignment: .top, spacing: 8) {
+                        ForEach(model.instruments) { instrument in mixer(instrument).frame(width: width) }
+                        Button { model.stopAllPlayback() } label: {
+                            VStack {
+                                Image(systemName: "stop.fill")
+                                Text("ALL")
+                            }.font(.caption.bold()).frame(width: 70, height: 190)
+                        }.buttonStyle(.plain).accessibilityLabel("Stop all playback")
+                    }
+                }
+                .frame(width: CGFloat(model.instruments.count) * (width + 8) + 70)
+            }
+        }
+        .padding(.horizontal, 12)
+        .disabled(model.pendingSceneName != nil)
+        .sheet(item: $editing) { pattern in
+            SequencerPatternEditor(pattern: pattern) { model.storePattern($0) }
+        }
+        .confirmationDialog(
+            "Delete pattern?",
+            isPresented: Binding(
+                get: { deleting != nil }, set: { if !$0 { deleting = nil } })
+        ) {
+            Button("Delete", role: .destructive) {
+                if let deleting { model.deletePattern(deleting) }; deleting = nil
+            }
+        }
+        .confirmationDialog(
+            "Replace notes with a new recording?",
+            isPresented: Binding(
+                get: { replacing != nil }, set: { if !$0 { replacing = nil } })
+        ) {
+            Button("Record Output") { if let replacing { model.recordPattern(replacing, output: true, intro: recordIntro) } }
+            Button("Record Input") { if let replacing { model.recordPattern(replacing, output: false, intro: recordIntro) } }
+        } message: {
+            Text(
+                "Records one loop from the next bar. Intro mode also captures playing before that bar. Existing playback continues for monitoring."
+            )
+        }
+        .onReceive(Timer.publish(every: 0.04, on: .main, in: .common).autoconnect()) { _ in
+            meters = (0..<16).map { slot in
+                let peak = Double(ov_seq_take_level(UInt32(slot))) / 65535
+                return max(max(0, min(1, (20 * log10(max(peak, 0.000001)) + 60) / 60)), meters[slot] - 0.08)
+            }
+        }
+    }
+
+    private func pad(_ instrument: RackInstrument, row: Int) -> some View {
+        let pattern = model.pattern(slot: instrument.slot, row: row)
+        let active = Int(ov_seq_active(UInt32(instrument.slot))) == row
+        let queued = Int(ov_seq_pending(UInt32(instrument.slot))) == row
+        let recording = model.recordingPattern == pattern?.id && pattern != nil
+        let color = MIDIChannelColors.color(instrument.channel)
+        return Button {
+            if pattern != nil {
+                model.launchPattern(slot: instrument.slot, row: row)
+            } else {
+                editing = SequencerPattern(slot: instrument.slot, row: row, name: "Pattern \(row + 1)")
+            }
+        } label: {
+            VStack(spacing: 3) {
+                HStack {
+                    Image(
+                        systemName: recording
+                            ? "record.circle.fill" : queued ? "clock" : active ? "play.fill" : pattern == nil ? "plus" : "square.grid.2x2")
+                    Text(pattern?.name ?? "EMPTY").lineLimit(1).font(.caption.bold())
+                }
+                if let pattern {
+                    Text("\(pattern.notes.count) notes\(pattern.introEnabled && pattern.intro > 0 ? " · INTRO" : "")")
+                        .font(.system(size: 9, design: .monospaced))
+                }
+                if active {
+                    ProgressView(value: Double(ov_seq_position(UInt32(instrument.slot))), total: 65535).tint(color)
+                }
+            }
+            .padding(.horizontal, 5).frame(width: width, height: padHeight)
+            .foregroundStyle(recording ? Color.red : active ? Color.black : color)
+            .background(active ? color : color.opacity(pattern == nil ? 0.04 : 0.17), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(queued ? Color.white : color.opacity(0.45), lineWidth: queued ? 2 : 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(
+            "\(instrument.name), row \(row + 1), \(pattern?.name ?? "empty")\(queued ? ", queued" : active ? ", playing" : "")"
+        )
+        .contextMenu {
+            if let pattern {
+                Button("Edit Pattern", systemImage: "pencil") { editing = pattern }
+                Button("Duplicate", systemImage: "doc.on.doc") { model.duplicatePattern(pattern) }
+                Button(pattern.introEnabled ? "Disable Intro" : "Enable Intro") {
+                    var changed = pattern; changed.introEnabled.toggle(); _ = model.storePattern(changed)
+                }
+                Button("Record Loop…", systemImage: "record.circle") {
+                    recordIntro = false; replacing = pattern
+                }
+                Button("Record Intro + Loop…", systemImage: "record.circle.fill") {
+                    recordIntro = true; replacing = pattern
+                }
+                Button("Stop Column", systemImage: "stop.fill") { model.stopColumn(instrument.slot, arp: false) }
+                Button("Delete", role: .destructive) { deleting = pattern }
+            } else {
+                Button("Create Pattern") { editing = SequencerPattern(slot: instrument.slot, row: row, name: "Pattern \(row + 1)") }
+            }
+        }
+    }
+
+    private func mixer(_ instrument: RackInstrument) -> some View {
+        VStack(spacing: 5) {
+            Text(instrument.name).lineLimit(1).font(.caption2.bold())
+            HStack(spacing: 2) {
+                Slider(
+                    value: Binding(
+                        get: {
+                            model.instruments.first { $0.slot == instrument.slot }?.levelDB ?? -48
+                        }, set: { model.mixColumn(instrument.slot, level: $0) }), in: -48...0
+                )
+                .frame(width: 90).rotationEffect(.degrees(-90)).frame(width: 38, height: 96)
+                .accessibilityLabel("\(instrument.name) volume")
+                GeometryReader { proxy in
+                    ZStack(alignment: .bottom) {
+                        Capsule().fill(Color.white.opacity(0.06))
+                        Capsule().fill(meters[instrument.slot] > 0.95 ? Color.red : Color.green)
+                            .frame(height: max(0, proxy.size.height * meters[instrument.slot]))
+                    }
+                }.frame(width: 7, height: 90)
+                Text("\(Int(instrument.levelDB))").font(.caption2.monospaced()).frame(width: 28)
+            }
+            SequencerPanKnob(value: instrument.pan) { model.mixColumn(instrument.slot, pan: $0) }
+                .accessibilityLabel("\(instrument.name) pan")
+            HStack(spacing: 4) {
+                Button("M") { model.mixColumn(instrument.slot, mute: !instrument.muted) }
+                    .tint(instrument.muted ? .orange : .gray)
+                Button("S") { model.soloColumn(instrument.slot) }
+                    .tint(model.soloSlots.contains(instrument.slot) ? .yellow : .gray)
+            }.buttonStyle(.bordered).font(.caption.bold())
+            Button {
+                model.stopColumn(instrument.slot, arp: true)
+            } label: {
+                Label("ARP", systemImage: "stop.fill").font(.caption2.bold())
+            }.buttonStyle(.bordered).accessibilityLabel("Stop \(instrument.name) arpeggiator")
+        }
+        .padding(.vertical, 4)
+        .background(Color.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct SequencerPanKnob: View {
+    let value: Double
+    let change: (Double) -> Void
+    @State private var origin: Double?
+    var body: some View {
+        VStack(spacing: 1) {
+            ZStack {
+                Circle().fill(Color.white.opacity(0.12))
+                Capsule().fill(Color.cyan).frame(width: 2, height: 12).offset(y: -7)
+                    .rotationEffect(.degrees(value * 135))
+            }.frame(width: 32, height: 32)
+            Text(value < -0.02 ? "L \(Int(-value * 100))" : value > 0.02 ? "R \(Int(value * 100))" : "CENTER")
+                .font(.system(size: 8, design: .monospaced))
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0).onChanged {
+                if origin == nil { origin = value }
+                change(min(1, max(-1, (origin ?? value) - Double($0.translation.height) / 70)))
+            }.onEnded { _ in origin = nil }
+        )
+        .onTapGesture(count: 2) { change(0) }
+        .accessibilityElement().accessibilityValue("\(Int(value * 100))")
+        .accessibilityAdjustableAction { direction in
+            change(min(1, max(-1, value + (direction == .increment ? 0.05 : -0.05))))
+        }
+    }
+}
+
+private struct SequencerPatternEditor: View {
+    @State var pattern: SequencerPattern
+    let save: (SequencerPattern) -> Bool
+    @Environment(\.dismiss) private var dismiss
+    @State private var pitch = 60
+    @State private var velocity = 100
+    @State private var start = 0.0
+    @State private var duration = 240.0
+    @State private var output = true
+    @State private var selectedNote: UInt64?
+    @State private var message: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Pattern") {
+                    TextField("Name", text: $pattern.name)
+                    Stepper(
+                        "Length: \(Double(pattern.length) / 960, specifier: "%.2f") beats",
+                        value: Binding(get: { Int(pattern.length / 960) }, set: { pattern.length = Int64($0) * 960 }), in: 1...256)
+                    Toggle("Loop", isOn: $pattern.loop)
+                    Toggle("Play intro once", isOn: $pattern.introEnabled)
+                    Stepper(
+                        "Intro marker: \(Double(pattern.intro) / 960, specifier: "%.2f") beats before bar",
+                        value: Binding(get: { Int(pattern.intro / 240) }, set: { pattern.intro = Int64($0) * 240 }), in: 0...16)
+                    Picker("Playback quantization", selection: $pattern.quantize) {
+                        Text("Original timing").tag(0)
+                        Text("1/8").tag(480); Text("1/16").tag(240); Text("1/32").tag(120)
+                        Text("1/8 triplet").tag(320); Text("1/16 triplet").tag(160)
+                    }
+                    Text(
+                        "Negative note starts are intro. The zero marker is the first main-loop bar. Intro plays once; copies can disable it without deleting notes. Recording replaces notes after confirmation, while the current loop can keep playing."
+                    )
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Step input · \(rackNoteName(pitch))") {
+                    Stepper("Pitch \(rackNoteName(pitch))", value: $pitch, in: 0...127)
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 5) {
+                            ForEach(0..<Int(min(256, pattern.length / 240)), id: \.self) { step in
+                                let tick = Int64(step * 240)
+                                let existing = pattern.notes.first { $0.pitch == pitch && $0.start == tick }
+                                Button {
+                                    if let existing { pattern.notes.removeAll { $0.id == existing.id } } else { appendNote(at: tick) }
+                                } label: {
+                                    Text("\(step + 1)").font(.caption.monospaced()).frame(width: 36, height: 38)
+                                        .background(
+                                            existing != nil ? Color.cyan : Color.white.opacity(step % 4 == 0 ? 0.15 : 0.06),
+                                            in: RoundedRectangle(cornerRadius: 6)
+                                        )
+                                        .foregroundStyle(existing != nil ? Color.black : Color.white)
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    Stepper("Velocity \(velocity)", value: $velocity, in: 1...127)
+                    Toggle("Bypass arpeggiator (recorded output)", isOn: $output)
+                    LabeledContent("Start (beats)") {
+                        TextField("Start", value: $start, format: .number).keyboardType(.numbersAndPunctuation).frame(width: 95)
+                    }
+                    LabeledContent("Duration (beats)") {
+                        TextField("Duration", value: $duration, format: .number).keyboardType(.decimalPad).frame(width: 95)
+                    }
+                    HStack {
+                        Button(selectedNote == nil ? "Add Note" : "Apply Note Edit") { applyNote() }
+                        if selectedNote != nil { Button("New Note") { selectedNote = nil } }
+                    }
+                    if let message { Text(message).foregroundStyle(.orange) }
+                }
+                Section("Notes · \(pattern.notes.count)/1024") {
+                    ForEach(pattern.notes.sorted { $0.start == $1.start ? $0.id < $1.id : $0.start < $1.start }) { note in
+                        Button {
+                            selectedNote = note.id; pitch = note.pitch; velocity = note.velocity
+                            start = Double(note.start) / 960; duration = Double(note.duration) / 960; output = note.output
+                        } label: {
+                            HStack {
+                                Text(rackNoteName(note.pitch))
+                                Text(
+                                    "@ \(Double(note.start) / 960, specifier: "%.3f") · \(Double(note.duration) / 960, specifier: "%.3f") beats"
+                                )
+                                Spacer()
+                                Text("V\(note.velocity)\(note.start < 0 ? " INTRO" : "")")
+                            }.font(.caption.monospaced())
+                        }
+                        .swipeActions { Button("Delete", role: .destructive) { pattern.notes.removeAll { $0.id == note.id } } }
+                    }
+                }
+            }
+            .navigationTitle(pattern.name)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { if save(pattern) { dismiss() } }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .onAppear { duration = 0.25 }
+    }
+    private func appendNote(at tick: Int64) {
+        guard pattern.notes.count < 1024 else { message = "Pattern note capacity reached."; return }
+        guard (pattern.notes.map(\.id).max() ?? 0) < UInt64.max - 1 else { message = "Pattern note ID capacity reached."; return }
+        let id = (pattern.notes.map(\.id).max() ?? 0) + 1
+        pattern.notes.append(SequencerNote(id: id, start: tick, duration: 240, pitch: pitch, velocity: velocity, output: output))
+    }
+    private func applyNote() {
+        guard start.isFinite, duration.isFinite, start >= -Double(pattern.intro) / 960,
+            start < Double(pattern.length) / 960, duration >= 1.0 / 960, duration <= 256
+        else {
+            message = "Start must fit inside the intro/loop; duration must be 1 tick to 256 beats."; return
+        }
+        var changed = pattern
+        guard selectedNote != nil || (changed.notes.map(\.id).max() ?? 0) < UInt64.max - 1 else {
+            message = "Pattern note ID capacity reached."; return
+        }
+        let id = selectedNote ?? ((changed.notes.map(\.id).max() ?? 0) + 1)
+        let note = SequencerNote(
+            id: id, start: Int64((start * 960).rounded()), duration: Int64((duration * 960).rounded()),
+            pitch: pitch, velocity: velocity, output: output)
+        changed.notes.removeAll { $0.id == id }; changed.notes.append(note)
+        do { try changed.validate(); pattern = changed; message = nil } catch { message = error.localizedDescription }
+    }
+}
+
 struct RackSceneView: View {
     @ObservedObject var model: OberVaveModel
     @Environment(\.dismiss) private var dismiss
@@ -392,9 +843,7 @@ struct RackSceneView: View {
                     HStack {
                         Button("Save Scene") { model.saveScene(name: name) }
                         Spacer()
-                        Button("Save As New") {
-                            model.saveScene(name: name, asNew: true)
-                        }
+                        Button("Save As New") { model.saveScene(name: name, asNew: true) }
                         Spacer()
                         Button("New Scene", role: .destructive) { confirmsNew = true }
                     }

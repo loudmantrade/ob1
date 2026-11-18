@@ -2,8 +2,9 @@
 
 `native/Musical/Pattern.h` implements the portable C++17 pattern **data and
 editing model** (plan increment C6). It includes no DSP, SwiftUI, CoreMIDI,
-file operations, allocation, locks or musical scheduler. It does not yet
-enable sequencer playback, recording, scene persistence or an editing UI.
+file operations, allocation or locks. `Sequencer.h` supplies portable playback
+and recording, integrated with the standalone rack, SEQ tab and additive scene
+JSON fields. See [the standalone guide](../ios/OberVave/README.md#seq-pattern-launcher-and-mixer).
 
 ## Limits and musical units
 
@@ -15,7 +16,9 @@ enable sequencer playback, recording, scene persistence or an editing UI.
 - Musical positions/durations use signed 64-bit integer ticks, **960 PPQ**,
   not floating point beats or audio/UI timers.
 - Pattern length is 1 through **245,760 ticks** (256 quarters, or 64 bars
-  of 4/4). Every note starts in `[0, length)`. Duration is 1 through 245,760
+  of 4/4). Every note starts in `[-intro, length)`; intro is 0–3,840 ticks.
+  Negative starts are one-shot pickup notes; `introEnabled=false` skips them
+  without deleting the data. Duration is 1 through 245,760
   ticks, independently of pattern length: a note can cross a loop boundary
   or extend over multiple iterations of a short pattern.
 - The model does not assume 4/4 for scheduling; "64 bars" only illustrates
@@ -65,8 +68,9 @@ Names need not be unique. Duplicating creates a new pattern ID and independently
 copies notes, routing, quantization, loop and note-ID high-water mark. Note
 IDs are preserved **within the copy**, not made globally unique.
 
-Full note identity in a future playback/recording system must include the
-pattern/playback lifetime and loop occurrence, not just this record ID.
+Playback identity includes a non-reused runtime Note On ID within the column
+player, not just the editable note-record ID. Replacement stops captured
+owners before retiring immutable clip storage.
 Restoring an old snapshot is a new document lifetime, not a way to hot-rewind
 ownership IDs while old notes are sounding.
 
@@ -97,9 +101,10 @@ Long notes keep their end past the pattern boundary; ends are not loop-wrapped.
 `Pattern::timing(id, output)` returns this derived view without mutating any
 original note data or IDs. Disabling quantization restores original timing
 exactly. Changing grid/strength/ends never accumulates rounding error.
-Canonical storage remains in original-time order; a future scheduler must
-order derived events separately, using the existing generated-event rule
-(Off before On at equal time), not assume quantized ends follow storage order.
+Canonical storage remains in original-time order. The player releases due
+notes before emitting new notes at a control boundary, rather than assuming
+quantized ends follow storage order. `timingAt(index, output)` is constant-time
+for playback; the editable-ID lookup remains linear.
 
 ## Snapshots and versioning
 
@@ -114,9 +119,11 @@ earlier working patterns: restore validates the entire snapshot before copying.
 
 These are not a serialized struct ABI: **never write raw C++ object bytes**
 to a scene/file. Padding, bool representation and endianness are not a format.
-A later scene/pattern codec must encode named fields, version/PPQ and counters,
-decode into validated types off the audio thread, and preserve originals and
-explicit routing/stage. The active prefix of `notes` is the format's content;
+The standalone codec encodes named fields and a version with fixed 960 PPQ,
+decodes validated types off audio, and preserves originals and explicit stage.
+Logical routing is pinned to the cell's column. Each whole-cell publication is
+a new document lifetime; its next editing ID is reconstructed above all saved
+IDs. Playback IDs do not rewind. The active prefix of `notes` is the content;
 unused capacity is not. Unknown required versions fail explicitly rather than
 being guessed. Unknown additive metadata can be handled by the future codec,
 but unknown musical/routing semantics must not silently become defaults.
@@ -124,10 +131,30 @@ but unknown musical/routing semantics must not silently become defaults.
 Create/edit/duplicate/restore are **control-thread editing operations**, not
 realtime commands. They may shift/copy bounded arrays; snapshot validation may
 scan ID pairs. Publish a separately owned immutable snapshot at an audio
-boundary and retire the old one off-thread when the playback increment is
-implemented. Do not retain store pointers across edits/replacement or mutate
-this editor concurrently with rendering. This increment does not change the
-existing audio queue, scene format, AU parameter IDs or live synth behavior.
+boundary and retire the old one off-thread, as the rack now does. Do not retain
+store pointers across edits/replacement or mutate this editor concurrently
+with rendering. Scene pattern fields are additive; AU parameter IDs and the
+independent AU scheduler are unchanged.
+
+## Playback and recording
+
+The standalone grid is 16 columns by eight rows, distinct from the reusable
+16-entry `PatternStore`. Scenes publish all 128 possible cells atomically with
+the instruments. Players and the single recorder belong to the audio owner.
+Fractional 960-PPQ conversion retains division remainders across control
+blocks; tempo and external phase come from the existing rack clock.
+Launch bar size is currently four quarter notes. The shared row downbeat is
+chosen late enough for the longest enabled pickup. Each column's current
+clip continues until its replacement's pickup begins.
+
+Output events bypass ARP without changing saved parameters and share bounded
+pitch ownership with generated ARP events. Recording output observes actual
+ARP releases and direct releases after Sustain, not precomputed gate times.
+Recording finalizes open notes on completion/Stop, sorts originals and
+publishes through a one-result mailbox; the UI validates/publishes the result
+as an immutable cell. Overflow reports an error and does not publish a
+success-shaped partial take. Scheduling is at 16-sample control resolution,
+not per-sample voice synthesis. No UI timer schedules or records events.
 
 ## Verification
 

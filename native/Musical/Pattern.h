@@ -38,6 +38,8 @@ struct PatternData {
     PatternID id = 0;
     std::array<char, patternNameBytes + 1> name {};
     Tick length = ticksPerQuarter * 4;
+    Tick intro = 0;
+    bool introEnabled = true;
     PatternQuantization quantization {};
     NoteID nextNote = 1;
     uint32_t count = 0;
@@ -85,10 +87,10 @@ inline PatternError validatePatternQuantization(PatternQuantization quantization
         quantization.strength > 100 ? PatternError::InvalidQuantization : PatternError::None;
 }
 
-inline PatternError validatePatternNote(const PatternNote& note, Tick length)
+inline PatternError validatePatternNote(const PatternNote& note, Tick length, Tick intro = 0)
 {
     if (length < 1 || length > maxPatternTicks) return PatternError::InvalidLength;
-    if (!note.id || note.start < 0 || note.start >= length || note.duration < 1 ||
+    if (!note.id || note.start < -intro || note.start >= length || note.duration < 1 ||
         note.duration > maxPatternTicks || note.pitch > 127 ||
         note.channel > 15 || !note.velocity || note.velocity > 127)
         return PatternError::InvalidNote;
@@ -109,13 +111,14 @@ inline PatternError validatePattern(const PatternData& data)
         return PatternError::InvalidName;
     if (!data.id) return PatternError::InvalidCounter;
     if (data.length < 1 || data.length > maxPatternTicks) return PatternError::InvalidLength;
+    if (data.intro < 0 || data.intro > ticksPerQuarter * 4) return PatternError::InvalidLength;
     const auto quantization = validatePatternQuantization(data.quantization);
     if (quantization != PatternError::None) return quantization;
     if (data.count > patternNoteCapacity) return PatternError::Full;
     if (!data.nextNote) return PatternError::InvalidCounter;
     for (uint32_t i = 0; i < data.count; ++i) {
         const auto& note = data.notes[i];
-        const auto result = validatePatternNote(note, data.length);
+        const auto result = validatePatternNote(note, data.length, data.intro);
         if (result != PatternError::None) return result;
         if (note.id >= data.nextNote) return PatternError::InvalidCounter;
         if (i && patternNoteBefore(note, data.notes[i - 1])) return PatternError::Unsorted;
@@ -194,7 +197,7 @@ public:
         if (data_.count == patternNoteCapacity) return PatternError::Full;
         if (data_.nextNote == std::numeric_limits<NoteID>::max()) return PatternError::IDExhausted;
         note.id = data_.nextNote;
-        const auto result = validatePatternNote(note, data_.length);
+        const auto result = validatePatternNote(note, data_.length, data_.intro);
         if (result != PatternError::None) return result;
         ++data_.nextNote;
         insert(note);
@@ -207,7 +210,7 @@ public:
         const auto index = find(id);
         if (index == data_.count) return PatternError::NotFound;
         note.id = id;
-        const auto result = validatePatternNote(note, data_.length);
+        const auto result = validatePatternNote(note, data_.length, data_.intro);
         if (result != PatternError::None) return result;
         remove(index);
         insert(note);
@@ -225,11 +228,16 @@ public:
     PatternError timing(NoteID id, PatternTiming& output) const
     {
         const auto index = find(id);
-        if (index == data_.count) return PatternError::NotFound;
+        return timingAt(index, output);
+    }
+
+    PatternError timingAt(uint32_t index, PatternTiming& output) const
+    {
+        if (index >= data_.count) return PatternError::NotFound;
         const auto& note = data_.notes[index];
         const auto& q = data_.quantization;
         if (!q.grid || !q.strength) { output = {note.start, note.duration}; return PatternError::None; }
-        const auto start = quantized(note.start, q, data_.length - 1);
+        const auto start = std::max(-data_.intro, quantized(note.start, q, data_.length - 1));
         Tick duration = note.duration;
         if (q.ends) {
             const auto end = quantized(note.start + note.duration, q, maxPatternTicks * 2);
@@ -264,6 +272,7 @@ private:
     }
     static Tick quantized(Tick tick, PatternQuantization q, Tick maximum)
     {
+        if (tick < 0) return -quantized(-tick, q, maxPatternTicks * 2);
         Tick nearest = (tick / q.grid + (tick % q.grid >= (q.grid + 1) / 2)) * q.grid;
         nearest = std::min(nearest, maximum / q.grid * q.grid);
         const auto delta = nearest - tick;

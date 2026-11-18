@@ -36,6 +36,12 @@ public:
         return false;
     }
 
+    bool containsPitch(uint8_t pitch) const
+    {
+        for (const auto& entry : entries_) if (entry.used && entry.on.data1 == pitch) return true;
+        return false;
+    }
+
     template<class Visitor>
     void visit(Visitor& visitor) const
     {

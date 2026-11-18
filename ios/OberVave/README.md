@@ -45,17 +45,64 @@ entry. The existing ARP modes, Latch, Sustain, controllers, start grids and
 signed live compensation are preserved. Off-mode Mono/Unison key fallback is
 also preserved. Legacy audio/RNG and production 16-instrument regressions are
 documented in [the arpeggiator integration contract](../../docs/ARPEGGIATOR.md).
-The AU retains its separate legacy scheduler for now; this does not add
-pattern recording/playback or external MIDI output.
+The AU retains its separate legacy scheduler for now. Pattern recording and
+playback described below are standalone-only; external MIDI output is not implemented.
 
 The top header contains a **square Stop icon** next to Tempo, grouped as the
-global transport panel for future sequencer controls. It stops all instruments'
+global transport panel. It stops all instruments'
 playback on one audio boundary, releases direct/ARP/Chord/Hold notes despite
 Latch or Sustain, clears screen Key-Lock notes and cancels already scheduled
 MIDI playback. It does not change modes, patches, tempo, sync or mixer settings.
 Release envelopes and chorus/delay/reverb tails continue naturally; effects
 are neither reset nor muted. New live input after Stop plays immediately.
-There is no sequencer or external MIDI Stop transmission yet.
+It also cancels queued pattern launches and finalizes recording. It does not
+transmit an external MIDI Stop.
+
+### SEQ: pattern launcher and mixer
+
+The **SEQ** tab has eight pattern pads per logical rack instrument (up to 16
+columns). Columns are instruments, not MIDI channels. The rightmost **ROW**
+buttons launch a complete row synchronously, including empty cells, which stop
+the corresponding column. Launch options are **FREE**, next **BEAT**, and next
+**BAR** (currently 4/4). Playback uses the audio-owned shared tempo/MIDI clock
+with 16-sample control resolution; UI refresh timers do not schedule music.
+
+- Tap an empty pad to create a pattern; tap a filled pad to launch it.
+  Hold a pad for edit, duplicate, delete, recording and column Stop.
+  Active pads show progress; queued pads show a clock.
+- The editor provides quarter-beat step input, an editable note list with
+  pitch/velocity/start/duration, loop length and non-destructive playback
+  quantization. It is not a full piano-roll editor. Changes to an active cell
+  stop its previous playback safely; tap the pad to launch the edited version.
+- The **intro marker** reserves up to four beats before zero. Negative-start
+  notes play once before the main loop, not on subsequent iterations.
+  A quantized launch chooses a downbeat allowing the whole intro to play.
+  Row launches share the same downbeat even with different intro lengths.
+  Copies retain intro data; **Disable Intro** skips it without deleting notes.
+- Hold a pad, choose **Record Loop** or **Record Intro + Loop**, then confirm
+  **Record Output** (actual ARP/direct-note events, replay bypasses ARP) or
+  **Record Input** (replay through the current ARP). Existing playback continues
+  for monitoring. Recording replaces that cell's notes with one loop beginning
+  at the next bar; intro mode also captures performance between arming and that
+  bar. **FINISH REC**, column Stop and global Stop finalize open notes early.
+  Only one cell records at a time; playback is independent on every column.
+- Every column has a volume fader, independent peak meter, pan knob (drag
+  vertically, double-tap to center), **M**, **S**, and **ARP Stop**. Mute/Solo
+  affect mixing without unloading engines. Solo is temporary, not scene state.
+  ARP Stop clears the column's live arpeggio without changing its mode or
+  interrupting output-stage pattern playback; new input can start it again.
+- Scenes save all pattern cells, original ticks, note stages and intro flags.
+  Legacy scenes without patterns still load. Finish recording before scene
+  save/load. Scene sounds and all cells are validated/prepared off audio and
+  replaced together by one audio command; invalid cells leave the old scene.
+
+Limits: eight cells per instrument, 1,024 notes per cell, 256 beats per loop,
+960 PPQ; the basic step strip shows the first 256 steps. Notes elsewhere and
+negative intro notes remain editable in the note list/numeric fields.
+Playback has 256 simultaneous note owners per column; capacity failures are
+reported and use the existing safe-stop path, never silent note eviction.
+Input-stage patterns intentionally use the patch's Latch/Sustain semantics;
+use ARP Stop/global Stop to clear a retained arpeggio. Effects retain tails.
 
 In MIDI settings / **Sustain Pedal**, **Triple-tap Sustain to Stop All**
 optionally triggers the same global stop on the third pedal release.

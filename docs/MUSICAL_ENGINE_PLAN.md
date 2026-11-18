@@ -97,6 +97,14 @@ working tree. Do not merge or push feature work without an explicit request.
 
 ### C. Patterns and recording
 
+Delivered in the standalone SEQ increment: eight cells per logical instrument,
+shared FREE/BEAT/4/4 BAR row launching, optional one-shot pre-zero intro,
+one-loop input/output recording while monitoring existing playback, immutable
+cell edits and atomic scene+cell loading. The column mixer includes fader,
+independent meter, pan, Mute/Solo and ARP Stop. Editing includes steps and a
+numeric note list; full piano roll and external MIDI routing remain separate
+increments. Scheduling retains the existing 16-sample synthesis resolution.
+
 6. Add a validated, bounded pattern model: integer PPQ ticks (960 per quarter),
    stable note IDs, original timing plus optional quantization, length/loop,
    velocity and explicit logical destination context.

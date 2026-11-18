@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "RackAPI.h"
+#include "SequencerAPI.h"
 
 #ifdef __cplusplus
 extern "C" {

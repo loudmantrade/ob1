@@ -5,6 +5,7 @@
 #include "../../native/Musical/MIDIIngress.h"
 #include "../../native/Musical/NoteOwnership.h"
 #include "../../native/Musical/SustainGesture.h"
+#include "../../native/Musical/Sequencer.h"
 #include "../../native/OberVave/ArpeggiatorAdapter.h"
 #include <array>
 #include <atomic>
@@ -109,6 +110,7 @@ struct Timing {
     music::Frame timeline = frame;
 };
 void engineFailure();
+bool observeOutput(void*, const music::Event&) noexcept;
 std::atomic<uint32_t> nextArpeggiatorSource {1};
 struct EngineCreationFailure {};
 
@@ -131,6 +133,7 @@ struct SynthEngine {
     virtual void controllerInput(uint8_t status, uint8_t d1, uint8_t d2) = 0;
     virtual bool controllerOverride(uint32_t source) const = 0;
     virtual void stop() = 0;
+    virtual void stopArpeggiator() = 0;
     virtual void sync(bool enabled, uint32_t grid) = 0;
     virtual void render(const Timing& timing, int32_t* output) = 0;
     virtual uint32_t voiceLevel(uint32_t voice) const = 0;
@@ -141,13 +144,17 @@ struct NativeEngine final : SynthEngine {
     Engine dsp {};
     obervave::ArpeggiatorAdapter arpeggiator {dsp};
     music::Time currentTime {};
+    uint32_t logicalSlot = 0;
     NativeEngine(uint32_t slot = 0, uint32_t channel = 0,
                  obervave::ArpeggiatorAdapter::EventSink sink = nullptr, void* context = nullptr)
     {
+        logicalSlot = slot;
         dsp.initialize();
         dsp.livePhaseAdjustment = true;
         if constexpr (Extracted)
-            if (!arpeggiator.attach(slot, channel, arpeggiatorSource(), sink, context)) throw EngineCreationFailure {};
+            if (!arpeggiator.attach(slot, channel, arpeggiatorSource(),
+                sink ? sink : observeOutput, sink ? context : &logicalSlot)) throw EngineCreationFailure {};
+        if constexpr (Extracted) arpeggiator.directObserver(observeOutput, &logicalSlot);
     }
     void boundary(music::Time time) override { currentTime = time; }
     void parameter(uint32_t p, uint8_t v) override
@@ -168,7 +175,10 @@ struct NativeEngine final : SynthEngine {
     bool event(const music::Event& event) override
     {
         currentTime = event.time;
-        if constexpr (Extracted) return arpeggiator.input(event, false, false);
+        if constexpr (Extracted) {
+            if (event.routing.stage == music::Stage::Output) return arpeggiator.outputEvent(event);
+            return arpeggiator.input(event, false, false);
+        }
         music::MIDIMessage message {};
         if (event.routing.stage != music::Stage::Input ||
             music::encodeMIDI(event, message) != music::EventError::None) return false;
@@ -187,6 +197,12 @@ struct NativeEngine final : SynthEngine {
         } else dsp.engine_transport_stop();
     }
     void sync(bool on, uint32_t grid) override { dsp.ctl_arp_sync = on; dsp.ctl_arp_sync_grid = grid; }
+    void stopArpeggiator() override
+    {
+        if constexpr (Extracted) {
+            if (!arpeggiator.stopGenerated(currentTime)) engineFailure();
+        } else dsp.engine_transport_stop();
+    }
     void render(const Timing& timing, int32_t* out) override
     {
         currentTime = {timing.timeline};
@@ -257,12 +273,56 @@ struct Instrument final : Retired {
         noteOwners.clear();
     }
 };
+struct SequencerClip final : Retired { music::Pattern pattern; };
+using ClipGrid = std::array<std::array<std::unique_ptr<SequencerClip>, music::sequencerRows>, capacity>;
 struct Scene final : Retired {
     std::array<std::unique_ptr<Instrument>, capacity> slots;
+    ClipGrid preparedClips;
 };
+ClipGrid clips;
+std::unique_ptr<SequencerClip> prepareClip(const ov_seq_clip& input)
+{
+    if (input.slot >= capacity || input.row >= music::sequencerRows ||
+        input.count > music::patternNoteCapacity || input.loop > 1 || input.intro_enabled > 1 ||
+        !std::memchr(input.name, 0, sizeof(input.name))) throw EngineCreationFailure {};
+    auto clip = std::make_unique<SequencerClip>();
+    auto data = std::make_unique<music::PatternData>();
+    data->id = input.slot * music::sequencerRows + input.row + 1;
+    data->length = input.length; data->intro = input.intro;
+    data->loop = input.loop; data->introEnabled = input.intro_enabled;
+    data->quantization.grid = input.quantize;
+    std::copy(std::begin(input.name), std::end(input.name), data->name.begin());
+    data->count = input.count;
+    for (uint32_t i = 0; i < input.count; ++i) {
+        const auto& note = input.notes[i];
+        if (note.pitch > 127 || !note.velocity || note.velocity > 127 || note.output > 1 ||
+            !note.id || note.id == UINT64_MAX) throw EngineCreationFailure {};
+        data->notes[i] = {note.id, note.start, note.duration,
+            {music::Target::Instruments, uint16_t(1u << input.slot),
+             note.output ? music::Stage::Output : music::Stage::Input},
+            0, uint8_t(note.pitch), uint8_t(note.velocity)};
+        data->nextNote = std::max(data->nextNote, note.id + 1);
+    }
+    std::sort(data->notes.begin(), data->notes.begin() + data->count, music::patternNoteBefore);
+    if (clip->pattern.restore(*data) != music::PatternError::None) throw EngineCreationFailure {};
+    return clip;
+}
+std::array<music::ClipPlayer, capacity> players;
+music::MusicalPosition musicalPosition;
+music::ClipRecorder recorder;
+std::atomic<uint32_t> recordingReady {0};
+ov_seq_clip recordedClip {};
+std::array<std::atomic<int32_t>, capacity> activeRows, pendingRows;
+std::array<std::atomic<uint32_t>, capacity> playPositions {};
+std::atomic<int32_t> recordingSlot {-1};
+uint16_t soloMask = 0;
+void finishRecording();
+void stopSequencer(uint32_t slot);
+void observeInput(uint32_t slot, const music::Event& event);
 
 struct Snapshot {
     std::atomic<uint32_t> peak {0};
+    std::atomic<uint32_t> sequencerPeak {0};
     std::array<std::atomic<uint8_t>, NPARAM> parameters {}, cc {};
     std::array<std::atomic<uint32_t>, 8> levels {};
     std::atomic<uint32_t> program {17}, learned {0}, sync {0}, grid {2};
@@ -317,7 +377,8 @@ void forgetPedals(uint32_t slot)
     for (auto& pedal : pedalOwners) pedal.destinations &= ~(1u << slot);
 }
 
-enum class Kind { MIDI, StopAll, SourceClose, Parameter, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
+enum class Kind { MIDI, StopAll, SeqClip, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord,
+    SeqFinish, SourceClose, Parameter, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
 struct Command {
     Kind kind = Kind::MIDI;
     uint32_t slot = 0, a = 0, b = 0, c = 0, due = 0;
@@ -378,6 +439,7 @@ bool valid(const ov_instrument_config& c)
 }
 void setProgram(uint32_t slot, uint32_t index)
 {
+    stopSequencer(slot);
     auto& inst = *scene->slots[slot];
     inst.engine->boundary({processedFrames});
     inst.stop();
@@ -393,6 +455,8 @@ void setProgram(uint32_t slot, uint32_t index)
 }
 void stopAll()
 {
+    finishRecording();
+    for (uint32_t slot = 0; slot < capacity; ++slot) stopSequencer(slot);
     for (auto& inst : scene->slots) if (inst) {
         inst->engine->boundary({processedFrames});
         inst->stop();
@@ -407,6 +471,52 @@ bool deliver(Instrument& instrument, const music::Event& event)
     if (instrument.engine->event(event)) return true;
     error.store(2); panic.store(1);
     return false;
+}
+void encodeClip(uint32_t slot, uint32_t row, const music::PatternData& data, ov_seq_clip& output)
+{
+    output = {};
+    output.slot = slot; output.row = row; output.count = data.count;
+    output.length = data.length; output.intro = data.intro;
+    output.loop = data.loop; output.intro_enabled = data.introEnabled;
+    output.quantize = uint32_t(data.quantization.grid);
+    std::copy(data.name.begin(), data.name.end(), output.name);
+    for (uint32_t i = 0; i < data.count; ++i) {
+        const auto& note = data.notes[i];
+        output.notes[i] = {note.id, note.start, note.duration, note.pitch, note.velocity,
+            note.routing.stage == music::Stage::Output ? 1u : 0u};
+    }
+}
+void finishRecording()
+{
+    if (!recorder.running) return;
+    recorder.finish(musicalPosition.value);
+    recordingSlot.store(-1);
+    if (recorder.overflow) { error.store(1); return; }
+    encodeClip(recorder.slot, recorder.row, recorder.data, recordedClip);
+    recordingReady.store(1, std::memory_order_release);
+}
+void observeInput(uint32_t slot, const music::Event& event)
+{
+    if (recorder.running && !recorder.output && recorder.slot == slot &&
+        !recorder.capture(event, musicalPosition.value)) { error.store(1); panic.store(1); }
+}
+bool observeOutput(void* context, const music::Event& event) noexcept
+{
+    const auto slot = *static_cast<const uint32_t*>(context);
+    if (recorder.running && recorder.output && recorder.slot == slot &&
+        !recorder.capture(event, musicalPosition.value)) { error.store(1); panic.store(1); return false; }
+    return true;
+}
+void routeEvent(const music::Event& event);
+void stopSequencer(uint32_t slot)
+{
+    auto sink = [&](const music::Event& event) {
+        if (!scene || !scene->slots[slot]) return true;
+        if (event.routing.stage == music::Stage::Output) return deliver(*scene->slots[slot], event);
+        routeEvent(event); return !panic.load();
+    };
+    if (!players[slot].stop(processedFrames, sink)) { error.store(2); panic.store(1); }
+    activeRows[slot].store(-1); pendingRows[slot].store(-1); playPositions[slot].store(0);
 }
 void refreshActiveNotes(Instrument& instrument)
 {
@@ -495,7 +605,10 @@ void routeEvent(const music::Event& event)
                 inst->config.parameters[p] = inst->engine->parameter(p);
         }
         if (kind == 0x80 || kind == 0x90) {
-            auto sink = [&](const music::Event& note) { return deliver(*inst, note); };
+            auto sink = [&](const music::Event& note) {
+                observeInput(slot, note);
+                return deliver(*inst, note);
+            };
             const auto result = inst->noteOwners.input(routed, sink);
             if (result == music::OwnershipResult::Full ||
                 result == music::OwnershipResult::InvalidInput) {
@@ -544,6 +657,54 @@ void routeEvent(const music::Event& event)
 }
 void apply(const Command& c)
 {
+    if (c.kind == Kind::SeqFinish) { finishRecording(); return; }
+    if (c.kind == Kind::SeqRow) {
+        int64_t intro = 0;
+        for (uint32_t slot = 0; slot < capacity; ++slot)
+            if (clips[slot][c.a] && scene->slots[slot]) {
+                const auto& data = clips[slot][c.a]->pattern.data();
+                if (data.introEnabled) intro = std::max(intro, data.intro * music::tickUnit);
+            }
+        const auto origin = music::ClipPlayer::boundary(musicalPosition.value + intro, music::LaunchGrid(c.b));
+        for (uint32_t slot = 0; slot < capacity; ++slot) if (scene->slots[slot])
+            players[slot].queue(c.a, clips[slot][c.a] ? &clips[slot][c.a]->pattern : nullptr,
+                musicalPosition.value, music::LaunchGrid(c.b), origin);
+        return;
+    }
+    if (c.kind == Kind::SeqClip) {
+        if (recorder.running && recorder.slot == c.slot) finishRecording();
+        if (players[c.slot].row == int32_t(c.a) || players[c.slot].pendingRow == int32_t(c.a))
+            stopSequencer(c.slot);
+        retire(clips[c.slot][c.a].release());
+        clips[c.slot][c.a].reset(static_cast<SequencerClip*>(c.object));
+        return;
+    }
+    if (c.kind == Kind::SeqLaunch) {
+        if (scene->slots[c.slot]) players[c.slot].queue(c.a,
+            clips[c.slot][c.a] ? &clips[c.slot][c.a]->pattern : nullptr,
+            musicalPosition.value, music::LaunchGrid(c.b));
+        return;
+    }
+    if (c.kind == Kind::SeqStop) {
+        if (c.a && scene->slots[c.slot]) {
+            scene->slots[c.slot]->engine->boundary({processedFrames});
+            scene->slots[c.slot]->engine->stopArpeggiator();
+        } else if (!c.a) {
+            if (recorder.running && recorder.slot == c.slot) finishRecording();
+            stopSequencer(c.slot);
+        }
+        return;
+    }
+    if (c.kind == Kind::SeqSolo) {
+        if (c.a) soloMask |= 1u << c.slot; else soloMask &= ~(1u << c.slot);
+        return;
+    }
+    if (c.kind == Kind::SeqRecord) {
+        if (recorder.running || recordingReady.load() || !clips[c.slot][c.a]) { error.store(2); return; }
+        recorder.begin(c.slot, c.a, clips[c.slot][c.a]->pattern.data(), musicalPosition.value, c.b, c.c);
+        recordingSlot.store(c.slot);
+        return;
+    }
     if (c.kind == Kind::StopAll) {
         stopAll();
         scheduledCount = 0;
@@ -595,8 +756,11 @@ void apply(const Command& c)
     }
     if (c.kind == Kind::Scene) {
         stopAll();
+        for (auto& column : clips) for (auto& clip : column) retire(clip.release());
+        soloMask = 0;
         retire(scene.release());
         scene.reset(static_cast<Scene*>(c.object));
+        clips.swap(scene->preparedClips);
         scheduledCount = 0;
         internalTempo.store(c.a);
         if (!clock.quarter) clock.bpm = c.a;
@@ -616,6 +780,10 @@ void apply(const Command& c)
     if (c.slot >= capacity) return;
     auto& pointer = scene->slots[c.slot];
     if (c.kind == Kind::Add || c.kind == Kind::Remove) {
+        if (recorder.running && recorder.slot == c.slot) finishRecording();
+        stopSequencer(c.slot);
+        for (auto& clip : clips[c.slot]) retire(clip.release());
+        soloMask &= ~(1u << c.slot);
         if (pointer) {
             pointer->engine->boundary({processedFrames});
             pointer->stop();
@@ -704,6 +872,27 @@ void renderBlock()
     }
     if (!clock.quarter) clock.bpm = internalTempo.load(std::memory_order_relaxed);
     const auto q = clock.length();
+    musicalPosition.advance(CTL, q);
+    musicalPosition.followPhase(clock.external ? int32_t(clock.frame - clock.anchor)
+        : int32_t(processedFrames % (uint64_t(q) * 4)), q);
+    if (recorder.running && musicalPosition.value >= recorder.stopAt) finishRecording();
+    for (uint32_t slot = 0; slot < capacity; ++slot) {
+        auto sink = [&](const music::Event& event) {
+            auto* inst = scene->slots[slot].get();
+            if (!inst) return false;
+            if (event.routing.stage == music::Stage::Output) return deliver(*inst, event);
+            routeEvent(event); return !panic.load();
+        };
+        if (scene->slots[slot] && !players[slot].process(musicalPosition.value, processedFrames,
+            slot, scene->slots[slot]->config.channel - 1, sink)) { error.store(1); panic.store(1); }
+        activeRows[slot].store(players[slot].row);
+        pendingRows[slot].store(players[slot].pendingRow);
+        const auto* clip = players[slot].clip;
+        const auto position = musicalPosition.value - players[slot].origin;
+        playPositions[slot].store(clip && position >= 0 ?
+            uint32_t((position % (clip->data().length * music::tickUnit)) * 65535 /
+                (clip->data().length * music::tickUnit)) : 0);
+    }
     const int64_t phase = clock.external ? int32_t(clock.frame - clock.anchor) : int64_t(clock.frame);
     Timing timing {clock.frame, q, double(phase) / q, audioAdvance.load(std::memory_order_relaxed), processedFrames};
     if (clock.external) timing.advance += midiBuffer.load(std::memory_order_relaxed) * FS / 1000;
@@ -714,7 +903,8 @@ void renderBlock()
         if (!inst) continue;
         inst->engine->render(timing, buffer);
         const auto& c = inst->config;
-        const float gain = c.muted || c.level_db <= -48 ? 0 : std::pow(10.f, c.level_db / 20);
+        const float gain = c.muted || c.level_db <= -48 || (soloMask && !(soloMask & (1u << s)))
+            ? 0 : std::pow(10.f, c.level_db / 20);
         const float left = gain * (c.pan > 0 ? std::sqrt(1 - c.pan) : 1);
         const float right = gain * (c.pan < 0 ? std::sqrt(1 + c.pan) : 1);
         float peak = 0;
@@ -730,6 +920,9 @@ void renderBlock()
         auto previous = snapshots[s].peak.load(std::memory_order_relaxed);
         while (previous < level &&
                !snapshots[s].peak.compare_exchange_weak(previous, level, std::memory_order_relaxed)) {}
+        previous = snapshots[s].sequencerPeak.load(std::memory_order_relaxed);
+        while (previous < level &&
+               !snapshots[s].sequencerPeak.compare_exchange_weak(previous, level, std::memory_order_relaxed)) {}
         inst->leftGain = left;
         inst->rightGain = right;
         for (uint32_t v = 0; v < 8; ++v) snapshots[s].levels[v].store(inst->engine->voiceLevel(v));
@@ -782,6 +975,9 @@ void ov_init(void)
 {
     using namespace rack;
     if (scene) return;
+    for (uint32_t slot = 0; slot < capacity; ++slot) {
+        activeRows[slot].store(-1); pendingRows[slot].store(-1);
+    }
     scene = std::make_unique<Scene>();
     ov_instrument_config c {};
     c.engine = OV_ENGINE_OBERVAVE; c.channel = 1; c.high_note = 127; c.program = 17; c.grid = 2;
@@ -825,14 +1021,26 @@ int ov_rack_remove(uint32_t slot)
 }
 int ov_rack_load(const ov_scene_config* config)
 {
+    return ov_rack_load_sequenced(config, nullptr, 0);
+}
+int ov_rack_load_sequenced(const ov_scene_config* config, const ov_seq_clip* patterns, uint32_t count)
+{
     using namespace rack;
-    if (!config || config->tempo < 40 || config->tempo > 240) { error.store(2); return 0; }
+    if (!config || config->tempo < 40 || config->tempo > 240 || count > capacity * music::sequencerRows ||
+        (count && !patterns)) { error.store(2); return 0; }
     for (const auto& slot : config->slots)
         if (slot.present > 1 || (slot.present && !valid(slot.config))) { error.store(2); return 0; }
     try {
         auto next = std::make_unique<Scene>();
         for (uint32_t s = 0; s < capacity; ++s)
             if (config->slots[s].present) next->slots[s] = std::make_unique<Instrument>(config->slots[s].config, s);
+        for (uint32_t i = 0; i < count; ++i) {
+            auto clip = prepareClip(patterns[i]);
+            if (!next->slots[patterns[i].slot] || next->preparedClips[patterns[i].slot][patterns[i].row]) {
+                error.store(2); return 0;
+            }
+            next->preparedClips[patterns[i].slot][patterns[i].row] = std::move(clip);
+        }
         Command c; c.kind = Kind::Scene; c.object = next.get(); c.a = config->tempo;
         if (!enqueue(c)) return 0;
         next.release();
@@ -887,6 +1095,61 @@ int ov_rack_stop_all(void)
     c.kind = rack::Kind::StopAll;
     return rack::enqueue(c);
 }
+int ov_seq_set_clip(const ov_seq_clip* input)
+{
+    using namespace rack;
+    if (!input) { error.store(2); return 0; }
+    try {
+        auto clip = prepareClip(*input);
+        Command c; c.kind = Kind::SeqClip; c.slot = input->slot; c.a = input->row; c.object = clip.get();
+        if (!enqueue(c)) return 0;
+        clip.release();
+        return 1;
+    } catch (const EngineCreationFailure&) { error.store(2); return 0; }
+    catch (const std::bad_alloc&) { error.store(3); return 0; }
+}
+uint32_t ov_seq_take_level(uint32_t slot) { return slot < rack::capacity ? rack::snapshots[slot].sequencerPeak.exchange(0) : 0; }
+static int seqCommand(rack::Kind kind, uint32_t slot, uint32_t a = 0, uint32_t b = 0, uint32_t d = 0)
+{
+    if (slot >= rack::capacity) { rack::error.store(2); return 0; }
+    rack::Command c; c.kind = kind; c.slot = slot; c.a = a; c.b = b; c.c = d;
+    return rack::enqueue(c);
+}
+int ov_seq_delete(uint32_t slot, uint32_t row)
+{
+    if (row >= OV_SEQ_ROWS) { rack::error.store(2); return 0; }
+    return seqCommand(rack::Kind::SeqClip, slot, row);
+}
+int ov_seq_launch(uint32_t slot, uint32_t row, uint32_t grid)
+{
+    if (row >= OV_SEQ_ROWS || grid > 2) { rack::error.store(2); return 0; }
+    return seqCommand(rack::Kind::SeqLaunch, slot, row, grid);
+}
+int ov_seq_launch_row(uint32_t row, uint32_t grid)
+{
+    if (row >= OV_SEQ_ROWS || grid > 2) { rack::error.store(2); return 0; }
+    return seqCommand(rack::Kind::SeqRow, 0, row, grid);
+}
+int ov_seq_stop(uint32_t slot, uint32_t arp) { return seqCommand(rack::Kind::SeqStop, slot, arp != 0); }
+int ov_seq_solo(uint32_t slot, uint32_t enabled) { return seqCommand(rack::Kind::SeqSolo, slot, enabled != 0); }
+int ov_seq_record(uint32_t slot, uint32_t row, uint32_t output, uint32_t intro)
+{
+    if (row >= OV_SEQ_ROWS || output > 1 || intro > 1) { rack::error.store(2); return 0; }
+    return seqCommand(rack::Kind::SeqRecord, slot, row, output, intro);
+}
+int ov_seq_finish_record(void) { return seqCommand(rack::Kind::SeqFinish, 0); }
+uint32_t ov_seq_record_ready(void) { return rack::recordingReady.load(std::memory_order_acquire); }
+int ov_seq_read_record(ov_seq_clip* clip)
+{
+    if (!clip || !ov_seq_record_ready()) return 0;
+    *clip = rack::recordedClip;
+    rack::recordingReady.store(0, std::memory_order_release);
+    return 1;
+}
+int32_t ov_seq_active(uint32_t slot) { return slot < rack::capacity ? rack::activeRows[slot].load() : -1; }
+int32_t ov_seq_pending(uint32_t slot) { return slot < rack::capacity ? rack::pendingRows[slot].load() : -1; }
+uint32_t ov_seq_position(uint32_t slot) { return slot < rack::capacity ? rack::playPositions[slot].load() : 0; }
+int32_t ov_seq_recording_slot(void) { return rack::recordingSlot.load(); }
 int ov_rack_configure(uint32_t slot, uint32_t channel, uint32_t low, uint32_t high,
                       float db, float pan, uint32_t muted)
 {

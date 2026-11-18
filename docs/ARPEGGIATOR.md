@@ -60,6 +60,15 @@ direct (non-arpeggiated) voices. Enabling ARP must release/hand over those voice
 in the adapter, matching legacy `voices_release_part`, without emitting spurious
 arpeggiated notes into a recorder.
 
+The standalone adapter now provides separate direct-note observation at the
+actual trigger/release boundary, including Sustain cleanup, and a bounded
+output-owner ledger shared by ARP and output-stage patterns. Saved ARP mode is
+never turned off to play recorded output. Pattern-owned pitches survive
+input/ARP releases of the same pitch and the initial Off-to-ARP handover.
+Column ARP Stop clears the processor's held/generated notes through its sink,
+without stopping output-stage clips or resetting effects. Global Stop still
+clears all owners. Existing no-pattern audio/RNG parity remains a release gate.
+
 `lastHeld(pitch)` exposes the most recent remaining held key without exposing
 mutable storage. It includes Sustain-retained keys and follows repeat-pitch
 replacement and bounded oldest-key eviction. It returns `false` without

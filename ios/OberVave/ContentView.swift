@@ -303,6 +303,9 @@ enum OberVaveScreen: Int, CaseIterable {
     case effects
     case modulation
     case controllers
+#if !OBERVAVE_AU
+    case sequencer
+#endif
 
     var title: String {
         switch self {
@@ -311,6 +314,9 @@ enum OberVaveScreen: Int, CaseIterable {
         case .effects: "EFFECTS"
         case .modulation: "LFO / MOD"
         case .controllers: "CONTROLLERS"
+#if !OBERVAVE_AU
+        case .sequencer: "SEQ"
+#endif
         }
     }
 
@@ -321,6 +327,9 @@ enum OberVaveScreen: Int, CaseIterable {
         case .effects: "waveform"
         case .modulation: "point.3.connected.trianglepath.dotted"
         case .controllers: "dial.medium"
+#if !OBERVAVE_AU
+        case .sequencer: "square.grid.3x3"
+#endif
         }
     }
 }
@@ -346,6 +355,11 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var pendingSceneName: String?
     @Published var keyboardChannelMask: UInt32 = 1
     @Published var keyboardLock = KeyboardLockState()
+    @Published var patterns: [SequencerPattern] = []
+    @Published var soloSlots: Set<Int> = []
+    @Published var sequencerRevision = 0
+    @Published var launchGrid = 2
+    @Published var recordingPattern: Int?
     var keyboardStopGeneration: UInt32 = 0
     var sceneFileURL: URL?
     var pendingSceneURL: URL?
@@ -1789,6 +1803,8 @@ struct ContentView: View {
             SynthControlPanel.ModulationMatrixView(model: model)
         case .controllers:
             ControllersView(model: model)
+        case .sequencer:
+            SequencerView(model: model)
         }
     }
 

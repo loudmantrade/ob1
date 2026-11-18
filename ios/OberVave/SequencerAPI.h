@@ -1,0 +1,40 @@
+#pragma once
+#include <stdint.h>
+#include "RackAPI.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+#define OV_SEQ_ROWS 8
+#define OV_SEQ_NOTES 1024
+typedef struct {
+    uint64_t id;
+    int64_t start, duration;
+    uint32_t pitch, velocity, output;
+} ov_seq_note;
+typedef struct {
+    uint32_t slot, row, count, loop, intro_enabled, quantize;
+    int64_t length, intro;
+    char name[97];
+    ov_seq_note notes[OV_SEQ_NOTES];
+} ov_seq_clip;
+/* Calls enqueue control-thread commands. No struct pointers are retained. */
+int ov_seq_set_clip(const ov_seq_clip* clip);
+int ov_rack_load_sequenced(const ov_scene_config* scene, const ov_seq_clip* clips, uint32_t count);
+uint32_t ov_seq_take_level(uint32_t slot);
+int ov_seq_delete(uint32_t slot, uint32_t row);
+int ov_seq_launch(uint32_t slot, uint32_t row, uint32_t grid);
+int ov_seq_launch_row(uint32_t row, uint32_t grid);
+int ov_seq_stop(uint32_t slot, uint32_t arp);
+int ov_seq_solo(uint32_t slot, uint32_t enabled);
+int ov_seq_record(uint32_t slot, uint32_t row, uint32_t output, uint32_t intro);
+int ov_seq_finish_record(void);
+/* Recording completion mailbox: poll, then read on the control thread. */
+uint32_t ov_seq_record_ready(void);
+int ov_seq_read_record(ov_seq_clip* clip);
+int32_t ov_seq_active(uint32_t slot);
+int32_t ov_seq_pending(uint32_t slot);
+uint32_t ov_seq_position(uint32_t slot); /* 0..65535 */
+int32_t ov_seq_recording_slot(void);
+#ifdef __cplusplus
+}
+#endif

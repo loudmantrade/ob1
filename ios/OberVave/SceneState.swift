@@ -153,11 +153,12 @@ struct RackSceneDocument: Codable {
     var masterPan: Double
     var keyboardMask: UInt32
     var selectedSlot: Int?
+    var patterns: [SequencerPattern]?
 
     static func read(from url: URL) throws -> RackSceneDocument {
         let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
-        guard values.isRegularFile == true, let size = values.fileSize, size <= 1_048_576 else {
-            throw SceneError.invalid("The scene must be a regular file no larger than 1 MB.")
+        guard values.isRegularFile == true, let size = values.fileSize, size <= 33_554_432 else {
+            throw SceneError.invalid("The scene must be a regular file no larger than 32 MB.")
         }
         let document = try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
         try document.validate()
@@ -174,6 +175,82 @@ struct RackSceneDocument: Codable {
             throw SceneError.invalid("Invalid scene, channel selection or master settings.")
         }
         try instruments.forEach { try $0.validate() }
+        let clips = patterns ?? []
+        try clips.forEach { try $0.validate() }
+        guard clips.count <= 128, Set(clips.map(\.id)).count == clips.count,
+              clips.allSatisfy({ clip in instruments.contains { $0.slot == clip.slot } }) else {
+            throw SceneError.invalid("Invalid sequencer cell or missing instrument.")
+        }
+    }
+}
+
+struct SequencerNote: Codable, Equatable, Identifiable {
+    var id: UInt64
+    var start: Int64
+    var duration: Int64
+    var pitch: Int
+    var velocity: Int
+    var output = true
+}
+
+struct SequencerPattern: Codable, Equatable, Identifiable {
+    var id: Int { slot * 8 + row }
+    var version = 1
+    var slot: Int
+    var row: Int
+    var name: String
+    var length: Int64 = 3840
+    var intro: Int64 = 0
+    var introEnabled = true
+    var loop = true
+    var quantize = 0
+    var notes: [SequencerNote] = []
+
+    func validate() throws {
+        guard version == 1, (0..<16).contains(slot), (0..<8).contains(row),
+              (1...245760).contains(length), (0...3840).contains(intro),
+              (0...3840).contains(quantize), !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              name.utf8.count <= 96, !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              notes.count <= 1024, Set(notes.map(\.id)).count == notes.count,
+              notes.allSatisfy({ $0.id > 0 && $0.id < UInt64.max && $0.start >= -intro && $0.start < length &&
+                  (1...245760).contains($0.duration) && (0...127).contains($0.pitch) && (1...127).contains($0.velocity) }) else {
+            throw SceneError.invalid("Invalid pattern name, timing, note ID, capacity or MIDI value.")
+        }
+    }
+
+    func coreClip() -> ov_seq_clip {
+        var clip = ov_seq_clip()
+        clip.slot = UInt32(slot); clip.row = UInt32(row); clip.length = length; clip.intro = intro
+        clip.count = UInt32(notes.count); clip.loop = loop ? 1 : 0
+        clip.intro_enabled = introEnabled ? 1 : 0; clip.quantize = UInt32(quantize)
+        withUnsafeMutableBytes(of: &clip.name) { raw in
+            raw.initializeMemory(as: UInt8.self, repeating: 0)
+            raw.copyBytes(from: Array(name.utf8) + [0])
+        }
+        withUnsafeMutableBytes(of: &clip.notes) { raw in
+            let buffer = raw.bindMemory(to: ov_seq_note.self)
+            for (index, note) in notes.enumerated() {
+                buffer[index] = ov_seq_note(id: note.id, start: note.start, duration: note.duration,
+                    pitch: UInt32(note.pitch), velocity: UInt32(note.velocity), output: note.output ? 1 : 0)
+            }
+        }
+        return clip
+    }
+
+    init(slot: Int, row: Int, name: String) { self.slot = slot; self.row = row; self.name = name }
+    init(core clip: ov_seq_clip) {
+        slot = Int(clip.slot); row = Int(clip.row)
+        name = withUnsafeBytes(of: clip.name) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+        length = clip.length; intro = clip.intro; introEnabled = clip.intro_enabled != 0
+        loop = clip.loop != 0; quantize = Int(clip.quantize)
+        notes = withUnsafeBytes(of: clip.notes) { raw in
+            raw.bindMemory(to: ov_seq_note.self).prefix(Int(clip.count)).map {
+                SequencerNote(id: $0.id, start: $0.start, duration: $0.duration,
+                    pitch: Int($0.pitch), velocity: Int($0.velocity), output: $0.output != 0)
+            }
+        }
     }
 }
 

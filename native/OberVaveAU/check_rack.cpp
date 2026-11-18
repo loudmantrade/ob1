@@ -55,6 +55,7 @@ struct EventSink final : rack::SynthEngine {
         return true;
     }
     void stop() override { ++stops; }
+    void stopArpeggiator() override { ++stops; }
     void sync(bool, uint32_t) override {}
     void render(const rack::Timing&, int32_t* output) override { std::fill_n(output, CTL * 2, 0); }
     uint32_t voiceLevel(uint32_t) const override { return 0; }
