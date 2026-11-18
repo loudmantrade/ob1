@@ -75,9 +75,9 @@ The native engine has no active firmware sequencer (`seq_phase` and
 reimplemented. Future pattern playback must use the shared transport and
 explicit input/output stage flags, not resurrect that firmware sequencer.
 
-Before switching production routing, implement effective controller-modulated
-ARP settings, direct-voice handover, source ownership and controller handling.
-The AU's independent adapter is a separate integration gate.
+Before switching production routing, connect and validate the native input
+adapter at the rack event boundary, including source ownership and generated
+output routing. The AU's independent adapter is a separate integration gate.
 
 ## Explicit native DSP bypass
 
@@ -119,7 +119,8 @@ by the pedal; on pedal release, remove unheld keys before delivering their
 releases in original held-key order. This API does not independently implement
 Sustain, controller OVERRIDE, recording, or input routing. Invalid arguments,
 non-external ownership or an enabled ARP mode return `false` before mutation.
-Production input dispatch and direct/generated mode handover are still pending.
+The experimental adapter below uses this entry for direct/generated handovers;
+production input dispatch is still unchanged.
 
 ## Effective-patch control-boundary bridge
 
@@ -158,10 +159,59 @@ The caller must report failure and clean up its processor's outstanding
 ownership before resuming; releasing DSP gates alone does not clear a
 recorder or external destination's note ledger.
 
-Remaining live-adapter work includes input-time versus render-time settings,
-controller OVERRIDE and interpreted sustain delivery, resetting physical-key
-pressure on fresh input, direct Off-mode voices, mode/transport handovers and
-source ownership. These are deliberately not hidden inside the snapshot helper.
+Input-time versus render-time settings, controller OVERRIDE, interpreted sustain
+and direct/generated handovers belong to the adapter below, not this snapshot
+helper. Production routing and per-source ownership remain separate gates.
+
+## Experimental native MIDI adapter
+
+`native/OberVave/ArpeggiatorAdapter.h` combines one existing native `Engine`
+(part 0) with one portable processor. It is not instantiated by the iPad rack
+or AU yet. The engine must be initialized before `attach`; attachment releases
+old part-0 notes and refuses an engine already using any external-ARP owner.
+The engine must outlive the adapter. There is no hot migration of already
+held keys from an old scheduler or implicit ownership transfer on destruction.
+
+After attachment, route all notes/controllers through `input`, sound and
+controller-route edits through `parameter`, audio through `render`, and
+transport stop through `stop`. Do not bypass these entry points to change
+musical state. The caller still supplies the existing clock/host/latency
+fields and an absolute render-start frame; render accepts positive multiples
+of 16 up to `HALF_FRAMES`. It adds no queue, clock, allocation, or lock.
+Neither it nor the DSP callback claims sample accuracy finer than 16 frames.
+Start/Continue/Clock interpretation remains with the platform transport.
+
+- Input uses the saved base patch, as legacy immediate MIDI did; rendering uses
+  the effective temporary patch. The portable `settingsView` restores these
+  views without mistaking each restoration for a user parameter change.
+  Explicit `cleanupUnheld` and `restart` preserve the distinct legacy cleanup
+  and restart operations. Generated note IDs survive temporary view changes.
+- VALUE controller routes apply parameter edits sequentially in the existing
+  slot order through a shared `controller_input_with_parameters` helper.
+  MOD routes remain temporary. Pedal input is taken from the resulting logical
+  DSP sustain state (including OVERRIDE and part HOLD), never from raw CC64
+  values alone. Standalone pedal polarity/hysteresis remains upstream.
+- Ordinary Off-mode notes use the direct entry with the portable held-key list.
+  Pedal releases first remove unheld keys, then release removed pitches in
+  held order with Mono/Unison fallback. Enabling ARP releases old direct voices
+  at the same scheduler boundary as legacy. Chord/Hold modes and generated
+  releases retain their original semantics. Fresh physical On resets pressure
+  even with ARP enabled; generated On does not.
+- The adapter processes interpreted controllers, optional legacy fixed CC
+  mappings, Bend/Aftertouch, Reset Controllers, Panic, restart and Stop/rearm.
+  Stop clears sounding/held notes but not saved mode/Latch parameters.
+- Invalid events/parameters/render sizes return `false` before mutation.
+  Processing failures latch `faulted`, release DSP voices and refuse further
+  input/rendering. After the invalid engine state is corrected, explicit Stop
+  clears processor ownership and permits recovery. The caller must surface
+  these failures; this experimental class has no platform UI notification.
+
+This adapter is internal-DSP-only: it does not yet publish generated events
+to the shared output bus/recorder, bind logical rack destinations or distinguish
+multiple sources holding the same pitch. It preserves legacy pitch-based held
+semantics, not complete source-note ownership. Integrate and test those surfaces,
+scene swaps, endpoint identity, keyboard key locks and the independent AU
+before enabling the extracted scheduler in production.
 
 ## Tests
 
@@ -218,3 +268,15 @@ Mono/Unison fallback, repeated notes, Sustain-deferred release and pedal cleanup
 physical-key pressure reset and invalid-call rejection. Portable tests cover
 the last-held view through eviction, replacement, sustain and Stop. These are
 low-level lifecycle tests, not certification of a live platform adapter.
+
+The `arpeggiator_adapter` suite adds full input/parameter/render comparisons:
+all voice/ARP/Latch modes, Off/On transitions, sequential VALUE/MOD routes,
+Sustain/Panic OVERRIDE, optional fixed CC, pressure reset, transport/restart and
+fault recovery. It also runs 16,000 deterministic mixed operations, including
+several input/parameter changes before a render. Audio, voice gates/targets,
+envelopes, trigger counters, held/active counts, base patch and per-instance
+RNG state are checked against the legacy engine throughout. Invalid inputs,
+render bounds and conflicting attachment are tested separately.
+The adapter comparisons cover 75,000 stereo control blocks in the main
+scenario matrices, including maximum-size/multi-tick render buffers over
+32-bit DSP counter wrap with Master Sync and signed latency changes.

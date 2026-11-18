@@ -170,10 +170,12 @@ The reversible native DSP bypass is implemented and compared against the
 legacy audio/voice path; it is disabled by default and not enabled by either
 platform adapter. An optional control-boundary callback and effective
 ARP/clock snapshot bridge are implemented and audio-tested with temporary
-controller modulation and per-instance RNG synchronization. Production
-input-time/render-time settings, direct/generated handover and source ownership
-remain separate live-extraction gates. The direct Off-mode DSP entry and
-portable last-held-key view now preserve legacy Mono/Unison fallback without
-duplicating the held-key list; Sustain/pressure/direct-voice parity tests pass.
-This capability is not yet a production input adapter. Pattern playback/recording,
-pattern UI and external MIDI output are not yet implemented.
+controller modulation and per-instance RNG synchronization. The experimental
+native MIDI adapter now preserves input-time/render-time settings, sequential
+VALUE/MOD controller handling, logical Sustain/OVERRIDE, direct/generated
+handovers, pressure, restart, Panic and Stop/rearm in legacy audio comparisons.
+Its direct Off-mode entry uses the portable held list for Mono/Unison fallback.
+Neither platform instantiates it yet. Shared generated-output routing and
+source ownership, rack/key-lock/scene integration and the independent AU
+remain production gates. Pattern playback/recording, pattern UI and external
+MIDI output are not yet implemented.

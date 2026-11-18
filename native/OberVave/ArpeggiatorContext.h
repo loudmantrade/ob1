@@ -10,15 +10,11 @@ struct ArpeggiatorContext {
     ob1::music::ArpClock clock;
 };
 
-// Read only at the external-ARP callback, while the effective patch is installed.
-inline bool arpeggiator_context(Engine& engine, uint32_t part, ob1::music::Time time,
-                               ArpeggiatorContext& output)
+inline bool arpeggiator_settings(const Engine& engine, uint32_t part, ob1::music::ArpSettings& output)
 {
-    if (part >= NPART || !engine.externalArpeggiator[part] || !engine.controllerRendering)
-        return false;
+    if (part >= NPART) return false;
     const auto* patch = engine.pt[part].p->v;
-    ArpeggiatorContext result {};
-    auto& settings = result.settings;
+    ob1::music::ArpSettings settings {};
     settings.mode = ob1::music::ArpMode(patch[P_ARP_MODE]);
     settings.latch = ob1::music::Latch(patch[P_ARP_LATCH]);
     settings.division = patch[P_ARP_DIV];
@@ -27,6 +23,18 @@ inline bool arpeggiator_context(Engine& engine, uint32_t part, ob1::music::Time 
     settings.velocity = patch[P_ARP_VEL];
     settings.sync = engine.ctl_arp_sync != 0;
     settings.grid = engine.ctl_arp_sync_grid;
+    output = settings;
+    return true;
+}
+
+// Read only at the external-ARP callback, while the effective patch is installed.
+inline bool arpeggiator_context(Engine& engine, uint32_t part, ob1::music::Time time,
+                               ArpeggiatorContext& output)
+{
+    if (part >= NPART || !engine.externalArpeggiator[part] || !engine.controllerRendering)
+        return false;
+    ArpeggiatorContext result {};
+    if (!arpeggiator_settings(engine, part, result.settings)) return false;
     auto& clock = result.clock;
     clock.time = time;
     clock.quarterFrames = engine.quarter_len();

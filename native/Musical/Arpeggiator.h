@@ -48,6 +48,42 @@ public:
         pitch = held_[heldCount_ - 1].pitch;
         return true;
     }
+    bool heldPitch(uint32_t index, uint8_t& pitch) const
+    {
+        if (index >= heldCount_) return false;
+        pitch = held_[index].pitch;
+        return true;
+    }
+
+    // Native input and rendering see different patches; restoring a view is not a parameter edit.
+    ArpResult settingsView(const ArpSettings& next)
+    {
+        if (!valid(next)) return ArpResult::InvalidInput;
+        if (faulted()) return ArpResult::Faulted;
+        settings_ = next;
+        return ArpResult::Ok;
+    }
+
+    template<class Sink>
+    ArpResult cleanupUnheld(Time time, Sink& sink, bool resetEmpty)
+    {
+        if (faulted()) return ArpResult::Faulted;
+        releaseUnheld(time, sink);
+        if (resetEmpty && !heldCount_) {
+            releaseAll(time, sink);
+            position_ = 0;
+            counter_ = idle;
+        }
+        return fault_;
+    }
+
+    ArpResult restart()
+    {
+        if (faulted()) return ArpResult::Faulted;
+        position_ = 0;
+        counter_ = idle;
+        return ArpResult::Ok;
+    }
 
     ArpResult destination(uint32_t instrument, uint32_t channel)
     {

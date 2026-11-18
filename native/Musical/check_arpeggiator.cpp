@@ -71,6 +71,36 @@ static void checkPortable()
         assert(keys.stop({}, unused) == ArpResult::Ok);
         assert(!keys.lastHeld(last) && unused.events.empty());
     }
+    {
+        ArpeggiatorProcessor views;
+        Recorder out;
+        ArpSettings settings;
+        settings.mode = ArpMode::Chord;
+        settings.latch = Latch::Replace;
+        assert(views.configure(settings, {}, out) == ArpResult::Ok);
+        assert(views.input(note(60), out) == ArpResult::Ok);
+        ArpClock clock;
+        assert(views.tick(clock, out) == ArpResult::Ok);
+        assert(views.input(note(60, false), out) == ArpResult::Ok);
+        assert(views.activeCount() == 1 && views.heldCount() == 1);
+        const auto id = out.sounding[60];
+        auto temporary = settings;
+        temporary.mode = ArpMode::Off;
+        assert(views.settingsView(temporary) == ArpResult::Ok);
+        assert(views.activeCount() == 1 && views.heldCount() == 1 && out.sounding[60] == id);
+        temporary.division = 255;
+        assert(views.settingsView(temporary) == ArpResult::InvalidInput);
+        assert(views.settings().division == settings.division);
+        assert(views.settingsView(settings) == ArpResult::Ok);
+        uint8_t pitch = 42;
+        assert(!views.heldPitch(1, pitch) && pitch == 42);
+        assert(!views.heldPitch(UINT32_MAX, pitch) && pitch == 42);
+        assert(views.heldPitch(0, pitch) && pitch == 60);
+        assert(views.restart() == ArpResult::Ok && views.activeCount() == 1);
+        assert(views.counter() == views.idle && views.position() == 0);
+        assert(views.cleanupUnheld({}, out, true) == ArpResult::Ok);
+        assert(!views.activeCount() && !views.heldCount() && !out.sounding[60]);
+    }
     ArpeggiatorProcessor arp;
     Recorder out;
     ArpSettings settings;

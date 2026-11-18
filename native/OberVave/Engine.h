@@ -138,6 +138,13 @@ struct Engine {
 
     void controller_input(uint8_t status, uint8_t d1, uint8_t d2)
     {
+        auto apply = [this](uint32_t p, uint8_t value) { apply_parameter(p, value); };
+        controller_input_with_parameters(status, d1, d2, apply);
+    }
+
+    template<class Apply>
+    void controller_input_with_parameters(uint8_t status, uint8_t d1, uint8_t d2, Apply& apply)
+    {
         const auto source = controller_source(status, d1);
         if (!source) return;
         const int32_t value = source == CS_BEND ? d1 | (uint32_t(d2) << 7) :
@@ -154,7 +161,7 @@ struct Engine {
             if (v[p] != source || v[p + 2] != 0) continue;
             const auto target = v[p + 1];
             const int32_t scaled = v[p + 3] * 16383 + (v[p + 4] - int32_t(v[p + 3])) * value;
-            apply_parameter(target, (int64_t(scaled) * PDEF[target].max + 128 * 16383 / 2) / (128 * 16383));
+            apply(target, (int64_t(scaled) * PDEF[target].max + 128 * 16383 / 2) / (128 * 16383));
         }
     }
 
