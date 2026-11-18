@@ -257,6 +257,17 @@ same-cell/off-grid drops are no-ops.
 
 ## Verification
 
+Recording/count-in metronome uses the existing 25 ms synthesized click on the
+audio owner, now throughout the take up to its exact deadline. Its atomic
+enable flag mutes immediately and consumes muted beats so toggling on does not
+replay an old click. Waiting/playback-only do not trigger it. First beat is
+1760 Hz and other quarters 1320 Hz, mixed after MIDI capture.
+The global header's one-based bar/beat counter samples an audio-published
+64-bit quarter index, continuing across concurrent loops and later takes.
+Its origin is the shared bar containing initial transport activity; it freezes
+when no recording/player is active and Stop All resets it. Count-in participates
+in the shared counter; per-pattern loop progress remains independent.
+
 The production rack regression guards ordinary C++ `new`/`delete` during every
 render call, including completion, retirement and cell transactions. It also
 covers A/B/C takes without polling, reserved result capacity, stopped audio,

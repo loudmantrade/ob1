@@ -624,7 +624,52 @@ static void checkOutputFirstNoteOrigin()
     std::puts("PASS Output Wait-for-note: compensated ARP first emitted onset defines zero, full bar capture and final held gate reach endpoint, audio-owned loop handover");
 }
 
+static void checkRecordingMetronomeAndTransport()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()};
+    assert(ov_rack_load(scene.get())); render();
+    ov_seq_set_metronome(1);
+    assert(ov_seq_arm(0, 0, 0, 1, 0, 1)); render();
+    render(1024);
+    assert(!rack::clickFrames && ov_seq_transport_beat() == 0);
+    assert(ov_seq_finish_record()); render();
+    auto result = std::make_unique<ov_seq_clip>();
+    assert(ov_seq_read_record(result.get()) && ov_seq_record_result() == 0);
+    assert(ov_seq_arm(0, 0, 2, 1, 0, 1)); render();
+    assert(rack::clickFrames && rack::clickFrequency == 1760 && ov_seq_transport_beat() == 0);
+    // Click is mixed after note capture and never becomes a recorded MIDI note.
+    ov_seq_set_metronome(0); render();
+    assert(!rack::clickFrames);
+    render(rack::clock.length());
+    assert(ov_seq_transport_beat() == 1 && !rack::clickFrames);
+    ov_seq_set_metronome(1); render();
+    assert(!rack::clickFrames); // Toggling on must not retrigger a consumed beat.
+    while (ov_seq_transport_beat() < 2) render();
+    assert(rack::clickFrames && rack::clickFrequency == 1320);
+    while (ov_seq_transport_beat() < 4) render();
+    assert(rack::clickFrames && rack::clickFrequency == 1760);
+    assert(ov_seq_finish_record()); render();
+    while (rack::recorder.running) render();
+    assert(ov_seq_read_record(result.get()) && result->count == 0 && ov_seq_active(0) == 0);
+    render(FS / 20);
+    assert(!rack::clickFrames); // Playback alone is silent metronome-wise.
+    const auto previous = ov_seq_transport_beat();
+    render(rack::clock.length());
+    assert(ov_seq_transport_beat() == previous + 1);
+    assert(ov_rack_stop_all()); render();
+    assert(ov_seq_transport_beat() == 0 && !rack::clickFrames);
+    ov_seq_set_metronome(0);
+    assert(ov_seq_arm(0, 1, 1, 1, 4, 1)); render();
+    assert(ov_seq_record_phase() == 2 && !rack::clickFrames);
+    assert(ov_rack_stop_all()); render();
+    assert(ov_seq_read_record(result.get()));
+    ov_seq_set_metronome(1);
+    assert(!ov_rack_take_error());
+    std::puts("PASS recording metronome: waiting silent, accented bar/quarter clicks, immediate mute and no toggle catchup, count-in mute, no recorded clicks, playback-only silence; shared transport advances and Stop All resets");
+}
+
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

@@ -378,6 +378,14 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var recordMode = SequencerRecordMode.waitForNote
     @Published var recordCountBars = 1
     @Published var recordOutput = true
+    @Published private(set) var recordMetronome = true
+    @Published var transportBeat: UInt64 = 0
+
+    func setRecordMetronome(_ enabled: Bool) {
+        recordMetronome = enabled
+        ov_seq_set_metronome(enabled ? 1 : 0)
+        UserDefaults.standard.set(enabled, forKey: "sequencer-record-metronome")
+    }
     var keyboardStopGeneration: UInt32 = 0
     var sceneFileURL: URL?
     var pendingSceneURL: URL?
@@ -488,6 +496,9 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             return cc == 255 ? -1 : cc
         }
         super.init()
+        let metronome = UserDefaults.standard.object(forKey: "sequencer-record-metronome") as? Bool ?? true
+        recordMetronome = metronome
+        ov_seq_set_metronome(metronome ? 1 : 0)
         sustainInverted = UserDefaults.standard.bool(forKey: "sustain-inverted")
         ov_set_sustain_inverted(sustainInverted ? 1 : 0)
         sustainStopGesture = UserDefaults.standard.bool(forKey: "sustain-stop-gesture")
@@ -1666,6 +1677,22 @@ struct ContentView: View {
             .accessibilityLabel("Stop all playback")
             .accessibilityHint("Releases all notes and stops all arpeggiators, preserving effect tails.")
             SynthTempoControl(model: model)
+            VStack(spacing: 2) {
+                Text("\(model.transportBeat / 4 + 1) : \(model.transportBeat % 4 + 1)")
+                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                Text("BAR · BEAT").font(.system(size: 8, design: .monospaced)).foregroundStyle(.secondary)
+            }
+            .frame(minWidth: 62, minHeight: 44)
+            .accessibilityLabel("Bar \(model.transportBeat / 4 + 1), beat \(model.transportBeat % 4 + 1)")
+            Button { model.setRecordMetronome(!model.recordMetronome) } label: {
+                Image(systemName: "metronome")
+                    .frame(width: 44, height: 44)
+                    .foregroundStyle(model.recordMetronome ? Color.cyan : Color.secondary)
+                    .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Recording metronome")
+            .accessibilityValue(model.recordMetronome ? "On" : "Off")
             SequencerRecordModeControl(model: model)
         }
         .accessibilityElement(children: .contain)

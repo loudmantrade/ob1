@@ -296,7 +296,29 @@ static void checkRecordModes()
     std::puts("PASS record modes: Wait arms without timing out, first-note zero, cancellation, live-scene pickup, exact 4/8 clicks and full count-in bars, fixed/free lengths and no duplicate intro on autoplay");
 }
 
+static void checkRecordingClicks()
+{
+    auto recorder = std::make_unique<ClipRecorder>();
+    auto settings = std::make_unique<Pattern>(makePattern());
+    const auto quarter = ticksPerQuarter * tickUnit;
+    for (const uint32_t bars : {1u, 2u}) {
+        recorder->arm(0, 0, settings->data(), 0, RecordMode::CountIn, bars, 0, false, true);
+        for (uint32_t beat = 0; beat < bars * 4 + 2; ++beat) {
+            assert(recorder->click(beat * quarter, true) == int32_t(beat % 4));
+            assert(recorder->click(beat * quarter + quarter / 2, true) == -1);
+        }
+        recorder->requestFinish(recorder->origin + quarter);
+        assert(recorder->finishQueued);
+        assert(recorder->click(recorder->origin + 2 * quarter, true) == 2);
+        assert(recorder->click(recorder->stopAt - 1, true) == 3);
+        assert(recorder->click(recorder->stopAt, true) == -1);
+        recorder->finish(recorder->stopAt);
+        assert(recorder->click(recorder->stopAt + quarter, true) == -1);
+    }
+    std::puts("PASS recording clicks: continuous count-in/body accents, no duplicate clicks, queued completion and exact stop deadline");
+}
+
 int main()
 {
-    checkPosition(); checkPlayback(); checkRecording(); checkRecordModes(); checkBarCompletion();
+    checkPosition(); checkPlayback(); checkRecording(); checkRecordModes(); checkBarCompletion(); checkRecordingClicks();
 }

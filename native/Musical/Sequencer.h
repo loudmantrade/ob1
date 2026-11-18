@@ -231,10 +231,17 @@ public:
         const auto boundary = countBeats && now < countStart ? countStart : origin;
         return uint32_t((boundary - now + ticksPerQuarter * tickUnit - 1) / (ticksPerQuarter * tickUnit));
     }
-    int32_t click(int64_t now)
+    int32_t click(int64_t now, bool duringRecording = false)
     {
-        if (!running || waiting || !countBeats || now < countStart || now >= origin) return -1;
-        const auto beat = (now - countStart) / (ticksPerQuarter * tickUnit);
+        if (!running || waiting) return -1;
+        int64_t beat;
+        if (now >= origin) {
+            if (!duringRecording || now >= stopAt) return -1;
+            beat = countBeats + (now - origin) / (ticksPerQuarter * tickUnit);
+        } else {
+            if (!countBeats || now < countStart) return -1;
+            beat = (now - countStart) / (ticksPerQuarter * tickUnit);
+        }
         if (beat <= lastClick_) return -1;
         lastClick_ = beat;
         return int32_t(beat % 4);

@@ -45,6 +45,8 @@ int ov_seq_read_completion(ov_seq_clip* clip, uint32_t* result, uint64_t* epoch)
 uint64_t ov_seq_scene_epoch(void);
 uint64_t ov_seq_record_revision(void); /* revision of front completion; read before consuming */
 uint32_t ov_seq_record_progress(void); /* body bar phase, 0..65535 */
+void ov_seq_set_metronome(uint32_t enabled); /* recording + count-in click, no click while waiting/playing only */
+uint64_t ov_seq_transport_beat(void); /* zero-based global quarter count since transport activity began */
 int32_t ov_seq_active(uint32_t slot);
 int32_t ov_seq_pending(uint32_t slot);
 uint32_t ov_seq_position(uint32_t slot); /* 0..65535 */

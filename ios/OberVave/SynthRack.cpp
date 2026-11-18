@@ -342,6 +342,10 @@ std::atomic<int64_t> recordingLength {0};
 music::Frame sequencerAnchor = 0;
 uint32_t clickFrames = 0;
 double clickPhase = 0, clickFrequency = 0;
+std::atomic<uint32_t> metronomeEnabled {1};
+std::atomic<uint64_t> transportBeat {0};
+bool transportActive = false;
+int64_t transportOrigin = 0;
 std::array<std::atomic<int32_t>, capacity> activeRows, pendingRows;
 std::array<std::atomic<uint32_t>, capacity> playPositions {};
 std::atomic<int32_t> recordingSlot {-1};
@@ -490,6 +494,7 @@ void stopAll()
 {
     finishRecording();
     clickFrames = 0;
+    transportActive = false; transportBeat.store(0);
     for (uint32_t slot = 0; slot < capacity; ++slot) stopSequencer(slot);
     for (auto& inst : scene->slots) if (inst) {
         inst->engine->boundary({processedFrames});
@@ -1052,8 +1057,9 @@ void renderBlock()
     musicalPosition.followPhase(clock.external ? int32_t(clock.frame - clock.anchor)
         : int32_t((processedFrames - sequencerAnchor) % (uint64_t(q) * 4)), q);
     if (recorder.running && musicalPosition.value >= recorder.stopAt) finishRecording(true);
-    const auto click = recorder.click(musicalPosition.value);
-    if (click >= 0) { clickFrames = FS / 40; clickPhase = 0; clickFrequency = click == 0 ? 1760 : 1320; }
+    const auto click = recorder.click(musicalPosition.value, true);
+    if (!metronomeEnabled.load(std::memory_order_relaxed)) clickFrames = 0;
+    else if (click >= 0) { clickFrames = FS / 40; clickPhase = 0; clickFrequency = click == 0 ? 1760 : 1320; }
     recordingPhase.store(recorder.phase(musicalPosition.value));
     recorderState.store(recorder.running ?
         ((recorder.slot * OV_SEQ_ROWS + recorder.row + 1) << 3) | recorder.phase(musicalPosition.value) : 0);
@@ -1086,6 +1092,15 @@ void renderBlock()
             uint32_t(double(position % (clip->data().length * music::tickUnit)) * 65535 /
                 double(clip->data().length * music::tickUnit)) : 0);
     }
+    bool playing = recorder.running && !recorder.waiting;
+    for (const auto& player : players) playing |= player.row >= 0;
+    if (playing && !transportActive) {
+        const auto bar = 3840 * music::tickUnit;
+        transportOrigin = musicalPosition.value / bar * bar;
+    }
+    if (playing) transportBeat.store(uint64_t(std::max(INT64_C(0), musicalPosition.value - transportOrigin) /
+        (960 * music::tickUnit)), std::memory_order_relaxed);
+    transportActive = playing;
     const int64_t phase = clock.external ? int32_t(clock.frame - clock.anchor)
         : sequencerAnchor ? int64_t(processedFrames - sequencerAnchor) : int64_t(clock.frame);
     Timing timing {clock.frame, q, double(phase) / q, audioAdvance.load(std::memory_order_relaxed), processedFrames};
@@ -1429,6 +1444,8 @@ uint64_t ov_seq_record_revision(void)
     return ov_seq_record_ready() ? rack::completions[rack::completionRead.load() % rack::completionCapacity].revision : 0;
 }
 uint32_t ov_seq_record_progress(void) { return rack::recordingProgress.load(); }
+void ov_seq_set_metronome(uint32_t enabled) { rack::metronomeEnabled.store(enabled != 0); }
+uint64_t ov_seq_transport_beat(void) { return rack::transportBeat.load(); }
 int ov_seq_read_completion(ov_seq_clip* clip, uint32_t* result, uint64_t* epoch)
 {
     if (!clip || !result || !epoch || !ov_seq_record_ready()) return 0;

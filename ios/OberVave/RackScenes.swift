@@ -142,6 +142,8 @@ extension OberVaveModel {
             }
         }
         let state = ov_seq_record_state()
+        let beat = ov_seq_transport_beat()
+        if transportBeat != beat { transportBeat = beat }
         let recordingCell = state == 0 ? nil : Int(state >> 3) - 1
         if recordingPattern != recordingCell { recordingPattern = recordingCell }
         if recordingPhase != state & 7 { recordingPhase = state & 7 }
@@ -632,7 +634,7 @@ struct SequencerRecordModeControl: View {
     private var help: String {
         switch model.recordMode {
         case .waitForNote: "Arm with +. The first played note starts the loop at beat one."
-        case .countIn: "Audible metronome counts one or two bars. Playing during the count-in becomes a one-shot intro."
+        case .countIn: "Counts one or two bars; the metronome button controls the sound. Playing during the count-in becomes a one-shot intro."
         case .immediate: "Start the loop immediately when the scene is stopped."
         }
     }
