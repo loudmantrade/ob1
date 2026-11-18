@@ -33,9 +33,15 @@ You need Rust, CMake and Ninja (`brew install cmake ninja`). The script builds t
 AU and the VST3 (clap-wrapper downloads the SDKs it needs on the first run). It signs them ad hoc,
 installs them in `~/Library/Audio/Plug-Ins/{Components,VST3,CLAP}` and runs Apple's AU validator
 (`auval -v aumu Fm1s Fm1e`). Add `NO_INSTALL=1` to only build them, into `target/plugin/`.
+The build uses the Mac's native architecture: x86-64 on Intel, arm64 on Apple silicon.
 
 A host that is already running doesn't see the new build: GarageBand and Logic look for plugins
 when they start, so quit them (⌘Q) and open them again.
+
+On macOS, the emulator thread requests interactive QoS and uses an Audio Work Interval while it
+refills audio that is approaching its deadline. This lets the system account for the asynchronous
+emulation workload when scheduling audio; it does not reserve CPU time or guarantee that every
+firmware will meet its deadline.
 
 **Steinberg's validator and test host** are built from the VST3 SDK that clap-wrapper downloaded.
 The SDK wants a full Xcode, so `XCODE_VERSION` stands in for one when only the Command Line Tools
@@ -193,6 +199,8 @@ counted, so the host's stamps still line up when it takes frames again.
 on an Apple Silicon Mac (most at 3–6x) at the default 240 MHz, so keep two or three heavy
 instances per project. The CPU clock moves the cost (X0X on an M4 Pro: 2.3x real time at
 240, 1.7x at 320, 1.3x at 400); a heavy firmware that comes late can run at 160 or 120.
+On macOS the emulation thread requests interactive scheduling QoS, so it can use a performance
+core where available.
 
 `cargo test --release` (here) runs a firmware on the machine's thread. It checks that a stamped
 note sounds on time, and that the firmware boots and draws its screen when nothing takes its

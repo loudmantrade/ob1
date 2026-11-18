@@ -188,6 +188,20 @@ pub fn run(
     mut midi_in: rtrb::Consumer<Midi>,
     mut out: rtrb::Producer<[f32; 2]>,
 ) {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+        }
+        const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+        let status = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
+        if status != 0 {
+            eprintln!("fm1-plugin: could not raise machine thread QoS ({status})");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    let mut work_interval = crate::workgroup::AudioWorkInterval::new();
+
     let mut m: Option<Machine> = None;
     // the instant LCD unless the host's environment asks for the timed one (FM1_LCD_TIMED)
     let lcd_timed = fm1_soc::lcd_timed_from_env();
@@ -329,14 +343,24 @@ pub fn run(
                     mm.soc.periph.apply(&Action::Midi { b });
                 }
             }
+            #[cfg(target_os = "macos")]
+            let interval_started = work_interval
+                .as_mut()
+                .is_some_and(|interval| interval.start(fill, RATE));
             let t0 = Instant::now();
             mm.run(20_000);
             busy += t0.elapsed();
-            let a = std::mem::take(&mut mm.soc.periph.audio);
-            for f in a.chunks_exact(2) {
+            for f in mm.soc.periph.audio.chunks_exact(2) {
                 // (a full ring drops the frame: the host has stopped taking them)
                 if out.push([f[0] as f32 / 32768.0, f[1] as f32 / 32768.0]).is_ok() {
                     made += 1;
+                }
+            }
+            mm.soc.periph.audio.clear();
+            #[cfg(target_os = "macos")]
+            if interval_started {
+                if let Some(interval) = work_interval.as_mut() {
+                    interval.finish();
                 }
             }
         }

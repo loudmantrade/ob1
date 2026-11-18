@@ -16,6 +16,8 @@ use std::sync::{mpsc, Arc, Mutex};
 
 mod editor;
 pub mod engine;
+#[cfg(target_os = "macos")]
+mod workgroup;
 pub mod savefile;
 #[path = "../../fm1-live/src/panel.rs"]
 #[allow(dead_code)]

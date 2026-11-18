@@ -94,7 +94,8 @@ const _: () = assert!(std::mem::offset_of!(Ctx, slot) == OFF_SLOT as usize);
 
 // ------------------------------------------------------------------ executable memory
 // macOS (Apple silicon): a MAP_JIT mapping, writable or executable per thread, toggled around a
-// write. Linux and Android (the same kernel interface): a plain read-write-execute mapping (a
+// write. iOS: MAP_JIT with Apple's callback-based write-protection API. Linux and Android (the
+// same kernel interface): a plain read-write-execute mapping (a
 // hardened kernel that refuses one, SELinux's execmem, leaves the interpreter running: `new`
 // gives None). That gives up W^X there: a stray write into the code cache would be executable
 // (an mprotect toggle around each write would keep it, at a system call per compiled block).
@@ -122,10 +123,57 @@ extern "C" {
     fn pthread_jit_write_protect_np(enabled: c_int);
     fn sys_icache_invalidate(start: *mut c_void, len: usize);
 }
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "ios")]
+extern "C" {
+    fn dlsym(handle: *mut c_void, symbol: *const std::ffi::c_char) -> *mut c_void;
+    fn sys_icache_invalidate(start: *mut c_void, len: usize);
+}
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const MAP_FLAGS: c_int = 0x0002 | 0x1000 | 0x0800; // PRIVATE | ANON | JIT
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const MAP_FLAGS: c_int = 0x02 | 0x20; // PRIVATE | ANONYMOUS
+
+#[cfg(target_os = "ios")]
+type JitWriteCallback = unsafe extern "C" fn(*mut c_void) -> c_int;
+#[cfg(target_os = "ios")]
+type JitWriteFn = unsafe extern "C" fn(JitWriteCallback, *mut c_void) -> c_int;
+#[cfg(target_os = "ios")]
+static IOS_JIT_WRITE_API: std::sync::OnceLock<Option<JitWriteFn>> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "ios")]
+fn ios_jit_write_api() -> Option<JitWriteFn> {
+    *IOS_JIT_WRITE_API.get_or_init(|| unsafe {
+        let handle = (-2isize) as *mut c_void; // RTLD_DEFAULT
+        let write = dlsym(handle, b"pthread_jit_write_with_callback_np\0".as_ptr().cast());
+        if write.is_null() {
+            return None;
+        }
+        Some(std::mem::transmute::<*mut c_void, JitWriteFn>(write))
+    })
+}
+
+#[cfg(target_os = "ios")]
+struct JitWrite {
+    dst: *mut u8,
+    src: *const u8,
+    len: usize,
+}
+
+#[cfg(target_os = "ios")]
+unsafe extern "C" fn copy_jit_write(ctx: *mut c_void) -> c_int {
+    let write = unsafe { &*ctx.cast::<JitWrite>() };
+    unsafe { std::ptr::copy_nonoverlapping(write.src, write.dst, write.len) };
+    0
+}
+
+#[cfg(target_os = "ios")]
+unsafe fn ios_write_jit_bytes(dst: *mut u8, src: *const u8, len: usize) -> bool {
+    let Some(write) = ios_jit_write_api() else {
+        return false;
+    };
+    let mut ctx = JitWrite { dst, src, len };
+    unsafe { write(copy_jit_write, (&mut ctx as *mut JitWrite).cast()) == 0 }
+}
 
 /// Make freshly written code visible to instruction fetch (what `__clear_cache` does on
 /// AArch64): clean the data cache lines to the point of unification, invalidate the instruction
@@ -159,6 +207,10 @@ pub struct CodeCache {
 
 impl CodeCache {
     pub fn new(size: usize) -> Option<CodeCache> {
+        #[cfg(target_os = "ios")]
+        {
+            ios_jit_write_api()?;
+        }
         // SAFETY: anonymous mapping chosen by the OS; failure is checked.
         #[cfg(not(windows))]
         let p = unsafe { mmap(std::ptr::null_mut(), size, 7, MAP_FLAGS, -1, 0) };
@@ -185,6 +237,13 @@ impl CodeCache {
                 pthread_jit_write_protect_np(0);
                 std::ptr::copy_nonoverlapping(code.as_ptr(), dst, bytes);
                 pthread_jit_write_protect_np(1);
+                sys_icache_invalidate(dst as *mut c_void, bytes);
+            }
+            #[cfg(target_os = "ios")]
+            {
+                if !ios_write_jit_bytes(dst, code.as_ptr(), bytes) {
+                    return None;
+                }
                 sys_icache_invalidate(dst as *mut c_void, bytes);
             }
             #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -285,6 +344,10 @@ impl Jit {
     pub fn new(profile: bool) -> Option<Jit> {
         let itab = (0..1 << ITAB_BITS).map(itab_empty).collect();
         Some(Jit { cache: CodeCache::new(64 << 20)?, state: Vec::new(), guards: Vec::new(), profile, itab, stops: false })
+    }
+
+    pub(crate) fn compiled_blocks(&self) -> usize {
+        self.state.iter().filter(|entry| matches!(entry, Entry::Code(_, _))).count()
     }
 
     /// Will `entry` compile block `id` on its next call? (Then `Cpu::then_of` looks for the
@@ -417,12 +480,17 @@ pub(crate) unsafe fn link(slot: *mut u64, body: *const u8) {
             pthread_jit_write_protect_np(1);
             sys_icache_invalidate(site as *mut c_void, 4);
         }
+        #[cfg(target_os = "ios")]
+        {
+            assert!(ios_write_jit_bytes(site.cast(), (&insn as *const u32).cast(), 4), "iOS JIT code write failed");
+            sys_icache_invalidate(site as *mut c_void, 4);
+        }
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             site.write_volatile(insn);
             flush_icache(site as *const u8, 4);
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android")))]
         site.write_volatile(insn); // (as CodeCache::write: no flush on the other systems)
     }
     #[cfg(not(target_arch = "aarch64"))]

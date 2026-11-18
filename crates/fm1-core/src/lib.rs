@@ -77,6 +77,11 @@ pub trait Bus {
     fn tick_room(&self) -> u64 {
         0
     }
+    /// Whether ticks between CPU-only micro-ops can be deferred until the next bus access.
+    /// This must only be true when those ops cannot change the event deadline.
+    fn can_defer_ticks(&self) -> bool {
+        false
+    }
     /// Let ticks pass that `tick_room` allowed.
     fn add_ticks(&mut self, _n: u64) {}
     /// The cores' shared hardware lock: `lockset` (`set`) takes it for `core` or reports
@@ -240,6 +245,8 @@ pub struct Cpu {
     pub jit_on: bool,
     #[cfg(native_jit)]
     jit: Option<Box<jit::Jit>>,
+    #[cfg(native_jit)]
+    jit_unavailable: bool,
     /// (the wasm32 build: hot blocks as WebAssembly modules, see jit_wasm.rs)
     #[cfg(target_arch = "wasm32")]
     wjit: Option<Box<jit_wasm::Jit>>,
@@ -464,6 +471,26 @@ impl Cpu {
         format!("{{\"entries\":{},\"instructions\":{},\"insns\":{},\"helpers\":{{{helpers}}}{exits}}}", self.jit_entries, self.jit_insns, self.insn_count)
     }
 
+    /// Number of native blocks compiled so far (zero when native JIT is unavailable or unused).
+    pub fn jit_compiled_blocks(&self) -> usize {
+        #[cfg(native_jit)]
+        {
+            return self.jit.as_ref().map_or(0, |jit| jit.compiled_blocks());
+        }
+        #[cfg(not(native_jit))]
+        0
+    }
+
+    /// Whether the native JIT code cache was successfully initialized.
+    pub fn native_jit_active(&self) -> bool {
+        #[cfg(native_jit)]
+        {
+            return self.jit.is_some();
+        }
+        #[cfg(not(native_jit))]
+        false
+    }
+
     /// Count a JIT helper call when profiling. Called for every helper op, so the check is
     /// inlined and the counting kept out of line: a plain call (with the op copied) cost the
     /// wasm build 10-12% on busy firmwares (AMB, TRIBE) with profiling off.
@@ -640,7 +667,14 @@ impl Cpu {
         if trace_on() {
             return Ok((0, false));
         }
+        #[cfg(native_jit)]
+        if !self.jit_on {
+            self.jit_unavailable = false;
+        }
         let mut n = 0u32;
+        let batch_ticks = !STRETCH && !COST && bus.can_defer_ticks();
+        let mut tick_room = if batch_ticks { bus.tick_room() } else { 0 };
+        let mut deferred_ticks = 0u64;
         // pair / predicated block / rep loop in progress: every instruction
         // then takes the careful path (it can end one and free interrupts)
         let mut careful = self.pair_pending.is_some() || !self.pred_skips.is_empty() || self.rep_end != 0 || self.hold_irq != 0;
@@ -650,8 +684,17 @@ impl Cpu {
         let mut pc = self.pc;
         let mut synced = 0u32;
         let jit_mem = if self.jit_on { bus.jit_mem() } else { None };
+        macro_rules! flush_ticks {
+            () => {{
+                let ticks = std::mem::take(&mut deferred_ticks);
+                if ticks != 0 {
+                    bus.add_ticks(ticks);
+                }
+            }};
+        }
         macro_rules! sync {
             () => {{
+                flush_ticks!();
                 self.pc = pc;
                 self.insn_count += (n - synced) as u64;
                 synced = n;
@@ -678,6 +721,10 @@ impl Cpu {
                 self.pc_trip = true;
                 sync!();
                 return Ok((n, false));
+            }
+            flush_ticks!();
+            if batch_ticks {
+                tick_room = bus.tick_room();
             }
             let blk = match self.block_at(bus, pc) {
                 Ok(b) => b,
@@ -744,7 +791,7 @@ impl Cpu {
             // (careful: inside a then-part or a rep loop with nothing else in progress, where a
             // compiled prefix that cannot reach the construct's end still runs: `prefix_inside`)
             #[cfg(native_jit)]
-            if self.jit_on && !outside && (!careful || self.only_construct()) {
+            if self.jit_on && !self.jit_unavailable && !outside && (!careful || self.only_construct()) {
                 let inside = careful;
                 if let Some(mem) = jit_mem {
                     if self.jit.is_none() {
@@ -752,6 +799,7 @@ impl Cpu {
                             j.stops = self.stop_checks;
                             Box::new(j)
                         });
+                        self.jit_unavailable = self.jit.is_none();
                     }
                     // (a block about to be compiled that ends in an if-else block: its then-part)
                     let mut then = None;
@@ -773,6 +821,9 @@ impl Cpu {
                         // (the code checks itself that its ticks fall before anything is due)
                         let extra = if n == 0 { 0 } else { 1 };
                         sync!();
+                        if batch_ticks {
+                            tick_room = bus.tick_room();
+                        }
                         // a stretch's call of a block compiled whole (no then-part in tow) runs on
                         // to wherever the code leaves (`stop_rest`: how far inside a block it did)
                         let open = whole && !inside && compiled_whole && self.jit.as_ref().is_some_and(|j| j.stops);
@@ -856,6 +907,9 @@ impl Cpu {
                     if let Some((code, at)) = code {
                         let extra = if n == 0 { 0 } else { 1 };
                         sync!();
+                        if batch_ticks {
+                            tick_room = bus.tick_room();
+                        }
                         // a stretch's call of a block whole runs on, the code checking at each
                         // block's entry where the runner wants it back (as jit.rs: the stop pc,
                         // `stop_io`, the room); else the budget as the interpreter keeps it, to
@@ -929,7 +983,24 @@ impl Cpu {
                     sync!();
                     return Ok((n, false));
                 }
-                if n > 0 && bus.tick() {
+                let defer_tick = batch_ticks
+                    && !(careful || op.careful)
+                    && op.fast.cpu_only();
+                let tick_due = if n == 0 {
+                    false
+                } else if defer_tick && tick_room != 0 {
+                    deferred_ticks += 1;
+                    tick_room -= 1;
+                    false
+                } else {
+                    flush_ticks!();
+                    let due = bus.tick();
+                    if batch_ticks {
+                        tick_room = bus.tick_room();
+                    }
+                    due
+                };
+                if tick_due {
                     // this instruction's tick is spent; the caller services
                     // the SoC and then runs it without ticking again
                     // (right after a glued pair's head: interrupts wait for this one)
@@ -950,6 +1021,9 @@ impl Cpu {
                     if COST {
                         let at = next_pc - op.len as u32;
                         bus.add_ticks((op_cost8(&op.fast, op.len, pc != next_pc, pc < at) - 1) as u64);
+                    }
+                    if batch_ticks && !defer_tick {
+                        tick_room = bus.tick_room();
                     }
                 } else {
                     sync!();
@@ -982,6 +1056,9 @@ impl Cpu {
                         bus.add_ticks(c.saturating_sub(k) as u64);
                     }
                     careful = r & 4 != 0;
+                    if batch_ticks {
+                        tick_room = bus.tick_room();
+                    }
                     if r & 8 != 0 {
                         return Ok((n, false));
                     }
@@ -5207,7 +5284,7 @@ mod tests {
             for jit in [false, true] {
                 let mut xip = mem.clone();
                 xip.resize(0x200, 0);
-                let mut bus = Clocked { ram: vec![0; 0x1000], xip, cycles: 0, next_due: u64::MAX, irq: false, due_on_mmio: false, writes: 0 };
+                let mut bus = Clocked { ram: vec![0; 0x1000], xip, cycles: 0, next_due: u64::MAX, irq: false, due_on_mmio: false, writes: 0, batch_ticks: false };
                 let mut cpu = Cpu::new(0x0200_0080);
                 (cpu.jit_on, cpu.profile) = (jit, true);
                 let mut fast = 0;
@@ -5284,7 +5361,7 @@ mod tests {
         for jit in [false, true] {
             let mut xip = callee_loop_program();
             xip.resize(0x200, 0);
-            let mut bus = Clocked { ram: vec![0; 0x1000], xip, cycles: 0, next_due: u64::MAX, irq: false, due_on_mmio: false, writes: 0 };
+            let mut bus = Clocked { ram: vec![0; 0x1000], xip, cycles: 0, next_due: u64::MAX, irq: false, due_on_mmio: false, writes: 0, batch_ticks: false };
             let mut cpu = Cpu::new(0x0200_0080);
             (cpu.jit_on, cpu.profile) = (jit, true);
             let mut fast = 0;
@@ -6150,7 +6227,7 @@ mod tests {
     #[cfg(native_jit)]
     const MMIO: u32 = 0x0100_0000;
     #[cfg(native_jit)]
-    struct Clocked { ram: Vec<u8>, xip: Vec<u8>, cycles: u64, next_due: u64, irq: bool, due_on_mmio: bool, writes: u32 }
+    struct Clocked { ram: Vec<u8>, xip: Vec<u8>, cycles: u64, next_due: u64, irq: bool, due_on_mmio: bool, writes: u32, batch_ticks: bool }
     #[cfg(native_jit)]
     impl Clocked {
         fn r8(&mut self, a: u32) -> u8 {
@@ -6183,6 +6260,7 @@ mod tests {
         fn tick(&mut self) -> bool { self.cycles += 1; self.cycles >= self.next_due }
         fn irq_pending(&self) -> bool { self.irq }
         fn tick_room(&self) -> u64 { self.next_due.saturating_sub(self.cycles + 1) }
+        fn can_defer_ticks(&self) -> bool { self.batch_ticks }
         fn add_ticks(&mut self, n: u64) { self.cycles += n; }
         fn next_tick_due(&self) -> bool { self.cycles + 1 >= self.next_due }
         fn jit_mem(&mut self) -> Option<JitMem> {
@@ -6198,9 +6276,9 @@ mod tests {
     /// instructions run compiled, and of those, the ones run inside a then-part or rep loop.
     #[cfg(native_jit)]
     #[allow(clippy::type_complexity)]
-    fn drive_clocked(xip: &[u8], jit: bool, (irq, r4, due_on_mmio): (bool, u32, bool), seed: u64, before: &dyn Fn(&mut Cpu, u32, u64))
+    fn drive_clocked(xip: &[u8], jit: bool, batch_ticks: bool, (irq, r4, due_on_mmio): (bool, u32, bool), seed: u64, before: &dyn Fn(&mut Cpu, u32, u64))
         -> (Vec<(u32, bool, u32, u64, u32, bool)>, u64, Vec<u8>, u32, u64, u64) {
-        let mut bus = Clocked { ram: vec![0; 0x1000], xip: xip.to_vec(), cycles: 0, next_due: 5, irq, due_on_mmio, writes: 0 };
+        let mut bus = Clocked { ram: vec![0; 0x1000], xip: xip.to_vec(), cycles: 0, next_due: 5, irq, due_on_mmio, writes: 0, batch_ticks };
         let mut cpu = Cpu::new(0x0200_0000);
         (cpu.jit_on, cpu.profile) = (jit, true);
         cpu.regs[4] = r4;
@@ -6264,7 +6342,7 @@ mod tests {
         let before = |cpu: &mut Cpu, round: u32, _: u64| if cpu.pair_pending.is_none() && round % 7 == 0 { cpu.regs[0] = round & 0x3ff };
         for setup in CLOCKED_SETUPS {
             for seed in 1..=4u64 {
-                let (want, got) = (drive_clocked(&xip, false, setup, seed, &before), drive_clocked(&xip, true, setup, seed, &before));
+                let (want, got) = (drive_clocked(&xip, false, false, setup, seed, &before), drive_clocked(&xip, true, false, setup, seed, &before));
                 assert!(got.4 > 1000, "compiled code ran {} instructions", got.4);
                 for (i, (w, g)) in want.0.iter().zip(&got.0).enumerate() {
                     assert_eq!(w, g, "call {i} ({setup:?}, seed {seed})");
@@ -6310,7 +6388,7 @@ mod tests {
         for setup in CLOCKED_SETUPS {
             let mut inside = 0;
             for seed in 1..=6u64 {
-                let (want, got) = (drive_clocked(&xip, false, setup, seed, &before), drive_clocked(&xip, true, setup, seed, &before));
+                let (want, got) = (drive_clocked(&xip, false, false, setup, seed, &before), drive_clocked(&xip, true, false, setup, seed, &before));
                 inside += got.5;
                 for (i, (w, g)) in want.0.iter().zip(&got.0).enumerate() {
                     assert_eq!(w, g, "call {i} ({setup:?}, seed {seed})");
@@ -6318,6 +6396,29 @@ mod tests {
                 assert_eq!((want.1, &want.2, want.3), (got.1, &got.2, got.3));
             }
             assert!(inside > 5000, "compiled code ran {inside} instructions inside ({setup:?})");
+        }
+    }
+
+    #[cfg(native_jit)]
+    #[test]
+    fn deferred_interpreter_ticks_match_per_instruction_ticks() {
+        let xip = clocked_loop(false);
+        let before = |cpu: &mut Cpu, round: u32, _: u64| {
+            if cpu.pair_pending.is_none() && round % 7 == 0 {
+                cpu.regs[0] = round & 0x3ff;
+            }
+        };
+        for setup in CLOCKED_SETUPS {
+            for seed in 1..=4u64 {
+                let (want, got) = (
+                    drive_clocked(&xip, false, false, setup, seed, &before),
+                    drive_clocked(&xip, false, true, setup, seed, &before),
+                );
+                for (i, (w, g)) in want.0.iter().zip(&got.0).enumerate() {
+                    assert_eq!(w, g, "call {i} ({setup:?}, seed {seed})");
+                }
+                assert_eq!((want.1, &want.2, want.3), (got.1, &got.2, got.3), "({setup:?}, seed {seed})");
+            }
         }
     }
 }
@@ -6476,6 +6577,40 @@ struct BOp {
 }
 
 impl Fast {
+    /// These micro-ops only change CPU state, so the SoC clock can advance them in a batch.
+    fn cpu_only(&self) -> bool {
+        matches!(
+            self,
+            Fast::Mov { .. }
+                | Fast::MovI { .. }
+                | Fast::Alu3 { .. }
+                | Fast::Alu3I { .. }
+                | Fast::Alu2 { .. }
+                | Fast::Alu2I { .. }
+                | Fast::BrI { .. }
+                | Fast::BrR { .. }
+                | Fast::Goto { .. }
+                | Fast::Call { .. }
+                | Fast::Rts
+                | Fast::A4 { .. }
+                | Fast::BitBr { .. }
+                | Fast::DecBr { .. }
+                | Fast::Nop
+                | Fast::SpAdd { .. }
+                | Fast::SpFromR { .. }
+                | Fast::RFromSp { .. }
+                | Fast::BrIEq { .. }
+                | Fast::BrINe { .. }
+                | Fast::AddRI { .. }
+                | Fast::ShlI { .. }
+                | Fast::SarI { .. }
+                | Fast::Ext { .. }
+                | Fast::FOp { .. }
+                | Fast::BitExt { .. }
+                | Fast::BitIns { .. }
+        )
+    }
+
     /// The guest registers this op reads and writes (bit masks), for gluing pairs (`BOp::glue`);
     /// None: not worked out (never glued).
     fn regs_rw(&self) -> Option<(u16, u16)> {
@@ -7885,4 +8020,3 @@ pub fn describe(win: u64, pc: u32) -> Option<String> {
     })
 
 }
-

@@ -1158,6 +1158,10 @@ impl Bus for Soc {
         self.periph.tick_room()
     }
     #[inline]
+    fn can_defer_ticks(&self) -> bool {
+        true
+    }
+    #[inline]
     fn add_ticks(&mut self, n: u64) {
         self.periph.cycles += n;
     }

@@ -303,6 +303,25 @@ pub extern "C" fn fm1_jit(on: u32, per_render: u32) {
     }
 }
 
+/// Whether at least one native JIT code cache was initialized.
+#[no_mangle]
+pub extern "C" fn fm1_jit_active() -> u32 {
+    machine().is_some_and(|m| {
+        m.cpu.native_jit_active()
+            || m.cpu1.as_ref().is_some_and(Cpu::native_jit_active)
+    }) as u32
+}
+
+/// Number of native blocks compiled across both emulated CPUs.
+#[no_mangle]
+pub extern "C" fn fm1_jit_compiled_blocks() -> u32 {
+    machine().map_or(0, |m| {
+        m.cpu.jit_compiled_blocks()
+            .saturating_add(m.cpu1.as_ref().map_or(0, Cpu::jit_compiled_blocks))
+            .min(u32::MAX as usize) as u32
+    })
+}
+
 /// The LCD's transfers take their time at the SPI clock, as on an FM-1 (`on` = 1; fm1_soc's
 /// `Soc::lcd_timed`), from the next boot on. Off by default: they finish at once.
 #[no_mangle]
