@@ -289,6 +289,36 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
     }
 }
 
+struct PatternCell: Hashable {
+    var slot: Int
+    var row: Int
+    var id: Int { slot * 8 + row }
+}
+
+struct PatternTransfer {
+    var source: SequencerPattern
+    var destination: PatternCell
+    var sourceRevision: UInt64
+    var targetRevision: UInt64
+    var epoch: UInt64
+
+    func applying(to patterns: [SequencerPattern]) throws -> [SequencerPattern] {
+        guard patterns.first(where: { $0.id == source.id }) == source,
+              !patterns.contains(where: { $0.id == destination.id }) else {
+            throw SceneError.invalid("The source or destination changed. No patterns were modified.")
+        }
+        var moved = source
+        moved.slot = destination.slot; moved.row = destination.row
+        try moved.validate()
+        return patterns.filter { $0.id != source.id } + [moved]
+    }
+}
+
+struct PendingPatternTransfer {
+    var token: UInt64
+    var transfer: PatternTransfer
+}
+
 struct CircularNoteLayout: Equatable {
     struct Arc: Equatable {
         var lane: Int

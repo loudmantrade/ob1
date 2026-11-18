@@ -284,6 +284,15 @@ struct Scene final : Retired {
     ClipGrid preparedClips;
 };
 ClipGrid clips;
+std::array<std::array<std::atomic<uint64_t>, music::sequencerRows>, capacity> clipRevisions {};
+struct EditRequest final : Retired {
+    std::unique_ptr<SequencerClip> expected, replacement;
+    uint32_t sourceSlot = 0, sourceRow = 0, targetSlot = 0, targetRow = 0, mode = 0;
+    uint64_t epoch = 0, sourceRevision = 0, targetRevision = 0, token = 0;
+};
+constexpr uint32_t editCapacity = 16;
+std::array<ov_seq_edit_result, editCapacity> editResults {};
+std::atomic<uint32_t> editRead {0}, editWrite {0}, editOutstanding {0};
 std::unique_ptr<SequencerClip> prepareClip(const ov_seq_clip& input)
 {
     if (input.slot >= capacity || input.row >= music::sequencerRows ||
@@ -317,7 +326,7 @@ music::ClipRecorder recorder;
 std::unique_ptr<RecordingRequest> recordingDestination;
 bool recordingAutoplay = false;
 constexpr uint32_t completionCapacity = 16;
-struct Completion { ov_seq_clip clip {}; uint32_t result = 0; uint64_t epoch = 0; };
+struct Completion { ov_seq_clip clip {}; uint32_t result = 0; uint64_t epoch = 0, revision = 0; };
 std::array<Completion, completionCapacity> completions;
 std::atomic<uint32_t> completionRead {0}, completionWrite {0};
 std::atomic<uint64_t> sceneEpoch {0};
@@ -397,7 +406,7 @@ void forgetPedals(uint32_t slot)
     for (auto& pedal : pedalOwners) pedal.destinations &= ~(1u << slot);
 }
 
-enum class Kind { MIDI, StopAll, SeqClip, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
+enum class Kind { MIDI, StopAll, SeqClip, SeqEdit, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
     SeqFinish, SourceClose, Parameter, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
 struct Command {
     Kind kind = Kind::MIDI;
@@ -528,6 +537,7 @@ void finishRecording(bool autoplay)
         stopSequencer(recorder.slot);
         retire(clips[recorder.slot][recorder.row].release());
         clips[recorder.slot][recorder.row].reset(recordingDestination.release());
+        completed.revision = clipRevisions[recorder.slot][recorder.row].fetch_add(1) + 1;
         encodeClip(recorder.slot, recorder.row, recorder.data, completed.clip);
         completed.result = 1;
         if (autoplay && recordingAutoplay)
@@ -711,8 +721,49 @@ void routeEvent(const music::Event& event)
         scheduledCount = 0;
     }
 }
+bool samePattern(const music::PatternData& a, const music::PatternData& b)
+{
+    if (a.id != b.id || a.name != b.name || a.length != b.length || a.intro != b.intro ||
+        a.introEnabled != b.introEnabled || a.loop != b.loop || a.quantization.grid != b.quantization.grid ||
+        a.count != b.count) return false;
+    for (uint32_t i = 0; i < a.count; ++i) {
+        const auto& x = a.notes[i]; const auto& y = b.notes[i];
+        if (x.id != y.id || x.start != y.start || x.duration != y.duration || x.pitch != y.pitch ||
+            x.velocity != y.velocity || x.routing.stage != y.routing.stage) return false;
+    }
+    return true;
+}
 void apply(const Command& c)
 {
+    if (c.kind == Kind::SeqEdit) {
+        auto* edit = static_cast<EditRequest*>(c.object);
+        const auto s = edit->sourceSlot, r = edit->sourceRow, t = edit->targetSlot, u = edit->targetRow;
+        const bool recording = recorder.running &&
+            ((recorder.slot == s && recorder.row == r) || (recorder.slot == t && recorder.row == u));
+        const bool valid = !recording && edit->epoch == sceneEpoch.load() &&
+            scene->slots[s] && scene->slots[t] && clips[s][r] && !clips[t][u] &&
+            clipRevisions[s][r].load() == edit->sourceRevision &&
+            clipRevisions[t][u].load() == edit->targetRevision &&
+            samePattern(clips[s][r]->pattern.data(), edit->expected->pattern.data());
+        if (valid) {
+            auto stopAffected = [&](uint32_t slot, uint32_t row) {
+                if (players[slot].row == int32_t(row) || players[slot].pendingRow == int32_t(row)) {
+                    stopSequencer(slot);
+                    scene->slots[slot]->engine->boundary({processedFrames});
+                    scene->slots[slot]->engine->stopArpeggiator();
+                }
+            };
+            stopAffected(s, r); stopAffected(t, u);
+            retire(clips[t][u].release()); clips[t][u] = std::move(edit->replacement);
+            retire(clips[s][r].release());
+            clipRevisions[s][r].fetch_add(1); clipRevisions[t][u].fetch_add(1);
+        }
+        const auto write = editWrite.load(std::memory_order_relaxed);
+        editResults[write % editCapacity] = {edit->token, valid ? 1u : 0u};
+        editWrite.store(write + 1, std::memory_order_release);
+        retire(edit);
+        return;
+    }
     if (c.kind == Kind::SeqTap) {
         auto* request = static_cast<RecordingRequest*>(c.object);
         if (recorder.running && recorder.slot == c.slot && recorder.row == c.a) {
@@ -757,6 +808,7 @@ void apply(const Command& c)
             stopSequencer(c.slot);
         retire(clips[c.slot][c.a].release());
         clips[c.slot][c.a].reset(static_cast<SequencerClip*>(c.object));
+        clipRevisions[c.slot][c.a].fetch_add(1);
         return;
     }
     if (c.kind == Kind::SeqLaunch) {
@@ -861,6 +913,7 @@ void apply(const Command& c)
         retire(scene.release());
         scene.reset(static_cast<Scene*>(c.object));
         clips.swap(scene->preparedClips);
+        for (auto& column : clipRevisions) for (auto& revision : column) revision.fetch_add(1);
         scheduledCount = 0;
         internalTempo.store(c.a);
         if (!clock.quarter) clock.bpm = c.a;
@@ -883,6 +936,7 @@ void apply(const Command& c)
         if (recorder.running && recorder.slot == c.slot) finishRecording();
         stopSequencer(c.slot);
         for (auto& clip : clips[c.slot]) retire(clip.release());
+        for (auto& revision : clipRevisions[c.slot]) revision.fetch_add(1);
         soloMask &= ~(1u << c.slot);
         if (pointer) {
             pointer->engine->boundary({processedFrames});
@@ -1230,6 +1284,44 @@ int ov_seq_set_clip(const ov_seq_clip* input)
     } catch (const EngineCreationFailure&) { error.store(2); return 0; }
     catch (const std::bad_alloc&) { error.store(3); return 0; }
 }
+uint64_t ov_seq_cell_revision(uint32_t slot, uint32_t row)
+{
+    return slot < rack::capacity && row < OV_SEQ_ROWS ? rack::clipRevisions[slot][row].load() : 0;
+}
+int ov_seq_edit(const ov_seq_clip* source, uint32_t targetSlot, uint32_t targetRow,
+                uint32_t mode, uint64_t epoch, uint64_t sourceRevision, uint64_t targetRevision, uint64_t token)
+{
+    using namespace rack;
+    if (!source || targetSlot >= capacity || targetRow >= OV_SEQ_ROWS || mode != 0 ||
+        (source->slot == targetSlot && source->row == targetRow)) { error.store(2); return 0; }
+    try {
+        auto edit = std::make_unique<EditRequest>();
+        edit->expected = prepareClip(*source);
+        auto target = std::make_unique<ov_seq_clip>(*source);
+        target->slot = targetSlot; target->row = targetRow;
+        edit->replacement = prepareClip(*target);
+        edit->sourceSlot = source->slot; edit->sourceRow = source->row;
+        edit->targetSlot = targetSlot; edit->targetRow = targetRow; edit->mode = mode;
+        edit->epoch = epoch; edit->sourceRevision = sourceRevision; edit->targetRevision = targetRevision; edit->token = token;
+        if (editOutstanding.fetch_add(1) >= editCapacity) {
+            editOutstanding.fetch_sub(1); error.store(4); return 0;
+        }
+        Command c; c.kind = Kind::SeqEdit; c.object = edit.get();
+        if (!enqueue(c)) { editOutstanding.fetch_sub(1); return 0; }
+        edit.release(); return 1;
+    } catch (const EngineCreationFailure&) { error.store(2); return 0; }
+    catch (const std::bad_alloc&) { error.store(3); return 0; }
+}
+int ov_seq_read_edit(ov_seq_edit_result* result)
+{
+    using namespace rack;
+    const auto read = editRead.load(std::memory_order_relaxed);
+    if (!result || read == editWrite.load(std::memory_order_acquire)) return 0;
+    *result = editResults[read % editCapacity];
+    editRead.store(read + 1, std::memory_order_release);
+    editOutstanding.fetch_sub(1);
+    return 1;
+}
 uint32_t ov_seq_take_level(uint32_t slot) { return slot < rack::capacity ? rack::snapshots[slot].sequencerPeak.exchange(0) : 0; }
 static int seqCommand(rack::Kind kind, uint32_t slot, uint32_t a = 0, uint32_t b = 0, uint32_t d = 0)
 {
@@ -1301,6 +1393,10 @@ uint32_t ov_seq_record_ready(void)
     return rack::completionWrite.load(std::memory_order_acquire) != rack::completionRead.load(std::memory_order_relaxed);
 }
 uint64_t ov_seq_scene_epoch(void) { return rack::sceneEpoch.load(); }
+uint64_t ov_seq_record_revision(void)
+{
+    return ov_seq_record_ready() ? rack::completions[rack::completionRead.load() % rack::completionCapacity].revision : 0;
+}
 uint32_t ov_seq_record_progress(void) { return rack::recordingProgress.load(); }
 int ov_seq_read_completion(ov_seq_clip* clip, uint32_t* result, uint64_t* epoch)
 {

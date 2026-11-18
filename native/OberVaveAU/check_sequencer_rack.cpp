@@ -442,7 +442,39 @@ static void checkConsecutiveTakes()
     std::puts("PASS consecutive A/B/C takes without UI polling: independent players, FIFO exactly once, reserved completion capacity, explicit backpressure and scene epochs");
 }
 
+static void checkPatternMove()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120;
+    for (uint32_t slot = 0; slot < 3; ++slot) scene->slots[slot] = {1, config(rack::A_UP)};
+    auto source = std::make_unique<ov_seq_clip>(clip(0, 0, 0));
+    auto other = std::make_unique<ov_seq_clip>(clip(2, 0));
+    assert(ov_rack_load_sequenced(scene.get(), source.get(), 1)); render();
+    assert(ov_seq_set_clip(other.get())); assert(ov_seq_launch(0, 0, 0)); assert(ov_seq_launch(2, 0, 0)); render();
+    const auto unrelatedOrigin = rack::players[2].origin;
+    auto move = [&](uint32_t target, uint64_t revision, uint64_t token) {
+        assert(ov_seq_edit(source.get(), target, 1, 0, ov_seq_scene_epoch(),
+            ov_seq_cell_revision(0, 0), revision, token)); render();
+        ov_seq_edit_result result {};
+        assert(ov_seq_read_edit(&result) && result.token == token);
+        assert(!ov_seq_read_edit(&result));
+        return result.success;
+    };
+    assert(!move(1, ov_seq_cell_revision(1, 1) + 1, 1));
+    assert(rack::clips[0][0] && !rack::clips[1][1] && ov_seq_active(0) == 0);
+    assert(move(1, ov_seq_cell_revision(1, 1), 2));
+    assert(!rack::clips[0][0] && rack::clips[1][1] && ov_seq_active(0) == -1 && ov_seq_active(1) == -1);
+    const auto& moved = rack::clips[1][1]->pattern.data();
+    assert(moved.id == 10 && moved.notes[0].routing.instruments == (1u << 1));
+    assert(moved.notes[0].start == 0 && moved.notes[0].duration == 480);
+    assert(ov_seq_active(2) == 0 && rack::players[2].origin == unrelatedOrigin);
+    assert(!gate(0) && !engine(0).arpeggiator.processor().heldCount());
+    assert(!ov_rack_take_error());
+    assert(ov_rack_stop_all()); render();
+    std::puts("PASS transactional MOVE: stale destination rejection, cross-column retarget, affected-only Stop, immutable publication and acknowledgement");
+}
+
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); ov_rack_collect();
 }

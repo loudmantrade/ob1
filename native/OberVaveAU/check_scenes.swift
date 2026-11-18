@@ -148,6 +148,15 @@ struct SceneChecks {
 
     static func main() throws {
         checkCircularLayout()
+        var sourcePattern = SequencerPattern(slot: 0, row: 0, name: "Move")
+        sourcePattern.notes = [SequencerNote(id: 1, start: 120, duration: 500, pitch: 60, velocity: 100)]
+        let move = PatternTransfer(source: sourcePattern, destination: PatternCell(slot: 1, row: 2),
+                                   sourceRevision: 1, targetRevision: 0, epoch: 1)
+        let moved = try move.applying(to: [sourcePattern])
+        precondition(moved.count == 1 && moved[0].slot == 1 && moved[0].row == 2 && moved[0].notes == sourcePattern.notes)
+        let restored = try JSONDecoder().decode([SequencerPattern].self, from: JSONEncoder().encode(moved))
+        precondition(restored == moved)
+        print("PASS transactional MOVE model: exact note preservation, destination identity and JSON persistence")
         precondition(SynthParameter.allCases.count == Int(ov_parameter_count()))
         precondition(SynthParameter.arpVelocity.audioUnitID == 64)
         precondition(SynthParameter.mod1Source.audioUnitID == 72 && SynthParameter.legacyWheel.audioUnitID == 96)

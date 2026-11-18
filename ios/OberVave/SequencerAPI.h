@@ -42,6 +42,7 @@ uint32_t ov_seq_record_ready(void);
 int ov_seq_read_record(ov_seq_clip* clip);
 int ov_seq_read_completion(ov_seq_clip* clip, uint32_t* result, uint64_t* epoch);
 uint64_t ov_seq_scene_epoch(void);
+uint64_t ov_seq_record_revision(void); /* revision of front completion; read before consuming */
 uint32_t ov_seq_record_progress(void); /* body bar phase, 0..65535 */
 int32_t ov_seq_active(uint32_t slot);
 int32_t ov_seq_pending(uint32_t slot);
@@ -49,6 +50,14 @@ uint32_t ov_seq_position(uint32_t slot); /* 0..65535 */
 int32_t ov_seq_recording_slot(void);
 int32_t ov_seq_recording_row(void);
 uint32_t ov_seq_stopping(uint32_t slot);
+/* Transaction: mode 0 MOVE. Expected immutable source + cell revisions reject stale UI.
+   One control-thread consumer reads acknowledgements. No model mutation before success. */
+typedef struct { uint64_t token; uint32_t success; } ov_seq_edit_result;
+uint64_t ov_seq_cell_revision(uint32_t slot, uint32_t row);
+int ov_seq_edit(const ov_seq_clip* source, uint32_t target_slot, uint32_t target_row,
+                uint32_t mode, uint64_t epoch, uint64_t source_revision,
+                uint64_t target_revision, uint64_t token);
+int ov_seq_read_edit(ov_seq_edit_result* result);
 #ifdef __cplusplus
 }
 #endif

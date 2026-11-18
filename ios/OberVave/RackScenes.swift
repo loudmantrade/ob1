@@ -124,11 +124,12 @@ extension OberVaveModel {
 
     func syncRackState() {
         while ov_seq_record_ready() != 0 {
+            let revision = ov_seq_record_revision()
             var result: UInt32 = 0
             var epoch: UInt64 = 0
             var clip = ov_seq_clip()
             if ov_seq_read_completion(&clip, &result, &epoch) != 0 {
-                if result == 1 && epoch == ov_seq_scene_epoch() {
+                if result == 1 && epoch == ov_seq_scene_epoch() && revision == ov_seq_cell_revision(clip.slot, clip.row) {
                     let pattern = SequencerPattern(core: clip)
                     do {
                         try pattern.validate()
@@ -143,6 +144,18 @@ extension OberVaveModel {
         let recordingSlot = Int(ov_seq_recording_slot())
         let recordingRow = Int(ov_seq_recording_row())
         recordingPattern = recordingSlot >= 0 && recordingRow >= 0 ? recordingSlot * 8 + recordingRow : nil
+        var editResult = ov_seq_edit_result()
+        while ov_seq_read_edit(&editResult) != 0 {
+            if let pending = pendingPatternTransfer, pending.token == editResult.token {
+                defer { pendingPatternTransfer = nil }
+                if editResult.success != 0 && pending.transfer.epoch == ov_seq_scene_epoch() {
+                    do { patterns = try pending.transfer.applying(to: patterns) }
+                    catch { errorMessage = error.localizedDescription }
+                } else {
+                    errorMessage = "The pattern edit was rejected because a cell, scene or recording changed. No patterns were modified."
+                }
+            }
+        }
         sequencerRevision &+= 1
         let generation = ov_rack_stop_generation()
         if generation != keyboardStopGeneration {
@@ -258,6 +271,7 @@ extension OberVaveModel {
     }
 
     func removeInstrument(_ slot: Int) {
+        guard pendingPatternTransfer == nil else { errorMessage = "Wait for the pending pattern edit."; return }
         guard recordingPattern == nil else { errorMessage = "Finish recording before removing an instrument."; return }
         guard pendingSceneName == nil, ov_rack_remove(UInt32(slot)) != 0 else { return }
         instruments.removeAll { $0.slot == slot }
@@ -301,6 +315,8 @@ extension OberVaveModel {
     }
 
     func saveScene(name: String, asNew: Bool = false) {
+        syncRackState()
+        guard pendingPatternTransfer == nil else { errorMessage = "Wait for the pending pattern edit."; return }
         guard recordingPattern == nil else {
             errorMessage = "Finish pattern recording before saving the scene."; return
         }
@@ -368,6 +384,7 @@ extension OberVaveModel {
 
     private func applyScene(_ document: RackSceneDocument) throws {
         try document.validate()
+        guard pendingPatternTransfer == nil else { throw SceneError.invalid("Wait for the pending pattern edit.") }
         guard recordingPattern == nil else { throw SceneError.invalid("Finish recording before loading a scene.") }
         var c = ov_scene_config()
         c.tempo = UInt32(document.tempo)
@@ -417,7 +434,9 @@ extension OberVaveModel {
 
     @discardableResult
     func storePattern(_ pattern: SequencerPattern) -> Bool {
-        guard pendingSceneName == nil else { return false }
+        guard pendingSceneName == nil, pendingPatternTransfer == nil else {
+            errorMessage = "Wait for the pending scene or pattern operation."; return false
+        }
         guard recordingPattern == nil else { errorMessage = "Finish recording before editing patterns."; return false }
         do {
             try pattern.validate()
@@ -429,7 +448,27 @@ extension OberVaveModel {
         } catch { errorMessage = error.localizedDescription; return false }
     }
 
+    func movePattern(_ transfer: PatternTransfer) {
+        syncRackState()
+        guard pendingPatternTransfer == nil, pendingSceneName == nil,
+              instruments.contains(where: { $0.slot == transfer.destination.slot }),
+              recordingPattern != transfer.source.id && recordingPattern != transfer.destination.id else {
+            errorMessage = "The source or destination is busy recording or editing."; return
+        }
+        do {
+            _ = try transfer.applying(to: patterns)
+            var source = transfer.source.coreClip()
+            patternTransferToken &+= 1
+            guard ov_seq_edit(&source, UInt32(transfer.destination.slot), UInt32(transfer.destination.row), 0,
+                              transfer.epoch, transfer.sourceRevision, transfer.targetRevision, patternTransferToken) != 0 else {
+                throw SceneError.invalid("Could not queue pattern move.")
+            }
+            pendingPatternTransfer = PendingPatternTransfer(token: patternTransferToken, transfer: transfer)
+        } catch { errorMessage = error.localizedDescription }
+    }
+
     func deletePattern(_ pattern: SequencerPattern) {
+        guard pendingPatternTransfer == nil else { errorMessage = "Wait for the pending pattern edit."; return }
         guard recordingPattern == nil else { errorMessage = "Finish recording before deleting patterns."; return }
         guard ov_seq_delete(UInt32(pattern.slot), UInt32(pattern.row)) != 0 else {
             errorMessage = "Could not delete the pattern."; return
