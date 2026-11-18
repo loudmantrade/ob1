@@ -753,13 +753,16 @@ void apply(const Command& c)
                     scene->slots[slot]->engine->stopArpeggiator();
                 }
             };
-            stopAffected(s, r); stopAffected(t, u);
-            retire(clips[t][u].release()); clips[t][u] = std::move(edit->replacement);
+            stopAffected(s, r);
+            if (edit->mode != 4) {
+                stopAffected(t, u);
+                retire(clips[t][u].release()); clips[t][u] = std::move(edit->replacement);
+                clipRevisions[t][u].fetch_add(1);
+            }
             if (!(edit->mode & 1)) {
                 retire(clips[s][r].release());
                 clipRevisions[s][r].fetch_add(1);
             }
-            clipRevisions[t][u].fetch_add(1);
         }
         const auto write = editWrite.load(std::memory_order_relaxed);
         editResults[write % editCapacity] = {edit->token, valid ? 1u : 0u};
@@ -806,7 +809,9 @@ void apply(const Command& c)
         return;
     }
     if (c.kind == Kind::SeqClip) {
-        if (recorder.running && recorder.slot == c.slot) finishRecording();
+        if (recorder.running && recorder.slot == c.slot && recorder.row == c.a) {
+            error.store(2); retire(c.object); return;
+        }
         if (players[c.slot].row == int32_t(c.a) || players[c.slot].pendingRow == int32_t(c.a))
             stopSequencer(c.slot);
         retire(clips[c.slot][c.a].release());
@@ -1295,14 +1300,14 @@ int ov_seq_edit(const ov_seq_clip* source, uint32_t targetSlot, uint32_t targetR
                 uint32_t mode, uint64_t epoch, uint64_t sourceRevision, uint64_t targetRevision, uint64_t token)
 {
     using namespace rack;
-    if (!source || targetSlot >= capacity || targetRow >= OV_SEQ_ROWS || mode > 3 ||
-        (source->slot == targetSlot && source->row == targetRow)) { error.store(2); return 0; }
+    if (!source || targetSlot >= capacity || targetRow >= OV_SEQ_ROWS || mode > 4 ||
+        ((source->slot == targetSlot && source->row == targetRow) != (mode == 4))) { error.store(2); return 0; }
     try {
         auto edit = std::make_unique<EditRequest>();
         edit->expected = prepareClip(*source);
         auto target = std::make_unique<ov_seq_clip>(*source);
         target->slot = targetSlot; target->row = targetRow;
-        edit->replacement = prepareClip(*target);
+        if (mode != 4) edit->replacement = prepareClip(*target);
         edit->sourceSlot = source->slot; edit->sourceRow = source->row;
         edit->targetSlot = targetSlot; edit->targetRow = targetRow; edit->mode = mode;
         edit->epoch = epoch; edit->sourceRevision = sourceRevision; edit->targetRevision = targetRevision; edit->token = token;

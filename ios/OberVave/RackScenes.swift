@@ -469,7 +469,7 @@ extension OberVaveModel {
             _ = try transfer.applying(to: patterns)
             var source = transfer.source.coreClip()
             patternTransferToken &+= 1
-            let mode: UInt32 = (transfer.copying ? 1 : 0) | (transfer.replace ? 2 : 0)
+            let mode: UInt32 = transfer.deleting ? 4 : (transfer.copying ? 1 : 0) | (transfer.replace ? 2 : 0)
             guard ov_seq_edit(&source, UInt32(transfer.destination.slot), UInt32(transfer.destination.row), mode,
                               transfer.epoch, transfer.sourceRevision, transfer.targetRevision, patternTransferToken) != 0 else {
                 throw SceneError.invalid("Could not queue pattern transfer.")
@@ -479,12 +479,10 @@ extension OberVaveModel {
     }
 
     func deletePattern(_ pattern: SequencerPattern) {
-        guard pendingPatternTransfer == nil else { errorMessage = "Wait for the pending pattern edit."; return }
-        guard recordingPattern == nil else { errorMessage = "Finish recording before deleting patterns."; return }
-        guard ov_seq_delete(UInt32(pattern.slot), UInt32(pattern.row)) != 0 else {
-            errorMessage = "Could not delete the pattern."; return
-        }
-        patterns.removeAll { $0.id == pattern.id }
+        let revision = ov_seq_cell_revision(UInt32(pattern.slot), UInt32(pattern.row))
+        submitPatternTransfer(PatternTransfer(source: pattern, destination: PatternCell(slot: pattern.slot, row: pattern.row),
+                                               sourceRevision: revision, targetRevision: revision,
+                                               epoch: ov_seq_scene_epoch(), deleting: true))
     }
 
     func duplicatePattern(_ pattern: SequencerPattern) {

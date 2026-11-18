@@ -492,6 +492,17 @@ static void checkPatternMove()
     assert(rack::clips[1][1] && rack::clips[2][0] && ov_seq_active(2) == -1);
     assert(rack::clips[2][0]->pattern.data().notes[0].routing.instruments == (1u << 2));
     assert(rack::clips[2][0]->pattern.data().notes[0].routing.stage == music::Stage::Input);
+    auto remove = [&] {
+        const auto revision = ov_seq_cell_revision(1, 1);
+        assert(ov_seq_edit(source.get(), 1, 1, 4, ov_seq_scene_epoch(), revision, revision, 5)); render();
+        assert(ov_seq_read_edit(&copied)); return copied.success;
+    };
+    assert(ov_seq_arm(1, 1, 1, 1, 0, 1)); render();
+    assert(!remove() && rack::clips[1][1] && rack::recorder.running);
+    assert(ov_seq_finish_record()); render(); // Before the aligned body: cancel, preserving the original.
+    auto cancelled = std::make_unique<ov_seq_clip>();
+    assert(ov_seq_record_result() == 2 && ov_seq_read_record(cancelled.get()));
+    assert(remove() && !rack::clips[1][1] && rack::clips[2][0]);
     assert(!ov_rack_take_error());
     assert(ov_rack_stop_all()); render();
     std::puts("PASS transactional MOVE: stale destination rejection, cross-column retarget, affected-only Stop, immutable publication and acknowledgement");

@@ -51,6 +51,7 @@ int32_t ov_seq_recording_slot(void);
 int32_t ov_seq_recording_row(void);
 uint32_t ov_seq_stopping(uint32_t slot);
 /* Transaction: mode bit 0 COPY (otherwise MOVE), bit 1 permits confirmed replacement.
+   Mode 4 DELETE requires source and target to be the same cell.
    Expected immutable source + cell revisions reject stale UI.
    One control-thread consumer reads acknowledgements. No model mutation before success. */
 typedef struct { uint64_t token; uint32_t success; } ov_seq_edit_result;

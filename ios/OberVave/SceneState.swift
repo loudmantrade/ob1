@@ -304,8 +304,15 @@ struct PatternTransfer {
     var copying = false
     var expectedDestination: SequencerPattern?
     var replace = false
+    var deleting = false
 
     func applying(to patterns: [SequencerPattern]) throws -> [SequencerPattern] {
+        if deleting {
+            guard patterns.first(where: { $0.id == source.id }) == source else {
+                throw SceneError.invalid("The pattern changed before deletion. No patterns were modified.")
+            }
+            return patterns.filter { $0.id != source.id }
+        }
         guard patterns.first(where: { $0.id == source.id }) == source,
               patterns.first(where: { $0.id == destination.id }) == expectedDestination,
               expectedDestination == nil || replace else {
