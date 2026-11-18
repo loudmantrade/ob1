@@ -74,6 +74,9 @@ also applies to row launches and record-to-loop transitions. Other instruments
 are unaffected, even if they share its MIDI channel. Input-stage patterns then
 feed their own notes through the saved ARP mode.
 
+- Pads are square; their width and height follow the keyboard MIDI-channel
+  button width, including orientation/keyboard-layout changes. Mixer columns
+  keep the same compact width.
 - Empty pads show only **+**. Tap to arm/start recording, then tap the same pad
   again to queue completion at the end of the current body bar and start the
   loop on that boundary. Recording continues until then, without confirmation
@@ -91,9 +94,20 @@ feed their own notes through the saved ARP mode.
   record A, then B, then C on different columns without stopping their loops.
   Waiting is a red clock, count-in adds metronome/countdown dots; capture has
   red circular bar progress and queued completion adds a square.
+- **Group recording:** touch several empty cells at once, or arm more cells
+  while waiting for the first note/count-in to finish. There is at most one
+  armed/recording cell per instrument column. Wait groups start together on
+  the first selected instrument's live Input note or actual Output/ARP note;
+  other selected columns capture from that same origin, preserving inter-channel
+  timing. Count-in additions join the existing count's body boundary.
+  Arming one cell switches the onscreen keyboard to its MIDI channel; adding
+  columns enables their channels together for layers. External MIDI retains
+  normal channel/split routing. **FINISH ALL REC** queues completion for every
+  take; tapping one recording cell queues only that take, leaving the others
+  recording. Before the body begins, those actions cancel the selected takes.
 - The header **Record mode** button selects **Wait for note**, **Count-in** or
   **Immediate**, plus Input/Output capture. Wait for note arms indefinitely,
-  even during playback; Input capture starts on the selected instrument's first live Note On, while Output
+  even during playback; Input capture starts on a selected instrument's first live Note On, while Output
   capture starts on the first actual direct/ARP Note On. ARP grid/latency waiting
   does not add silence at the start or shorten the end of the take. Immediate starts beat
   one at the tap. Count-in counts **1 or 2 complete 4/4 bars** with **4 or 8

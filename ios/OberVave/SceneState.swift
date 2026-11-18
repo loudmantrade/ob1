@@ -392,6 +392,14 @@ struct PatternCell: Hashable {
     var id: Int { slot * 8 + row }
 }
 
+enum SequencerRecordingSelection {
+    static func keyboardMask(slots: Set<Int>, instruments: [RackInstrument]) -> UInt32 {
+        instruments.filter { slots.contains($0.slot) }.reduce(UInt32(0)) {
+            $0 | (1 << ($1.channel - 1))
+        }
+    }
+}
+
 enum PatternGridHitTesting {
     static func contains(_ point: CoreGraphics.CGPoint, cells: [PatternCell: CoreGraphics.CGRect],
                          verticalViewport: CoreGraphics.CGRect, horizontalViewport: CoreGraphics.CGRect) -> Bool {
@@ -401,10 +409,10 @@ enum PatternGridHitTesting {
 
     static func target(at point: CoreGraphics.CGPoint, cells: [PatternCell: CoreGraphics.CGRect],
                        verticalViewport: CoreGraphics.CGRect, horizontalViewport: CoreGraphics.CGRect,
-                       recordingCell: Int?) -> PatternCell? {
+                       recordingCells: Set<Int>) -> PatternCell? {
         guard contains(point, cells: cells, verticalViewport: verticalViewport,
                        horizontalViewport: horizontalViewport) else { return nil }
-        return cells.first { $0.value.contains(point) && $0.key.id != recordingCell }?.key
+        return cells.first { $0.value.contains(point) && !recordingCells.contains($0.key.id) }?.key
     }
 }
 

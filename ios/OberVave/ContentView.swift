@@ -375,6 +375,9 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var launchGrid = 2
     @Published var recordingPattern: Int?
     @Published var recordingPhase: UInt32 = 0
+    @Published var recordingPhases: [Int: UInt32] = [:]
+    @Published var keyboardChannelWidth: CGFloat = 44
+    var pendingRecordingKeyboardSlots: Set<Int> = []
     @Published var recordMode = SequencerRecordMode.waitForNote
     @Published var recordCountBars = 1
     @Published var recordOutput = true
@@ -3409,6 +3412,14 @@ struct TouchKeyboardView: View {
                             .overlay {
                                 RoundedRectangle(cornerRadius: 5)
                                     .stroke(color.opacity(active ? 1 : 0.45), lineWidth: 1)
+                            }
+                            .background {
+                                if channel == 1 {
+                                    GeometryReader { proxy in
+                                        Color.clear.onAppear { model.keyboardChannelWidth = proxy.size.width }
+                                            .onChange(of: proxy.size.width) { model.keyboardChannelWidth = $0 }
+                                    }
+                                }
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Keyboard MIDI channel \(channel)")

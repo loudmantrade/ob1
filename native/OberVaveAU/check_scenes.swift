@@ -218,9 +218,9 @@ struct SceneChecks {
                 precondition(PatternGridHitTesting.contains(center, cells: cells,
                     verticalViewport: vertical, horizontalViewport: horizontal) == visible)
                 precondition(PatternGridHitTesting.target(at: center, cells: cells,
-                    verticalViewport: vertical, horizontalViewport: horizontal, recordingCell: nil) == (visible ? cell : nil))
+                    verticalViewport: vertical, horizontalViewport: horizontal, recordingCells: []) == (visible ? cell : nil))
                 precondition(PatternGridHitTesting.target(at: center, cells: cells,
-                    verticalViewport: vertical, horizontalViewport: horizontal, recordingCell: cell.id) == nil)
+                    verticalViewport: vertical, horizontalViewport: horizontal, recordingCells: [cell.id]) == nil)
                 if visible {
                     testedCells.insert(cell)
                     for copying in [false, true] {
@@ -238,13 +238,35 @@ struct SceneChecks {
             precondition(PatternGridHitTesting.contains(gap, cells: cells,
                 verticalViewport: vertical, horizontalViewport: horizontal))
             precondition(PatternGridHitTesting.target(at: gap, cells: cells,
-                verticalViewport: vertical, horizontalViewport: horizontal, recordingCell: nil) == nil)
+                verticalViewport: vertical, horizontalViewport: horizontal, recordingCells: []) == nil)
             for outside in [CoreGraphics.CGPoint(x: 11, y: 200), CoreGraphics.CGPoint(x: 200, y: 441)] {
                 precondition(!PatternGridHitTesting.contains(outside, cells: cells,
                     verticalViewport: vertical, horizontalViewport: horizontal))
             }
         }
         precondition(testedCells.count == 16 * 8)
+        var recordingInstruments = (0..<16).map { RackInstrument.oberVave(slot: $0, channel: 16 - $0) }
+        for slot in 0..<16 {
+            precondition(SequencerRecordingSelection.keyboardMask(slots: [slot], instruments: recordingInstruments) == 1 << (15 - slot))
+        }
+        precondition(SequencerRecordingSelection.keyboardMask(slots: [0, 3, 15], instruments: recordingInstruments) == 0x9001)
+        recordingInstruments[3].channel = 16
+        precondition(SequencerRecordingSelection.keyboardMask(slots: [0, 3], instruments: recordingInstruments) == 0x8000)
+        for side in [36.0, 44.0, 58.0] {
+            let cells = Dictionary(uniqueKeysWithValues: (0..<16).flatMap { slot in
+                (0..<8).map { row in
+                    (PatternCell(slot: slot, row: row),
+                     CoreGraphics.CGRect(x: Double(slot) * (side + 8), y: Double(row) * (side + 6), width: side, height: side))
+                }
+            })
+            let viewport = CoreGraphics.CGRect(x: 0, y: 0, width: 1100, height: 800)
+            for (cell, frame) in cells {
+                precondition(frame.width == frame.height && frame.width == side)
+                precondition(PatternGridHitTesting.target(at: CoreGraphics.CGPoint(x: frame.midX, y: frame.midY),
+                    cells: cells, verticalViewport: viewport, horizontalViewport: viewport, recordingCells: []) == cell)
+            }
+        }
+        print("PASS compact squares: 36/44/58 pt hit targets; recording keyboard masks use instrument channels, multiple selections and shared-channel layers")
         print("PASS grid hit testing: MOVE/COPY from all visible columns and rows, scrolled coordinates, gaps, clipped cells and recording targets")
         var gesture = PatternCellGesture()
         func down(_ time: Double) {

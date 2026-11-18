@@ -147,6 +147,16 @@ extension OberVaveModel {
         let recordingCell = state == 0 ? nil : Int(state >> 3) - 1
         if recordingPattern != recordingCell { recordingPattern = recordingCell }
         if recordingPhase != state & 7 { recordingPhase = state & 7 }
+        var phases: [Int: UInt32] = [:]
+        for instrument in instruments {
+            let slotState = ov_seq_record_state_for_slot(UInt32(instrument.slot))
+            if slotState != 0 { phases[Int(slotState >> 3) - 1] = slotState & 7 }
+        }
+        if recordingPhases != phases { recordingPhases = phases }
+        pendingRecordingKeyboardSlots = pendingRecordingKeyboardSlots.filter { slot in
+            ov_seq_record_state_for_slot(UInt32(slot)) == 0 &&
+                (0..<8).contains { ov_seq_pad_pending(UInt32(slot), UInt32($0)) != 0 }
+        }
         var editResult = ov_seq_edit_result()
         while ov_seq_read_edit(&editResult) != 0 {
             if let pending = pendingPatternTransfer, pending.token == editResult.token {
@@ -165,7 +175,9 @@ extension OberVaveModel {
         for instrument in instruments {
             let slot = UInt32(instrument.slot)
             transport.append(contentsOf: [UInt32(ov_seq_active(slot) + 1), UInt32(ov_seq_pending(slot) + 1),
-                                          ov_seq_stopping(slot), ov_seq_position(slot)])
+                                          ov_seq_stopping(slot), ov_seq_position(slot),
+                                          ov_seq_record_state_for_slot(slot), ov_seq_record_progress_for_slot(slot),
+                                          ov_seq_record_remaining_for_slot(slot)])
             for row in 0..<8 { transport.append(ov_seq_pad_pending(slot, UInt32(row))) }
         }
         if lastSequencerTransport != transport {
@@ -488,7 +500,7 @@ extension OberVaveModel {
         syncRackState()
         guard pendingPatternTransfer == nil, pendingSceneName == nil,
               instruments.contains(where: { $0.slot == transfer.destination.slot }),
-              recordingPattern != transfer.source.id && recordingPattern != transfer.destination.id else {
+              recordingPhases[transfer.source.id] == nil && recordingPhases[transfer.destination.id] == nil else {
             errorMessage = "The source or destination is busy recording or editing."; return
         }
         do {
@@ -541,14 +553,16 @@ extension OberVaveModel {
     }
     func recordPattern(slot: Int, row: Int) {
         syncRackState()
-        guard recordingPattern == nil else { errorMessage = "Finish the current recording first."; return }
+        guard ov_seq_record_state_for_slot(UInt32(slot)) == 0 else {
+            errorMessage = "This instrument is already recording."; return
+        }
         guard let instrument = instruments.first(where: { $0.slot == slot }) else {
             errorMessage = "The recording instrument is unavailable."; return
         }
         if ov_seq_arm(UInt32(slot), UInt32(row), UInt32(recordMode.rawValue), UInt32(recordCountBars),
                       UInt32(instrument.recordBeats), recordOutput ? 1 : 0) == 0 {
             errorMessage = "Could not arm recording."
-        }
+        } else { routeKeyboardForRecording(slot: slot) }
     }
     func finishPatternRecording() {
         if ov_seq_finish_record() == 0 { errorMessage = "Could not finish recording.";  }
@@ -557,9 +571,24 @@ extension OberVaveModel {
         guard let instrument = instruments.first(where: { $0.slot == slot }) else {
             errorMessage = "The recording instrument is unavailable."; return
         }
+        let arming = pattern(slot: slot, row: row) == nil && ov_seq_record_state_for_slot(UInt32(slot)) == 0
         if ov_seq_tap(UInt32(slot), UInt32(row), UInt32(recordMode.rawValue), UInt32(recordCountBars),
                       UInt32(instrument.recordBeats), recordOutput ? 1 : 0, UInt32(launchGrid)) == 0 {
             errorMessage = "Could not apply the pattern tap."
+        } else if arming { routeKeyboardForRecording(slot: slot) }
+    }
+    private func routeKeyboardForRecording(slot: Int) {
+        pendingRecordingKeyboardSlots = pendingRecordingKeyboardSlots.filter { candidate in
+            (0..<8).contains { ov_seq_pad_pending(UInt32(candidate), UInt32($0)) != 0 }
+        }
+        pendingRecordingKeyboardSlots.insert(slot)
+        let slots = pendingRecordingKeyboardSlots.union(instruments.compactMap {
+            ov_seq_record_state_for_slot(UInt32($0.slot)) != 0 ? $0.slot : nil
+        })
+        let mask = SequencerRecordingSelection.keyboardMask(slots: slots, instruments: instruments)
+        if keyboardChannelMask != mask {
+            keyboardChannelMask = mask
+            ov_keyboard_channels(mask)
         }
     }
     func setRecordLength(slot: Int, bars: Int) {
@@ -708,6 +737,7 @@ private struct SequencerCellProgress: View {
     var recording: Bool
     var waiting: Bool
     var countRemaining = 0
+    var size: CGFloat = 46
 
     var body: some View {
         ZStack {
@@ -724,11 +754,11 @@ private struct SequencerCellProgress: View {
                 Circle().frame(width: 4, height: 4)
             }
         }
-        .frame(width: 46, height: 46)
+        .frame(width: size, height: size)
         .overlay {
             if waiting && countRemaining > 0 {
                 ForEach(0..<min(8, countRemaining), id: \.self) { beat in
-                    Circle().frame(width: 3, height: 3).offset(y: -23)
+                    Circle().frame(width: 3, height: 3).offset(y: -size / 2)
                         .rotationEffect(.degrees(Double(beat) * 45))
                 }
             }
@@ -767,8 +797,8 @@ struct SequencerView: View {
     @State private var horizontalViewport = CGRect.zero
     @State private var rootFrame = CGRect.zero
     @State private var meters = [Double](repeating: 0, count: 16)
-    private let width: CGFloat = 110
-    private let padHeight: CGFloat = 54
+    private var width: CGFloat { max(1, model.keyboardChannelWidth) }
+    private var padHeight: CGFloat { width }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -778,11 +808,12 @@ struct SequencerView: View {
                 }
                 .pickerStyle(.segmented).frame(maxWidth: 290)
                 Spacer()
-                if model.recordingPattern != nil {
+                if !model.recordingPhases.isEmpty {
                     Button {
                         model.finishPatternRecording()
                     } label: {
-                        Label("FINISH REC", systemImage: "record.circle.fill").foregroundStyle(.red)
+                        Label(model.recordingPhases.count > 1 ? "FINISH ALL REC" : "FINISH REC",
+                              systemImage: "record.circle.fill").foregroundStyle(.red)
                     }.buttonStyle(.bordered)
                 }
                 Text(model.pendingPatternTransfer == nil ? "DRAG CENTER: MOVE · HOLD: COPY · EDGES: SCROLL" : "APPLYING EDIT · WAITING FOR AUDIO")
@@ -953,15 +984,16 @@ struct SequencerView: View {
         let pattern = model.pattern(slot: instrument.slot, row: row)
         let active = Int(ov_seq_active(UInt32(instrument.slot))) == row
         let queued = Int(ov_seq_pending(UInt32(instrument.slot))) == row
-        let recording = model.recordingPattern == instrument.slot * 8 + row
+        let recording = model.recordingPhases[instrument.slot * 8 + row] != nil
         let stopping = active && ov_seq_stopping(UInt32(instrument.slot)) != 0
-        let phase = model.recordingPhase
+        let phase = model.recordingPhases[instrument.slot * 8 + row] ?? 0
         let color = MIDIChannelColors.color(instrument.channel)
         let cell = PatternCell(slot: instrument.slot, row: row)
         let commandPending = ov_seq_pad_pending(UInt32(instrument.slot), UInt32(row)) != 0
         let finishing = recording && phase == 5
         let waiting = recording && (phase == 1 || phase == 2 || phase == 4) || (queued || commandPending) && !active
-        let position: Double = Double(recording ? ov_seq_record_progress() : ov_seq_position(UInt32(instrument.slot))) / 65535
+        let position: Double = Double(recording ? ov_seq_record_progress_for_slot(UInt32(instrument.slot)) :
+            ov_seq_position(UInt32(instrument.slot))) / 65535
         let showCopyHint = copyHint == cell.id
         let highlighted = drag?.target == cell
         let visual = ZStack {
@@ -972,7 +1004,8 @@ struct SequencerView: View {
                     SequencerCellProgress(
                         position: position, queued: queued || finishing || commandPending, stopping: stopping || finishing,
                         recording: recording, waiting: waiting,
-                        countRemaining: recording && phase == 2 ? Int(ov_seq_record_remaining()) : 0)
+                        countRemaining: recording && phase == 2 ? Int(ov_seq_record_remaining_for_slot(UInt32(instrument.slot))) : 0,
+                        size: max(1, width - 8))
                 } else if pattern == nil {
                     Image(systemName: "plus")
                 }
@@ -1026,7 +1059,7 @@ struct SequencerView: View {
 
     private func target(at point: CGPoint) -> PatternCell? {
         PatternGridHitTesting.target(at: point, cells: frames, verticalViewport: cellViewport,
-                                     horizontalViewport: horizontalViewport, recordingCell: model.recordingPattern)
+                                     horizontalViewport: horizontalViewport, recordingCells: Set(model.recordingPhases.keys))
     }
 
     private func handleGesture(_ effect: PatternCellGesture.Effect, cell: PatternCell, point: CGPoint) {
@@ -1038,7 +1071,7 @@ struct SequencerView: View {
             copyHint = cell.id
         case .beginDrag(let copying):
             guard var source = heldSource, source.source.id == cell.id,
-                  model.recordingPattern != cell.id, model.pendingPatternTransfer == nil else {
+                  model.recordingPhases[cell.id] == nil, model.pendingPatternTransfer == nil else {
                 model.errorMessage = "The pattern is not available for editing."; cancelGesture(); return
             }
             source.copying = copying
@@ -1064,7 +1097,7 @@ struct SequencerView: View {
             if let pattern = model.pattern(slot: cell.slot, row: cell.row) { pianoRoll = pattern }
             cancelGesture()
         case .menu:
-            if model.recordingPattern != cell.id {
+            if model.recordingPhases[cell.id] == nil {
                 if let pattern = model.pattern(slot: cell.slot, row: cell.row) { menuPattern = pattern }
                 else { editing = SequencerPattern(slot: cell.slot, row: cell.row, name: "Pattern \(cell.row + 1)") }
             }
@@ -1084,7 +1117,7 @@ struct SequencerView: View {
                             model.instruments.first { $0.slot == instrument.slot }?.levelDB ?? -48
                         }, set: { model.mixColumn(instrument.slot, level: $0) }), in: -48...0
                 )
-                .frame(width: 90).rotationEffect(.degrees(-90)).frame(width: 38, height: 96)
+                .frame(width: 90).rotationEffect(.degrees(-90)).frame(width: max(20, width - 14), height: 96)
                 .accessibilityLabel("\(instrument.name) volume")
                 GeometryReader { proxy in
                     ZStack(alignment: .bottom) {
@@ -1093,21 +1126,25 @@ struct SequencerView: View {
                             .frame(height: max(0, proxy.size.height * meters[instrument.slot]))
                     }
                 }.frame(width: 7, height: 90)
-                Text("\(Int(instrument.levelDB))").font(.caption2.monospaced()).frame(width: 28)
             }
+            Text("\(Int(instrument.levelDB)) dB").font(.system(size: 9, design: .monospaced))
             SequencerPanKnob(value: instrument.pan) { model.mixColumn(instrument.slot, pan: $0) }
                 .accessibilityLabel("\(instrument.name) pan")
-            HStack(spacing: 4) {
+            HStack(spacing: 2) {
                 Button("M") { model.mixColumn(instrument.slot, mute: !instrument.muted) }
-                    .tint(instrument.muted ? .orange : .gray)
+                    .frame(maxWidth: .infinity, minHeight: 28)
+                    .background(instrument.muted ? Color.orange : Color.gray.opacity(0.25), in: RoundedRectangle(cornerRadius: 4))
                 Button("S") { model.soloColumn(instrument.slot) }
-                    .tint(model.soloSlots.contains(instrument.slot) ? .yellow : .gray)
-            }.buttonStyle(.bordered).font(.caption.bold())
+                    .frame(maxWidth: .infinity, minHeight: 28)
+                    .background(model.soloSlots.contains(instrument.slot) ? Color.yellow : Color.gray.opacity(0.25), in: RoundedRectangle(cornerRadius: 4))
+            }.buttonStyle(.plain).font(.caption.bold())
             Button {
                 model.stopColumn(instrument.slot, arp: true)
             } label: {
-                Label("ARP", systemImage: "stop.fill").font(.caption2.bold())
-            }.buttonStyle(.bordered).accessibilityLabel("Stop \(instrument.name) arpeggiator")
+                Label("ARP", systemImage: "stop.fill").font(.system(size: 9, weight: .bold))
+                    .frame(maxWidth: .infinity, minHeight: 28)
+                    .background(Color.gray.opacity(0.25), in: RoundedRectangle(cornerRadius: 4))
+            }.buttonStyle(.plain).accessibilityLabel("Stop \(instrument.name) arpeggiator")
         }
         .padding(.vertical, 4)
         .background(Color.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 8))

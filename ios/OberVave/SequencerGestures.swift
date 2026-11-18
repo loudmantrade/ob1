@@ -43,6 +43,7 @@ final class SequencerTouchView: UIView {
     init() {
         super.init(frame: .zero)
         backgroundColor = .clear
+        isMultipleTouchEnabled = true
         isAccessibilityElement = false
         addGestureRecognizer(touch)
     }
@@ -63,7 +64,7 @@ final class SequencerTouchView: UIView {
     }
 }
 
-final class SequencerTouchRecognizer: UIGestureRecognizer {
+final class SequencerTouchRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
     var editable = false
     var onDown: (() -> Void)?
     var onEffect: ((PatternCellGesture.Effect, CGPoint) -> Void)?
@@ -79,6 +80,12 @@ final class SequencerTouchRecognizer: UIGestureRecognizer {
     init() {
         super.init(target: nil, action: nil)
         cancelsTouchesInView = true
+        delegate = self
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        otherGestureRecognizer is SequencerTouchRecognizer
     }
 
     private func emit(_ effects: [PatternCellGesture.Effect]) {
@@ -111,7 +118,8 @@ final class SequencerTouchRecognizer: UIGestureRecognizer {
         point = touch.location(in: view.window)
         start = point; maximumDistance = 0
         let local = touch.location(in: view)
-        let central = hypot(local.x - view.bounds.midX, local.y - view.bounds.midY) <= 23
+        let radius = min(23, max(0, min(view.bounds.width, view.bounds.height) / 2 - 4))
+        let central = hypot(local.x - view.bounds.midX, local.y - view.bounds.midY) <= radius
         emit(machine.down(at: ProcessInfo.processInfo.systemUptime, editable: editable, dragAllowed: central))
         onDown?()
         schedule(after: PatternCellGesture.holdTime + 0.005)

@@ -202,8 +202,21 @@ is bar-queued, idempotent and releases input-stage Latch as well as output
 owners. Confirmation dialogs are only for explicit destructive menu actions.
 
 Completion delivery is a preallocated 16-entry single-producer/single-consumer
-FIFO, independent of recorder availability. Each accepted take reserves an
-entry before capture; unread results never get overwritten. A full FIFO rejects
+FIFO, independent of recorder availability. Each of the 16 logical instruments
+has its own preallocated recorder and immutable publication destination; one
+take per column is allowed. Simultaneous pad taps and additions before the
+body starts arm independent takes. Wait groups share the first selected
+instrument's Input/Output trigger and origin; count-in additions share the
+original countStart/body boundary. Existing playback and external clocks are
+never reset. Global Finish iterates all takes, whereas a recording-pad tap or
+column Stop addresses only its slot. Per-slot coherent phase/cell snapshots,
+progress and countdown APIs drive all recording indicators and edit guards.
+The onscreen keyboard routes to the union of armed instruments' MIDI channels,
+including multiple instruments sharing one channel; external routing is unchanged.
+
+Each accepted take reserves an
+entry before capture; unread results plus active reservations never exceed
+16 and never get overwritten. A full FIFO rejects
 the next arm with rack error 4 before changing any clip. Polling drains saved,
 cancelled and failed results in order exactly once. Scene epochs prevent an
 old completion from being applied to a newly loaded scene. Recording indicators
@@ -228,6 +241,8 @@ Playing cells have a separate outer progress ring; queued launches are dashed,
 queued Stops have a square marker. Recording is red, waiting/count-in uses a
 clock (count-in adds metronome/countdown dots), and queued completion keeps red capture progress with a square until
 the actual boundary. There are no text labels on completed pads.
+Pad width is measured from the actual keyboard channel button and height equals
+width. Progress rings, center drag regions and compact mixer columns fit that size.
 
 ### Transactional cell editing
 
