@@ -39,6 +39,148 @@ static ov_instrument_config config(uint32_t channel, uint32_t low = 0, uint32_t 
     c.parameters[rack::P_ARP_LATCH] = 1;
     return c;
 }
+struct EventSink final : rack::SynthEngine {
+    std::array<rack::music::Event, 64> received {};
+    uint32_t count = 0, stops = 0;
+    bool accepting = true;
+    void parameter(uint32_t, uint8_t) override {}
+    uint8_t parameter(uint32_t) const override { return 0; }
+    void controllerInput(uint8_t, uint8_t, uint8_t) override {}
+    bool controllerOverride(uint32_t) const override { return false; }
+    bool event(const rack::music::Event& e) override
+    {
+        if (!accepting) return false;
+        assert(count < received.size());
+        received[count++] = e;
+        return true;
+    }
+    void stop() override { ++stops; }
+    void sync(bool, uint32_t) override {}
+    void render(const rack::Timing&, int32_t* output) override { std::fill_n(output, CTL * 2, 0); }
+    uint32_t voiceLevel(uint32_t) const override { return 0; }
+};
+
+static void checkEventBoundary()
+{
+    namespace music = ob1::music;
+    ov_scene_config scene {};
+    scene.tempo = 120;
+    scene.slots[0] = {1, config(1, 48, 64)};
+    scene.slots[1] = {1, config(1, 60, 84)};
+    scene.slots[2] = {1, config(2, 48, 64)};
+    assert(ov_rack_load(&scene));
+    render();
+    EventSink* sinks[3] {};
+    for (uint32_t slot = 0; slot < 3; ++slot) {
+        auto sink = std::make_unique<EventSink>();
+        sinks[slot] = sink.get();
+        rack::scene->slots[slot]->engine = std::move(sink);
+    }
+    ov_keyboard_note_on(60, 100, 1); render();
+    assert(sinks[0]->count == 1 && sinks[1]->count == 1 && !sinks[2]->count);
+    assert(sinks[0]->received[0].source.kind == music::SourceKind::TouchKeyboard);
+    assert(sinks[0]->received[0].routing.instruments == 1 && sinks[1]->received[0].routing.instruments == 2);
+    ov_keyboard_channels(2);
+    ov_keyboard_note_off(60, 1); render();
+    assert(sinks[0]->count == 2 && sinks[1]->count == 2 && !sinks[2]->count);
+    assert(sinks[0]->received[1].source.kind == music::SourceKind::TouchKeyboard);
+    assert(sinks[0]->received[1].kind == music::Kind::NoteOff);
+    ov_keyboard_control(0xE0, 0, 64); render();
+    assert(sinks[2]->count == 1 && sinks[2]->received[0].source.kind == music::SourceKind::TouchKeyboard);
+    ov_midi_message(0x90, 50, 80); render();
+    assert(sinks[0]->count == 3 && sinks[1]->count == 2);
+    assert(sinks[0]->received[2].source.kind == music::SourceKind::ExternalMIDI);
+    ov_midi_message(0x90, 50, 0); render();
+    assert(sinks[0]->count == 4 && sinks[0]->received[3].kind == music::Kind::NoteOff);
+    ov_midi_message(0x80, 50, 0); render();
+    assert(sinks[0]->count == 4);
+
+    music::Event targeted {};
+    assert(music::decodeMIDI(0x90, 100, 100, {music::SourceKind::Pattern, 42},
+        {rack::processedFrames, 960, true}, targeted) == music::EventError::None);
+    targeted.routing = {music::Target::Instruments, 4, music::Stage::Input};
+    targeted.note = 77;
+    rack::routeEvent(targeted);
+    assert(sinks[2]->count == 2 && sinks[0]->count == 4 && sinks[1]->count == 2);
+    const auto& received = sinks[2]->received[1];
+    assert(received.source == targeted.source && received.note == 77 && received.time.tick == 960);
+    assert(received.channel == 0 && received.routing.instruments == 4);
+    targeted.kind = music::Kind::NoteOff;
+    rack::routeEvent(targeted);
+    assert(sinks[2]->count == 3);
+    targeted.routing.stage = music::Stage::Output;
+    rack::routeEvent(targeted);
+    assert(ov_rack_take_error() == 2 && sinks[2]->count == 3);
+    targeted.routing.stage = music::Stage::Input;
+    targeted.channel = 16;
+    rack::routeEvent(targeted);
+    assert(ov_rack_take_error() == 2 && sinks[2]->count == 3);
+
+    rack::outputPosition = CTL;
+    rack::clock.frame = UINT32_MAX - 15;
+    rack::processedFrames = uint64_t(rack::clock.frame);
+    const auto first = rack::processedFrames;
+    ov_midi_message_at(0x90, 62, 100, 16);
+    render(16);
+    assert(sinks[0]->count == 4);
+    render(16);
+    assert(sinks[0]->count == 5 && sinks[1]->count == 3);
+    assert(sinks[0]->received[4].time.frame == first + 32);
+    assert(sinks[0]->received[4].time.frame > UINT32_MAX);
+    ov_midi_message(0x80, 62, 0); render(16);
+    const auto stops = sinks[0]->stops;
+    sinks[0]->accepting = false;
+    ov_midi_message(0x90, 60, 100); render(16);
+    assert(ov_rack_take_error() == 2 && sinks[0]->stops == stops + 1);
+    assert(!rack::scene->slots[0]->activeNotes[0][60]);
+    ov_midi_message(0xFC, 0, 0); render(16);
+    assert(sinks[0]->stops == stops + 2);
+    ov_scene_config empty {};
+    empty.tempo = 120;
+    assert(ov_rack_load(&empty)); render();
+    ov_rack_collect();
+    std::puts("PASS shared event boundary: source identity, split/layer routing, captured keyboard releases, explicit logical targets, arp-output rejection, 32-bit deadline wrap and safe sink failure");
+}
+static void checkEventAdapter()
+{
+    namespace music = ob1::music;
+    for (uint32_t mode = 0; mode < rack::NARPMODE; ++mode) {
+        for (uint32_t latch = 0; latch < 3; ++latch) {
+            auto direct = std::make_unique<rack::OberVaveEngine>();
+            auto events = std::make_unique<rack::OberVaveEngine>();
+            for (auto* engine : {direct.get(), events.get()}) {
+                engine->parameter(rack::P_ARP_MODE, mode);
+                engine->parameter(rack::P_ARP_LATCH, latch);
+            }
+            const auto send = [&](uint32_t status, uint32_t a, uint32_t b) {
+                music::Event event {};
+                assert(music::decodeMIDI(status, a, b, {music::SourceKind::TouchKeyboard, 0}, {}, event)
+                    == music::EventError::None);
+                event = music::forInstrument(event, 0);
+                assert(events->event(event));
+                direct->midi(status, a, b);
+            };
+            const uint8_t messages[][3] = {
+                {0x90, 60, 100}, {0x90, 64, 80}, {0x90, 67, 110}, {0xB0, 64, 127},
+                {0x80, 60, 0}, {0x90, 64, 0}, {0xE0, 1, 80}, {0xB0, 1, 90},
+                {0xD0, 70, 0}, {0xA0, 67, 100}, {0x90, 69, 100}, {0x80, 67, 0},
+                {0xB0, 64, 0}, {0x80, 69, 0}, {0xB0, 120, 0}
+            };
+            uint32_t frame = 0;
+            for (const auto& message : messages) {
+                send(message[0], message[1], message[2]);
+                for (uint32_t block = 0; block < 64; ++block) {
+                    frame += CTL;
+                    rack::Timing timing {frame, 22032, double(frame) / 22032, 0};
+                    int32_t reference[CTL * 2], actual[CTL * 2];
+                    direct->render(timing, reference); events->render(timing, actual);
+                    assert(std::equal(std::begin(reference), std::end(reference), std::begin(actual)));
+                }
+            }
+        }
+    }
+    std::puts("PASS event adapter audio is bit-identical to legacy MIDI for every ARP/Latch mode, notes, bend, pressure, sustain and panic");
+}
 static void checkModulationMatrix()
 {
     using namespace rack;
@@ -275,6 +417,7 @@ static void checkControllers()
 }
 int main()
 {
+    checkEventAdapter();
     checkControllers();
     checkModulationMatrix();
     {
@@ -744,4 +887,5 @@ int main()
     std::printf("PASS transactional scene reload/lifecycle, arbitrary blocks; 16-arp render 1 second in %.3f seconds on this Mac\n", elapsed);
     assert(ov_rack_take_error() == 0);
     ov_rack_collect();
+    checkEventBoundary();
 }

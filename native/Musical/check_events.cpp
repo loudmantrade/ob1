@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-#include "Event.h"
+#include "Routing.h"
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -88,5 +88,28 @@ int main()
     generated[3].time.frame = 0;
     assert(generatedBefore(generated[3], generated[0]));
     assert(!generatedBefore(generated[0], generated[0]));
+    assert(decodeMIDI(0x95, 60, 100, keyboard, {}, event) == EventError::None);
+    for (uint32_t slot = 0; slot < instrumentCapacity; ++slot) {
+        for (uint32_t channel = 0; channel < 16; ++channel) {
+            const ChannelRoute route {uint8_t(channel), 48, 72};
+            for (uint32_t note = 0; note < 128; ++note) {
+                event.data1 = uint8_t(note);
+                assert(matches(event, slot, route) == (channel == 5 && note >= 48 && note <= 72));
+                event.kind = Kind::NoteOff;
+                assert(matches(event, slot, route) == (channel == 5));
+                event.kind = Kind::NoteOn;
+            }
+        }
+    }
+    event.routing.target = Target::Instruments;
+    for (uint32_t mask = 1; mask <= 0xFFFF; ++mask) {
+        event.routing.instruments = uint16_t(mask);
+        for (uint32_t slot = 0; slot < instrumentCapacity; ++slot)
+            assert(matches(event, slot, {15, 127, 127}) == ((mask & (1u << slot)) != 0));
+    }
+    const auto routed = forInstrument(event, 15);
+    assert(routed.routing.instruments == 0x8000 && routed.source == event.source);
+    assert(routed.time.frame == event.time.frame && routed.kind == event.kind && routed.data1 == event.data1);
     std::puts("PASS portable musical events: MIDI roundtrip, source/routing identity, validation, 64-bit time, block offsets and generated event ordering");
+    std::puts("PASS portable routing: all logical instrument masks, channel/zone matching, unfiltered releases and pinned destinations");
 }

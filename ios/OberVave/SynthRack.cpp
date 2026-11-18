@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "OberVave-Bridging-Header.h"
 #include "../../native/OberVave/Engine.h"
+#include "../../native/Musical/Routing.h"
 #include <array>
 #include <atomic>
 #include <memory>
@@ -9,9 +10,11 @@
 
 namespace rack {
 using namespace obervave;
+namespace music = ob1::music;
 constexpr uint32_t capacity = OV_RACK_CAPACITY;
 constexpr uint32_t queueSize = 4096;
 static_assert(NPARAM == OV_RACK_PARAMETERS);
+static_assert(capacity == music::instrumentCapacity);
 
 const factory_t* program(uint32_t index)
 {
@@ -106,7 +109,7 @@ struct SynthEngine {
     virtual ~SynthEngine() = default;
     virtual void parameter(uint32_t index, uint8_t value) = 0;
     virtual uint8_t parameter(uint32_t index) const = 0;
-    virtual void midi(uint8_t status, uint8_t d1, uint8_t d2) = 0;
+    virtual bool event(const music::Event& event) = 0;
     virtual void controllerInput(uint8_t status, uint8_t d1, uint8_t d2) = 0;
     virtual bool controllerOverride(uint32_t source) const = 0;
     virtual void stop() = 0;
@@ -126,9 +129,17 @@ struct OberVaveEngine final : SynthEngine {
     uint8_t parameter(uint32_t p) const override { return dsp.live_p[0].v[p]; }
     void controllerInput(uint8_t s, uint8_t d1, uint8_t d2) override { dsp.controller_input(s, d1, d2); }
     bool controllerOverride(uint32_t source) const override { return dsp.controller_override(source); }
-    void midi(uint8_t s, uint8_t d1, uint8_t d2) override
+    bool event(const music::Event& event) override
     {
-        dsp.midi(s, d1, d2, false, false);
+        music::MIDIMessage message {};
+        if (event.routing.stage != music::Stage::Input ||
+            music::encodeMIDI(event, message) != music::EventError::None) return false;
+        midi(message.status, message.data1, message.data2);
+        return true;
+    }
+    void midi(uint8_t status, uint8_t d1, uint8_t d2)
+    {
+        dsp.midi(status, d1, d2, false, false);
         dsp.engine_events();
     }
     void stop() override { dsp.engine_transport_stop(); }
@@ -211,6 +222,7 @@ std::atomic<uint32_t> keyboardMask {1}, panic {0}, peakLeft {0}, peakRight {0};
 std::atomic<Retired*> retired {nullptr};
 std::unique_ptr<Scene> scene;
 Clock clock;
+music::Frame processedFrames = 0;
 ov_scene_config capturedScene {};
 std::atomic<uint32_t> captureState {0};
 std::array<std::atomic<uint32_t>, 128> keyboardHeld {};
@@ -226,6 +238,7 @@ struct Command {
     Kind kind = Kind::MIDI;
     uint32_t slot = 0, a = 0, b = 0, c = 0, due = 0;
     bool scheduled = false;
+    music::Source source {};
     Retired* object = nullptr;
     ov_instrument_config config {};
 };
@@ -298,8 +311,20 @@ void stopAll()
     sustainDownChannels.store(0);
     stopGeneration.fetch_add(1, std::memory_order_relaxed);
 }
-void midi(uint8_t status, uint8_t d1, uint8_t d2)
+void deliver(Instrument& instrument, const music::Event& event)
 {
+    if (!instrument.engine->event(event)) { error.store(2); panic.store(1); }
+}
+void routeEvent(const music::Event& event)
+{
+    music::MIDIMessage message {};
+    if (music::encodeMIDI(event, message) != music::EventError::None ||
+        event.routing.stage != music::Stage::Input ||
+        (event.kind >= music::Kind::Clock && event.routing.target != music::Target::Channel)) {
+        error.store(2);
+        return;
+    }
+    const auto status = message.status, d1 = message.data1, d2 = message.data2;
     if (status >= 0xF8) {
         clock.midi(status);
         if (status == 0xFC) {
@@ -320,7 +345,10 @@ void midi(uint8_t status, uint8_t d1, uint8_t d2)
     }
     for (uint32_t slot = 0; slot < capacity; ++slot) {
         auto* inst = scene->slots[slot].get();
-        if (!inst || inst->config.channel != channel + 1) continue;
+        if (!inst || !music::matches(event, slot,
+            {uint8_t(inst->config.channel - 1), uint8_t(inst->config.low_note), uint8_t(inst->config.high_note)}))
+            continue;
+        const auto routed = music::forInstrument(event, slot);
         const auto source = Engine::controller_source(status, d1);
         const bool overridden = inst->engine->controllerOverride(source);
         if (source) {
@@ -334,13 +362,12 @@ void midi(uint8_t status, uint8_t d1, uint8_t d2)
             auto& held = inst->activeNotes[channel][d1];
             const bool on = kind == 0x90 && d2;
             if (on) {
-                if (d1 < inst->config.low_note || d1 > inst->config.high_note) continue;
                 held = 1;
             } else {
                 if (!held) continue;
                 held = 0;
             }
-            inst->engine->midi(status, d1, d2);
+            deliver(*inst, routed);
         } else if (kind == 0xC0) {
             const auto index = (inst->bankMSB * 128u + inst->bankLSB) * 128u + d1;
             if (index < 768) setProgram(slot, index);
@@ -355,7 +382,11 @@ void midi(uint8_t status, uint8_t d1, uint8_t d2)
             // Handle performance controllers once; the per-patch map is applied below.
             if (d1 == 1 || d1 == 7 || d1 == 64 || d1 == 120 || d1 == 121 || d1 == 123) {
                 if ((d1 == 120 || d1 == 123) && !overridden) inst->stop();
-                else inst->engine->midi(status, d1, d1 == 64 ? pedalValue : d2);
+                else {
+                    auto interpreted = routed;
+                    if (d1 == 64) interpreted.data2 = uint8_t(pedalValue);
+                    deliver(*inst, interpreted);
+                }
             }
             if (!overridden) for (uint32_t p = 0; p < NPARAM; ++p) if (inst->config.cc[p] == d1) {
                 const auto value = (uint32_t(d2) * PDEF[p].max + 63) / 127;
@@ -364,7 +395,7 @@ void midi(uint8_t status, uint8_t d1, uint8_t d2)
             }
             publish(slot);
         } else {
-            inst->engine->midi(status, d1, d2);
+            deliver(*inst, routed);
             publish(slot);
         }
     }
@@ -394,7 +425,13 @@ void apply(const Command& c)
         }
         return;
     }
-    if (c.kind == Kind::MIDI) { midi(c.a, c.b, c.c); return; }
+    if (c.kind == Kind::MIDI) {
+        music::Event event {};
+        if (music::decodeMIDI(c.a, c.b, c.c, c.source, {processedFrames}, event) != music::EventError::None)
+            error.store(2);
+        else routeEvent(event);
+        return;
+    }
     if (c.slot >= capacity) return;
     auto& pointer = scene->slots[c.slot];
     if (c.kind == Kind::Add || c.kind == Kind::Remove) {
@@ -474,6 +511,7 @@ float masterLeft = 1, masterRight = 1;
 void renderBlock()
 {
     clock.frame += CTL;
+    processedFrames += CTL;
     drain();
     if (clock.quarter && clock.frame - clock.last > FS) {
         clock.release();
@@ -547,6 +585,7 @@ void send(uint32_t status, uint32_t d1, uint32_t d2, uint32_t frame, bool timed,
     }
     Command c;
     c.a = status; c.b = d1; c.c = d2; c.due = frame; c.scheduled = timed;
+    c.source.kind = external ? music::SourceKind::ExternalMIDI : music::SourceKind::TouchKeyboard;
     enqueue(c);
 }
 } // namespace rack
@@ -745,12 +784,14 @@ void ov_keyboard_note_off(uint32_t note, uint32_t channels)
 {
     if (note > 127) return;
     const auto mask = rack::keyboardHeld[note].fetch_and(~channels) & channels;
-    for (uint32_t ch = 0; ch < 16; ++ch) if (mask & (1u << ch)) ov_midi_message(0x80 | ch, note, 0);
+    for (uint32_t ch = 0; ch < 16; ++ch) if (mask & (1u << ch))
+        rack::send(0x80 | ch, note, 0, 0, false, false);
 }
 void ov_keyboard_control(uint32_t status, uint32_t d1, uint32_t d2)
 {
     const auto mask = rack::keyboardMask.load();
-    for (uint32_t ch = 0; ch < 16; ++ch) if (mask & (1u << ch)) ov_midi_message((status & 0xF0) | ch, d1, d2);
+    for (uint32_t ch = 0; ch < 16; ++ch) if (mask & (1u << ch))
+        rack::send((status & 0xF0) | ch, d1, d2, 0, false, false);
 }
 void ov_all_notes_off(void) { rack::panic.store(1); }
 void ov_set_sustain_inverted(uint32_t inverted) { rack::sustainInverted.store(inverted != 0); }

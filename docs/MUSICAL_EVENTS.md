@@ -72,3 +72,47 @@ Tests cover all channel statuses/channels/pitches and representative velocity
 extremes, zero-velocity normalization, pressure/bend, invalid inputs, explicit
 instrument/output context, signed musical time, 64-bit frame boundaries,
 irregular block offsets and stable generated-event ordering.
+
+## Standalone integration
+
+The existing rack command queue retains raw MIDI/deadlines and now also keeps
+source kind. At dispatch it decodes to an `Event`; `routeEvent` validates the
+event and selects destinations through `Routing.h`. Channel targets preserve
+splits/layers and only filter Note On by zone. Explicit instrument masks bypass
+channel/zone selection and pin each delivered event to its logical slot.
+Note Off still requires that slot's existing active-note entry.
+
+The rack's `SynthEngine::event` boundary carries source, pinned destination,
+note ID and timing to adapters; the OberVave adapter converts to its unchanged
+MIDI/DSP interface. Raw controllers, legacy CC maps and sustain interpretation
+retain their existing handling. Keyboard Off and wheels now retain keyboard
+source identity rather than being relabeled as external MIDI.
+
+`processedFrames` extends the existing render/control counter to 64 bits; it
+advances exactly once per existing control block, not on a UI timer or a new
+clock. Events created by the legacy command adapter carry the **actual dispatch
+boundary**, not an invented sample-accurate timestamp. The original 32-bit
+scheduled deadlines and buffer behavior are unchanged, including wraparound.
+User-constructed events can carry their requested musical/sample position.
+Future processors must distinguish requested scheduling time from actual
+emission time when making output recordings.
+
+This boundary deliberately rejects output-stage events until the DSP bypass is
+implemented: replaying them through the current ARP would silently arpeggiate
+them twice. Invalid/unsupported events report the rack's existing invalid-input
+error. A failed engine delivery reports an error and requests the existing
+bounded panic cleanup rather than leaving a possibly half-delivered layer held.
+
+This is not yet a full note-ownership router. The existing per-slot/channel/
+pitch activity and Key-Lock destination capture are retained. The model
+transports nonzero note IDs but does not yet allocate or match them. Distinct
+external endpoints still share source ID zero. Per-source overlapping-note
+ownership, destination generations, endpoint parsing and feedback protection
+must be completed with arpeggiator/output integration before external routing
+is exposed. No new public MIDI output or pattern UI is enabled here.
+
+Additional rack tests compare event-adapter audio bit-for-bit with direct
+legacy MIDI in all ARP/Latch modes. A mock engine verifies split/layer dispatch,
+source and pinned-target context, keyboard releases after channel selection
+changes, zero-velocity Off, explicit logical targeting, output-stage rejection,
+32-bit deadline wrap with 64-bit delivery time, and failed-sink cleanup.

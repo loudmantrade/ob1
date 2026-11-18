@@ -158,8 +158,11 @@ working tree. Do not merge or push feature work without an explicit request.
 
 ## Current delivery status
 
-Baseline inspection and the portable event representation/tests are complete.
-See [the event contract](MUSICAL_EVENTS.md). The event representation is not yet
-wired into live routing. The existing synthesizer remains the production reference. Shared
+Baseline inspection, the portable event representation/tests and the first
+standalone event-routing boundary are complete. See
+[the event contract and integration limits](MUSICAL_EVENTS.md). Source context
+now survives the existing queue and logical destination selection is explicit.
+The existing per-channel/pitch activity remains; new per-source ownership and
+output-stage routing are not enabled. The existing synthesizer remains the production reference. Shared
 arpeggiation, pattern playback/recording, pattern UI and external MIDI output
 are planned, not implemented by this document.
