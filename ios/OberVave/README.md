@@ -57,6 +57,19 @@ Release envelopes and chorus/delay/reverb tails continue naturally; effects
 are neither reset nor muted. New live input after Stop plays immediately.
 There is no sequencer or external MIDI Stop transmission yet.
 
+In MIDI settings / **Sustain Pedal**, **Triple-tap Sustain to Stop All**
+optionally triggers the same global stop on the third pedal release.
+Each press must last at most 300 ms, and the release-to-next-press gap must
+not exceed one quarter note at the current internal or MIDI-clock tempo
+(500 ms at 120 BPM). Recognition uses polarity-corrected CC64 with the existing
+96/31 hysteresis; repeated values and middle-range chatter do not add taps.
+Each connection/channel is independent. A long press/gap breaks the sequence;
+Stop, disconnect, polarity changes and changing the option reset recognition.
+Ordinary pedal Sustain remains active during taps. This global gesture is
+recognized even when an instrument overrides CC64, or no instrument matches
+the pedal channel. The option defaults off and persists on the device, not
+in scenes or AU state. No double/triple-tap MIDI is transmitted externally.
+
 LFO Rate displays Hz to two decimal places, calculated from the DSP phase
 increment table and the 44.1 kHz / 16-sample control rate. The parameter's
 0-127 scale is nonlinear; correcting the readout does not change saved sounds.

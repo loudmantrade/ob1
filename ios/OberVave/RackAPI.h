@@ -63,6 +63,8 @@ void ov_keyboard_control(uint32_t status, uint32_t data1, uint32_t data2);
 void ov_key_learn(uint32_t channel);
 uint32_t ov_take_key_learn(void);
 void ov_set_sustain_inverted(uint32_t inverted);
+/* Device preference, off by default: 3 presses <=300 ms, gaps <=1 quarter note. */
+void ov_set_sustain_stop_gesture(uint32_t enabled);
 /* Last incoming CC64: bit 16 valid, bits 8...11 channel (0...15), bits 0...6 raw value. */
 uint32_t ov_sustain_input(void);
 /* Hysteresis state: press >=96, release <=31 after polarity normalization. */

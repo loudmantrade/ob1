@@ -4,6 +4,7 @@
 #include "../../native/Musical/Routing.h"
 #include "../../native/Musical/MIDIIngress.h"
 #include "../../native/Musical/NoteOwnership.h"
+#include "../../native/Musical/SustainGesture.h"
 #include "../../native/OberVave/ArpeggiatorAdapter.h"
 #include <array>
 #include <atomic>
@@ -295,6 +296,9 @@ struct PedalOwner {
     bool down = false;
 };
 std::array<PedalOwner, 128> pedalOwners {};
+music::SustainGesture sustainGesture;
+std::atomic<uint32_t> sustainGestureSetting {0};
+uint32_t appliedGestureSetting = 0;
 
 void publishPedals()
 {
@@ -394,6 +398,7 @@ void stopAll()
         inst->stop();
     }
     pedalOwners = {};
+    sustainGesture.clear();
     sustainDownChannels.store(0);
     stopGeneration.fetch_add(1, std::memory_order_relaxed);
 }
@@ -429,9 +434,23 @@ void routeEvent(const music::Event& event)
         return;
     }
     const uint32_t channel = status & 15, kind = status & 0xF0;
+    bool gestureStop = false;
     uint16_t pedalDestinations = 0;
     if (kind == 0xB0 && d1 == 64) {
         const uint32_t value = sustainInverted.load() ? 127 - d2 : d2;
+        const auto setting = sustainGestureSetting.load();
+        if (appliedGestureSetting != setting) {
+            sustainGesture.clear();
+            appliedGestureSetting = setting;
+        }
+        if (setting & 1u) {
+            const auto result = sustainGesture.input(event.source, channel, value,
+                processedFrames, clock.length(), FS);
+            if (result == music::SustainGesture::Result::Full) {
+                error.store(1); panic.store(1); return;
+            }
+            gestureStop = result == music::SustainGesture::Result::Stop;
+        }
         PedalOwner* owner = nullptr;
         PedalOwner* available = nullptr;
         for (auto& pedal : pedalOwners) {
@@ -518,6 +537,10 @@ void routeEvent(const music::Event& event)
             publish(slot);
         }
     }
+    if (gestureStop) {
+        stopAll();
+        scheduledCount = 0;
+    }
 }
 void apply(const Command& c)
 {
@@ -527,6 +550,7 @@ void apply(const Command& c)
         return;
     }
     if (c.kind == Kind::SourceClose) {
+        sustainGesture.releaseSource(c.source);
         uint32_t retained = 0;
         for (uint32_t i = 0; i < scheduledCount; ++i)
             if (!(scheduled[i].kind == Kind::MIDI && scheduled[i].source == c.source))
@@ -967,7 +991,17 @@ void ov_keyboard_control(uint32_t status, uint32_t d1, uint32_t d2)
         rack::send((status & 0xF0) | ch, d1, d2, 0, false, false);
 }
 void ov_all_notes_off(void) { rack::panic.store(1); }
-void ov_set_sustain_inverted(uint32_t inverted) { rack::sustainInverted.store(inverted != 0); }
+void ov_set_sustain_inverted(uint32_t inverted)
+{
+    if (rack::sustainInverted.exchange(inverted != 0) != (inverted != 0))
+        rack::sustainGestureSetting.fetch_add(2);
+}
+void ov_set_sustain_stop_gesture(uint32_t enabled)
+{
+    auto setting = rack::sustainGestureSetting.load();
+    while (!rack::sustainGestureSetting.compare_exchange_weak(setting,
+        ((setting + 2u) & ~1u) | (enabled ? 1u : 0u))) {}
+}
 uint32_t ov_sustain_input(void) { return rack::sustainInput.load(); }
 uint32_t ov_sustain_down_channels(void) { return rack::sustainDownChannels.load(); }
 void ov_controller_learn(uint32_t armed)

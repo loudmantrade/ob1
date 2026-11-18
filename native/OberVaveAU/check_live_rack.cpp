@@ -388,6 +388,62 @@ static void checkStopAll()
     std::puts("PASS Stop All: all 16 instruments/all ARP modes, direct notes/Latch/Sustain, scheduled cancellation, unchanged parameters/FX memory, audible effect tails, repeat/rearm/FIFO and overflow fallback");
 }
 
+static void checkPedalStop()
+{
+    ov_scene_config scene {};
+    scene.tempo = 120;
+    for (uint32_t slot = 0; slot < rack::capacity; ++slot) {
+        scene.slots[slot] = {1, config(slot + 1, slot % rack::NARPMODE)};
+        scene.slots[slot].config.parameters[rack::P_ARP_LATCH] = 1;
+    }
+    auto pedal = [&](uint32_t value, uint32_t duration) {
+        ov_midi_message(0xB0, 64, value); render(duration);
+    };
+    for (bool inverted : {false, true}) {
+        ov_set_sustain_inverted(inverted);
+        for (bool enabled : {false, true}) {
+            assert(ov_rack_load(&scene)); render();
+            ov_set_sustain_stop_gesture(enabled);
+            ov_keyboard_channels(0xFFFF);
+            ov_note_on(60, 100); render();
+            ov_midi_message_at(0x90, 67, 100, ov_audio_frame() + 44100);
+            const auto generation = ov_rack_stop_generation();
+            for (uint32_t tap = 0; tap < 3; ++tap) {
+                pedal(inverted ? 0 : 127, 4416);
+                pedal(inverted ? 127 : 0, 4416);
+                assert(ov_rack_stop_generation() == generation + (enabled && tap == 2 ? 1 : 0));
+            }
+            for (uint32_t slot = 0; slot < rack::capacity; ++slot) {
+                assert(held(slot) == (enabled ? 0 : 1));
+                assert(engine(slot).parameter(rack::P_ARP_LATCH) == 1);
+            }
+            assert(rack::scheduledCount == (enabled ? 0 : 1));
+        }
+    }
+    // Disabling/re-enabling cancels an incomplete gesture, even with no MIDI between setters.
+    ov_set_sustain_inverted(0);
+    assert(ov_rack_load(&scene)); render();
+    for (uint32_t tap = 0; tap < 2; ++tap) { pedal(127, 4416); pedal(0, 4416); }
+    ov_set_sustain_stop_gesture(0); ov_set_sustain_stop_gesture(1);
+    const auto generation = ov_rack_stop_generation();
+    pedal(127, 4416); pedal(0, 4416);
+    assert(ov_rack_stop_generation() == generation);
+    // Future keyboard input can already be queued when the third pedal release is dispatched.
+    pedal(127, 4416); pedal(0, 4416);
+    pedal(127, 4416);
+    ov_midi_message(0xB0, 64, 0);
+    ov_note_on(62, 100);
+    render();
+    assert(ov_rack_stop_generation() == generation + 1 && held(0) == 1);
+    ov_rack_select(0); ov_set_parameter(rack::P_ARP_LATCH, 0); render();
+    ov_note_off(62); render();
+    assert(!held(0));
+    ov_set_sustain_stop_gesture(0);
+    assert(ov_rack_stop_all()); render();
+    assert(!ov_rack_take_error());
+    std::puts("PASS live optional Sustain Stop gesture: normal/inverted polarity, disabled default, three releases, all-part Latch stop, scheduled cancellation and setting reset");
+}
+
 int main()
 {
     checkAudio();
@@ -395,4 +451,5 @@ int main()
     checkClock();
     checkRack();
     checkStopAll();
+    checkPedalStop();
 }

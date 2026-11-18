@@ -370,6 +370,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published private(set) var audioLatencyEstimateMS = 0.0
     @Published private(set) var isAudioRunning = false
     @Published private(set) var sustainInverted = false
+    @Published private(set) var sustainStopGesture = false
     @Published private(set) var sustainInput: UInt32 = 0
     @Published private(set) var sustainDownChannels: UInt32 = 0
 
@@ -392,6 +393,12 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         if latest != sustainInput { sustainInput = latest }
         let channels = ov_sustain_down_channels()
         if channels != sustainDownChannels { sustainDownChannels = channels }
+    }
+
+    func setSustainStopGesture(_ enabled: Bool) {
+        sustainStopGesture = enabled
+        ov_set_sustain_stop_gesture(enabled ? 1 : 0)
+        UserDefaults.standard.set(enabled, forKey: "sustain-stop-gesture")
     }
 
     let programNames: [String]
@@ -451,6 +458,8 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         super.init()
         sustainInverted = UserDefaults.standard.bool(forKey: "sustain-inverted")
         ov_set_sustain_inverted(sustainInverted ? 1 : 0)
+        sustainStopGesture = UserDefaults.standard.bool(forKey: "sustain-stop-gesture")
+        ov_set_sustain_stop_gesture(sustainStopGesture ? 1 : 0)
         arpLatencyAuto = UserDefaults.standard.object(forKey: "arp-latency-auto") as? Bool ?? true
         let manual = UserDefaults.standard.double(forKey: "arp-latency-manual-ms")
         arpLatencyManualMS = manual.isFinite ? min(500, max(-500, manual)) : 0
@@ -3114,6 +3123,11 @@ private struct BluetoothMIDIView: View {
                 }
 
                 Section("Sustain Pedal") {
+                    Toggle("Triple-tap Sustain to Stop All", isOn: Binding(
+                        get: { model.sustainStopGesture },
+                        set: { model.setSustainStopGesture($0) }))
+                    Text("Three presses of 300 ms or less, with gaps no longer than one quarter note at the current tempo. Stops all playback on the third release, preserving effect tails. Each MIDI source/channel is recognized separately; normal Sustain still works. This device setting is off by default and is not saved in scenes.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Toggle("Invert Sustain polarity", isOn: Binding(
                         get: { model.sustainInverted },
                         set: { model.setSustainInverted($0) }))

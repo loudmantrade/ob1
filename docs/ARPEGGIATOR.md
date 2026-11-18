@@ -303,6 +303,21 @@ reports an error and uses existing Panic cleanup. Tests require unchanged FX
 memory at Stop and audible tails afterward, in addition to all-mode,
 all-instrument cleanup, FIFO/rearm and overflow behavior.
 
+The optional standalone Sustain triple-tap setting invokes the same
+audio-owner stop at the third release. `Musical/SustainGesture.h` recognizes
+three polarity-normalized CC64 down/up transitions, each down <=300 ms and
+each intervening up <= the current quarter-note frame length. It runs once
+per source/channel event before rack fan-out, not per instrument; recognition
+is global and independent of per-patch CC64 OVERRIDE. Input uses the actual
+64-bit dispatch frame/control boundary and shared clock, with no UI timer.
+Long presses/gaps reset the series, repeated/middle values preserve edges,
+and source disconnect/Stop/option/polarity changes reset relevant state.
+The bounded detector reports capacity failure through existing error/Panic.
+`sustain_gesture` tests exact inclusive boundaries, tempo extremes, source/
+channel isolation, reset, chatter, overflow and 64-bit time. Production rack
+tests cover normal/inverted polarity, enable/disable, all-part Latch release
+and scheduled cancellation. Device persistence is outside scene/AU state.
+
 `SynthRack.cpp` constructs one `NativeEngine<true>` per logical instrument and
 attaches its processor to the initial slot/channel with a monotonically
 allocated, non-reused processor-lifetime source ID. ID exhaustion rejects engine
