@@ -299,18 +299,18 @@ OBV_LOCAL void voice_trigger(uint32_t part, uint32_t note, uint32_t vel)
 }
 
 /* the key (or the arp, the sequencer) let go of a note. In MONO / UNISON a key still held takes over (legato) */
-OBV_LOCAL void voice_release(uint32_t part, uint32_t note, uint32_t from_arp)
+OBV_LOCAL void voice_release_held(uint32_t part, uint32_t note, uint32_t resume, uint32_t last_note)
 {
     const uint8_t *pv = pt[part].p->v;
     uint32_t v, mode = pv[P_MODE];
-    if ((mode == M_MONO || mode == M_UNISON) && !from_arp && nheld[part] && pv[P_ARP_MODE] == A_OFF) {
+    if ((mode == M_MONO || mode == M_UNISON) && resume && pv[P_ARP_MODE] == A_OFF) {
         uint32_t n = grp_n[part], i;
         voice_t *v0 = &vc[grp_v[part][0]];
         if (n && v0->gate && v0->part == part && v0->grp && v0->note == note) {
             for (i = 0; i < n; i++) {
                 voice_t *w = &vc[grp_v[part][i]];
                 if (w->part != part || !w->grp) continue;   /* (a card another sound took meanwhile) */
-                w->note = held[part][nheld[part] - 1u].note;
+                w->note = last_note;
                 w->target16 = (int32_t)w->note << 16;
                 if (!pv[P_GLIDE]) w->pitch16 = w->target16;
             }
@@ -320,6 +320,12 @@ OBV_LOCAL void voice_release(uint32_t part, uint32_t note, uint32_t from_arp)
     }
     for (v = 0; v < NV; v++)
         if (vc[v].gate && vc[v].note == note && vc[v].part == part) vc[v].gate = 0;
+}
+
+OBV_LOCAL void voice_release(uint32_t part, uint32_t note, uint32_t from_arp)
+{
+    voice_release_held(part, note, !from_arp && nheld[part],
+                       nheld[part] ? held[part][nheld[part] - 1u].note : 0);
 }
 
 OBV_LOCAL void voices_release_all(void)

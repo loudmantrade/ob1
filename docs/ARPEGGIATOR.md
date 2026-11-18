@@ -59,6 +59,11 @@ direct (non-arpeggiated) voices. Enabling ARP must release/hand over those voice
 in the adapter, matching legacy `voices_release_part`, without emitting spurious
 arpeggiated notes into a recorder.
 
+`lastHeld(pitch)` exposes the most recent remaining held key without exposing
+mutable storage. It includes Sustain-retained keys and follows repeat-pitch
+replacement and bounded oldest-key eviction. It returns `false` without
+changing `pitch` when empty. This is a pitch-order view, not source ownership.
+
 The original random generator is shared with DSP LFO state. The portable
 processor has its own explicit seed; reference tests inject the original state
 at each tick to compare exactly. Live extraction must choose and test the
@@ -94,6 +99,27 @@ without disabling the bypass. The normal `midi` entry rejects raw notes with
 
 This is a low-level DSP capability, not live extracted-ARP routing. Do not feed
 generated notes through the raw MIDI entry.
+
+### Direct notes while ARP is Off
+
+`external_direct_note(part, pitch, velocity, hasHeld, lastHeld)` is a separate
+entry for ordinary physical input with the external scheduler enabled and
+the current part's ARP mode Off. It does not update a second DSP held-key list.
+The caller first updates the portable processor's held state and supplies
+`lastHeld` for release. Direct Note On clears that key's stale poly-pressure
+state, just like fresh raw input; generated `external_note` does not.
+
+Direct release reuses the same `voice_release_held` implementation as legacy
+DSP input. In Mono/Unison the last remaining key resumes with the existing
+glide/legato semantics instead of releasing the group or retriggering it.
+Generated Note Off deliberately never uses this fallback.
+
+The caller must interpret Sustain first: defer direct releases while held
+by the pedal; on pedal release, remove unheld keys before delivering their
+releases in original held-key order. This API does not independently implement
+Sustain, controller OVERRIDE, recording, or input routing. Invalid arguments,
+non-external ownership or an enabled ARP mode return `false` before mutation.
+Production input dispatch and direct/generated mode handover are still pending.
 
 ## Effective-patch control-boundary bridge
 
@@ -185,3 +211,10 @@ Tests change tempo, host phase and signed latency while notes are held and
 check that the saved base patch is restored after every render. Callback
 contract tests cover per-part order, multiple control ticks in one render,
 64-bit timestamps over DSP counter wrap, scoped lifetime and partial failure.
+
+Direct Off-mode tests additionally compare 8,064 rendered stereo blocks across
+all four voice modes, all Latch settings and glide on/off. They cover ordered
+Mono/Unison fallback, repeated notes, Sustain-deferred release and pedal cleanup,
+physical-key pressure reset and invalid-call rejection. Portable tests cover
+the last-held view through eviction, replacement, sustain and Stop. These are
+low-level lifecycle tests, not certification of a live platform adapter.

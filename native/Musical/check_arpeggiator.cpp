@@ -49,6 +49,28 @@ static Event pedal(bool down, Time time = {})
 
 static void checkPortable()
 {
+    {
+        ArpeggiatorProcessor keys;
+        Recorder unused;
+        uint8_t last = 0;
+        assert(!keys.lastHeld(last));
+        for (uint8_t pitch = 40; pitch < 60; ++pitch) {
+            assert(keys.input(note(pitch), unused) == ArpResult::Bypassed);
+            assert(keys.lastHeld(last) && last == pitch);
+        }
+        assert(keys.heldCount() == keys.heldCapacity);
+        assert(keys.input(note(50), unused) == ArpResult::Bypassed);
+        assert(keys.lastHeld(last) && last == 50);
+        assert(keys.input(note(50, false), unused) == ArpResult::Bypassed);
+        assert(keys.lastHeld(last) && last == 59);
+        assert(keys.input(pedal(true), unused) == ArpResult::Ok);
+        assert(keys.input(note(59, false), unused) == ArpResult::Bypassed);
+        assert(keys.lastHeld(last) && last == 59);
+        assert(keys.input(pedal(false), unused) == ArpResult::Ok);
+        assert(keys.lastHeld(last) && last == 58);
+        assert(keys.stop({}, unused) == ArpResult::Ok);
+        assert(!keys.lastHeld(last) && unused.events.empty());
+    }
     ArpeggiatorProcessor arp;
     Recorder out;
     ArpSettings settings;

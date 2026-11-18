@@ -171,6 +171,9 @@ legacy audio/voice path; it is disabled by default and not enabled by either
 platform adapter. An optional control-boundary callback and effective
 ARP/clock snapshot bridge are implemented and audio-tested with temporary
 controller modulation and per-instance RNG synchronization. Production
-input-time/render-time settings, direct-voice handover and source ownership
-remain separate live-extraction gates. Pattern playback/recording, pattern UI
-and external MIDI output are not yet implemented.
+input-time/render-time settings, direct/generated handover and source ownership
+remain separate live-extraction gates. The direct Off-mode DSP entry and
+portable last-held-key view now preserve legacy Mono/Unison fallback without
+duplicating the held-key list; Sustain/pressure/direct-voice parity tests pass.
+This capability is not yet a production input adapter. Pattern playback/recording,
+pattern UI and external MIDI output are not yet implemented.

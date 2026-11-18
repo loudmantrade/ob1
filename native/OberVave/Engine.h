@@ -101,6 +101,20 @@ struct Engine {
         return true;
     }
 
+    // The caller has already updated its held keys and interpreted Sustain.
+    bool external_direct_note(uint32_t part, uint32_t note, uint32_t velocity,
+                              bool hasHeld, uint32_t lastHeld = 0)
+    {
+        if (part >= NPART || note > 127 || velocity > 127 ||
+            (hasHeld && lastHeld > 127) || !externalArpeggiator[part] ||
+            pt[part].p->v[P_ARP_MODE] != A_OFF) return false;
+        if (velocity) {
+            poly_pressure_valid[note] = 0;
+            voice_trigger(part, note, velocity);
+        } else voice_release_held(part, note, hasHeld, lastHeld);
+        return true;
+    }
+
     static uint32_t controller_source(uint8_t status, uint8_t d1)
     {
         switch (status & 0xF0) {

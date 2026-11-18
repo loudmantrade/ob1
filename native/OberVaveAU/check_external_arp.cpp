@@ -350,6 +350,103 @@ static void checkCallbackContract()
     std::puts("PASS control-boundary callback: per-part order/offsets, 64-bit time across DSP counter wrap, scoped lifetime, explicit failure, failed-part cleanup and independent other parts");
 }
 
+static void checkDirectVoices()
+{
+    uint64_t checked = 0;
+    for (uint32_t mode = 0; mode < 4; ++mode)
+        for (const uint8_t glide : {0, 60})
+            for (uint32_t latch = 0; latch < 3; ++latch) {
+                auto legacy = std::make_unique<Engine>();
+                auto external = std::make_unique<Engine>();
+                music::ArpeggiatorProcessor keys;
+                music::ArpSettings settings;
+                settings.latch = music::Latch(latch);
+                const auto noGenerated = [](const music::Event&) { std::abort(); return false; };
+                auto sink = noGenerated;
+                assert(keys.configure(settings, {}, sink) == music::ArpResult::Ok);
+                uint8_t last = 99;
+                assert(!keys.lastHeld(last) && last == 99);
+                for (auto* engine : {legacy.get(), external.get()}) {
+                    engine->initialize();
+                    engine->apply_parameter(P_MODE, mode);
+                    engine->apply_parameter(P_ARP_MODE, A_OFF);
+                    engine->apply_parameter(P_ARP_LATCH, latch);
+                    engine->apply_parameter(P_GLIDE, glide);
+                }
+                assert(external->set_external_arpeggiator(0, true));
+                const auto release = [&](uint32_t pitch) {
+                    uint8_t lastHeld = 0;
+                    const bool hasHeld = keys.lastHeld(lastHeld);
+                    assert(external->external_direct_note(0, pitch, 0, hasHeld, lastHeld));
+                };
+                const auto compare = [&]() {
+                    for (uint32_t block = 0; block < 24; ++block) {
+                        int32_t reference[CTL * 2] {}, actual[CTL * 2] {};
+                        legacy->render_audio(reference, CTL);
+                        external->render_audio(actual, CTL);
+                        assert(std::equal(std::begin(reference), std::end(reference), std::begin(actual)));
+                        assert(legacy->vseq == external->vseq && legacy->rnd_state == external->rnd_state);
+                        for (uint32_t v = 0; v < NV; ++v) {
+                            assert(legacy->vc[v].gate == external->vc[v].gate);
+                            assert(legacy->vc[v].note == external->vc[v].note);
+                            assert(legacy->vc[v].target16 == external->vc[v].target16);
+                            assert(legacy->vc[v].ae.level == external->vc[v].ae.level);
+                        }
+                        ++checked;
+                    }
+                    assert(legacy->nheld[0] == keys.heldCount());
+                    assert(!external->nheld[0]);
+                };
+                bool sustain = false;
+                const auto note = [&](uint8_t pitch, uint8_t velocity) {
+                    music::Event event {};
+                    assert(music::decodeMIDI(0x90, pitch, velocity, {}, {}, event) == music::EventError::None);
+                    legacy->poly_pressure_valid[pitch] = external->poly_pressure_valid[pitch] = 1;
+                    assert(legacy->midi(0x90, pitch, velocity, false, false));
+                    legacy->engine_events();
+                    assert(keys.input(event, sink) == music::ArpResult::Bypassed);
+                    if (velocity) {
+                        uint8_t held = 0;
+                        assert(keys.lastHeld(held) && held == pitch);
+                        assert(external->external_direct_note(0, pitch, velocity, true, held));
+                        assert(!external->poly_pressure_valid[pitch]);
+                    } else if (!sustain) release(pitch);
+                    compare();
+                };
+                note(60, 100); note(64, 80); note(67, 110);
+                note(64, 0); note(67, 0); // Mono/Unison return to 60 without retrigger.
+                note(60, 100); // Repeated pitch replaces its held-key position.
+                note(60, 0);
+                music::Event pedal {};
+                assert(music::decodeMIDI(0xB0, 64, 127, {}, {}, pedal) == music::EventError::None);
+                assert(legacy->midi(0xB0, 64, 127, false, false));
+                legacy->engine_events();
+                assert(keys.input(pedal, sink) == music::ArpResult::Ok);
+                sustain = true;
+                note(60, 100); note(64, 90); note(67, 80);
+                note(60, 0); note(67, 0);
+                pedal.data2 = 0;
+                assert(legacy->midi(0xB0, 64, 0, false, false));
+                legacy->engine_events();
+                assert(keys.input(pedal, sink) == music::ArpResult::Ok);
+                sustain = false;
+                release(60); release(67);
+                compare();
+                note(64, 0);
+                assert(!external->external_direct_note(NPART, 60, 100, false));
+                assert(!external->external_direct_note(0, 128, 100, false));
+                assert(!external->external_direct_note(0, 60, 128, false));
+                assert(!external->external_direct_note(0, 60, 0, true, 128));
+                external->apply_parameter(P_ARP_MODE, A_UP);
+                assert(!external->external_direct_note(0, 60, 100, false));
+                external->apply_parameter(P_ARP_MODE, A_OFF);
+                assert(external->set_external_arpeggiator(0, false));
+                assert(!external->external_direct_note(0, 60, 100, false));
+            }
+    std::printf("PASS direct Off-mode voices: %llu bit-identical stereo blocks, all voice modes/Latch settings, glide, ordered mono fallback, repeated notes, Sustain cleanup, physical-key pressure reset and invalid-call rejection\n",
+        static_cast<unsigned long long>(checked));
+}
+
 int main()
 {
     checkAudio(false);
@@ -357,4 +454,5 @@ int main()
     checkEffectiveControllers();
     checkCallbackContract();
     checkTransitions();
+    checkDirectVoices();
 }

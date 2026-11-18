@@ -42,6 +42,12 @@ public:
     uint32_t counter() const { return counter_; }
     uint32_t randomState() const { return random_; }
     bool faulted() const { return fault_ != ArpResult::Ok; }
+    bool lastHeld(uint8_t& pitch) const
+    {
+        if (!heldCount_) return false;
+        pitch = held_[heldCount_ - 1].pitch;
+        return true;
+    }
 
     ArpResult destination(uint32_t instrument, uint32_t channel)
     {
