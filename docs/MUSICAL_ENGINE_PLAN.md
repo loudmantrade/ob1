@@ -198,5 +198,14 @@ ARP/Latch modes, mixed controller/UI lifecycle operations, start grids and
 signed live compensation; it verifies the actual 16-slot factory, source-ID
 exhaustion and 64-bit timing. Legacy DSP-state regression suites remain
 explicit reference builds, not the production selection.
-Pattern playback/recording,
-pattern UI and external MIDI output are not yet implemented.
+Pattern increment C6 is complete: the bounded portable
+[pattern editing model](PATTERNS.md) supports 16 independent patterns,
+1,024 notes each, stable IDs, original 960-PPQ timing, non-destructive
+start/end quantization, note and pattern CRUD/duplication, length/loop and
+explicit logical routing/stage. Versioned immutable snapshot data validates
+transactionally before replacement; there is no raw-struct file format.
+Boundary, capacity/ID exhaustion, UTF-8, rounding-oracle and 20,000 mixed-edit
+tests run in `musical_patterns`. This is a control-thread model and does not
+yet alter the live rack or expose an unfinished sequencer UI.
+Pattern playback/recording, scene/file persistence, pattern UI and external
+MIDI output are not yet implemented.

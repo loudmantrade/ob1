@@ -52,9 +52,10 @@ Rust, Cargo and the old FM-1 plugin build are not required.
 
 - `ios/OberVave/`: standalone app, scene rack and shared SwiftUI controls.
 - `native/OberVave/`: shared native engine adapter.
-- `native/Musical/`: portable musical events, extracted arpeggiator and tests;
-  see the [event contract](docs/MUSICAL_EVENTS.md) and
-  [arpeggiator compatibility gate](docs/ARPEGGIATOR.md).
+- `native/Musical/`: portable events, arpeggiator, pattern model and tests;
+  see the [event contract](docs/MUSICAL_EVENTS.md),
+  [arpeggiator compatibility gate](docs/ARPEGGIATOR.md) and
+  [bounded pattern editing/snapshot model](docs/PATTERNS.md).
   Development follows the [incremental architecture plan](docs/MUSICAL_ENGINE_PLAN.md).
 - `native/OberVaveAU/`: AU wrapper, editor bridge and regression tests.
 - `fw/obervave/`: required OberVave DSP headers, factory patches, generated
