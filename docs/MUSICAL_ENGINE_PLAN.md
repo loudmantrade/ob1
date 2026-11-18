@@ -158,7 +158,8 @@ working tree. Do not merge or push feature work without an explicit request.
 
 ## Current delivery status
 
-Only the baseline inspection is complete at the initial documentation commit.
-The existing synthesizer remains the production reference. Shared
+Baseline inspection and the portable event representation/tests are complete.
+See [the event contract](MUSICAL_EVENTS.md). The event representation is not yet
+wired into live routing. The existing synthesizer remains the production reference. Shared
 arpeggiation, pattern playback/recording, pattern UI and external MIDI output
 are planned, not implemented by this document.
