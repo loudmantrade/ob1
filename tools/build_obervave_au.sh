@@ -3,8 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$PWD
-build="$root/target/obervave-au"
-sdk="${AUDIOUNIT_SDK:-$root/target/plugin/build/cpm/AudioUnitSDK}"
+build="${BUILD_DIR:-$root/target/obervave-au}"
+sdk="${AUDIOUNIT_SDK:-}"
 cmake -S native/OberVaveAU -B "$build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="${ARCH:-$(uname -m)}" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \

@@ -1,8 +1,7 @@
 # Native OberVave Audio Unit
 
 OberVave AUv2 is a stereo software instrument for macOS 13 or later. It runs the
-OberVave C synthesizer directly, without emulating the FM-1 CPU, and is separate
-from the emulator-based FM-1 plug-in.
+OberVave C synthesizer directly, without emulating the FM-1 CPU.
 
 ## Build, test and install
 
@@ -18,10 +17,10 @@ and runs Apple's AU validator. Existing FM-1 components are not changed.
 `NO_INSTALL=1` skips installation and system AU validation.
 `SIGN_IDENTITY` optionally selects a signing identity.
 
-The build reuses the Apple AudioUnitSDK cached by the FM-1 plug-in build if
-available, otherwise downloads the SDK at the commit pinned in
+The build downloads the Apple AudioUnitSDK at the commit pinned in
 [CMakeLists.txt](CMakeLists.txt). `AUDIOUNIT_SDK` can point to an existing SDK
-checkout for an offline build.
+checkout for an offline build. No emulator or Rust build is required.
+`BUILD_DIR` overrides the default `target/obervave-au` output directory.
 
 ## Logic Pro
 
@@ -117,6 +116,6 @@ graphical session.
 ## License
 
 The native adapter and OberVave synthesizer are GPL-3.0-only; see the
-[OberVave firmware license](../../fw/obervave/LICENSE). The Apple AudioUnitSDK
-has its own Apache-2.0 license in its checkout. This native plug-in is not
-covered solely by the emulator repository's license.
+[OberVave license](../../LICENSE). The Apple AudioUnitSDK
+has its own Apache-2.0 license in its checkout. The historical emulator's MIT
+notice in `../../LICENSE-FM1-EMU` does not replace the native application's GPL.

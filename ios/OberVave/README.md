@@ -8,15 +8,17 @@ Regenerate them on macOS with
 
 ## Firmware source and licensing
 
-The complete OberVave source tree is vendored in `../../fw/obervave/` from
+The required OberVave DSP source subset is vendored in `../../fw/obervave/` from
 <https://github.com/zvenson/obervave>, commit
 `a1f660c4439583d33f72941bd184a7e187d11835` (version 3.5.2), with local
 native-engine, timing and audio-block adaptations. It is included as ordinary
 files so a fresh clone contains these adaptations without a separate checkout.
 OberVave and the native ports are GPL-3.0-only; the upstream license,
 attributions and third-party notices are preserved in
-`../../fw/obervave/LICENSE` and `../../fw/obervave/LICENSING.md`.
-The original emulator's license is unchanged.
+`../../LICENSE` and `../../fw/obervave/LICENSING.md`.
+Hardware firmware, the emulator and the old benchmark app are not required
+and have been removed. The original emulator's MIT notice is preserved in
+`../../LICENSE-FM1-EMU`.
 
 ## Scenes and multitimbral rack
 
