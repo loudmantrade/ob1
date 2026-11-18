@@ -518,7 +518,12 @@ OBV_LOCAL void arp_step(uint32_t p)
 OBV_LOCAL void arp_tick(uint32_t p)
 {
 #ifdef OBV_EXTERNAL_ARP
-    if (OBV_EXTERNAL_ARP(p)) return;
+    if (OBV_EXTERNAL_ARP(p)) {
+#ifdef OBV_EXTERNAL_ARP_TICK
+        OBV_EXTERNAL_ARP_TICK(p);
+#endif
+        return;
+    }
 #endif
     const uint8_t *pv = pt[p].p->v;
     arp_t *a = &arp[p];

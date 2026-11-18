@@ -31,6 +31,7 @@ inline double lfo_rate_hz(uint32_t value)
 #define OBV_ARP_ELAPSED(p) arp_elapsed(p)
 #define OBV_VOICE_CONTROLLERS(v, g, patch) voice_controllers(v, g, patch)
 #define OBV_EXTERNAL_ARP(p) externalArpeggiator[p]
+#define OBV_EXTERNAL_ARP_TICK(p) external_arpeggiator_tick(p)
 struct Engine {
     bool seq_phase(uint32_t*) { return false; }
     bool seq_starting() { return false; }
@@ -55,6 +56,20 @@ struct Engine {
     uint8_t previousControllerArp = A_OFF, previousControllerLatch = 0;
     bool controllerPerformanceMod = false;
     bool externalArpeggiator[NPART] {};
+    // Offset follows eng_t: CTL at the first tick, not an output-buffer sample index.
+    using ArpeggiatorTick = bool (*)(void*, Engine&, uint32_t part, uint32_t frameOffset) noexcept;
+    ArpeggiatorTick arpeggiatorTick = nullptr;
+    void* arpeggiatorContext = nullptr;
+    uint32_t arpeggiatorStartFrame = 0, arpeggiatorFailedParts = 0;
+
+    void external_arpeggiator_tick(uint32_t part)
+    {
+        if (!arpeggiatorTick || (arpeggiatorFailedParts >> part & 1u)) return;
+        if (!arpeggiatorTick(arpeggiatorContext, *this, part, eng_t - arpeggiatorStartFrame)) {
+            arpeggiatorFailedParts |= 1u << part;
+            parts_off(part);
+        }
+    }
 
     // Audio-owner operation. Switching clears this part's old notes, not its patch or FX.
     bool set_external_arpeggiator(uint32_t part, bool enabled)
@@ -164,6 +179,16 @@ struct Engine {
 
     void render_audio(int32_t* output, uint32_t frames)
     {
+        render_audio_with_arpeggiator(output, frames, nullptr, nullptr);
+    }
+
+    bool render_audio_with_arpeggiator(int32_t* output, uint32_t frames,
+                                      ArpeggiatorTick tick, void* context)
+    {
+        arpeggiatorTick = tick;
+        arpeggiatorContext = context;
+        arpeggiatorStartFrame = eng_t;
+        arpeggiatorFailedParts = 0;
         controllerBase = live_p[0];
         controllerRendering = true;
         controllerPolyMod = false;
@@ -192,6 +217,9 @@ struct Engine {
         engine_audio(output, frames);
         live_p[0] = controllerBase;
         controllerRendering = false;
+        arpeggiatorTick = nullptr;
+        arpeggiatorContext = nullptr;
+        return arpeggiatorFailedParts == 0;
     }
 
     Engine() = default;
@@ -302,6 +330,7 @@ struct Engine {
 #undef OBV_ARP_ELAPSED
 #undef OBV_VOICE_CONTROLLERS
 #undef OBV_EXTERNAL_ARP
+#undef OBV_EXTERNAL_ARP_TICK
 #undef live
 #undef section
 } // namespace obervave

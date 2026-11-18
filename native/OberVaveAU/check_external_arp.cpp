@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "../Musical/Arpeggiator.h"
-#include "../OberVave/Engine.h"
+#include "../OberVave/ArpeggiatorContext.h"
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +18,9 @@ struct AudioComparison {
     uint64_t frames = 0;
     uint64_t compared = 0;
     uint64_t nonzero = 0;
+    bool useCallback = false;
+    uint32_t callbacks = 0;
+    music::ArpSettings effectiveSettings {};
 
     auto sink()
     {
@@ -26,7 +29,25 @@ struct AudioComparison {
         };
     }
 
-    AudioComparison(uint32_t voiceMode, uint32_t arpMode, uint32_t phase)
+    static bool tick(void* context, Engine& engine, uint32_t part, uint32_t offset) noexcept
+    {
+        auto& self = *static_cast<AudioComparison*>(context);
+        assert(&engine == self.external.get() && part == 0 && offset == CTL);
+        ArpeggiatorContext current {};
+        if (!arpeggiator_context(engine, part, {self.frames - CTL + offset}, current)) return false;
+        self.effectiveSettings = current.settings;
+        self.clock = current.clock;
+        auto output = self.sink();
+        if (self.arp.configure(current.settings, current.clock.time, output) != music::ArpResult::Ok ||
+            self.arp.seed(engine.rnd_state) != music::ArpResult::Ok ||
+            self.arp.tick(current.clock, output) != music::ArpResult::Ok) return false;
+        engine.rnd_state = self.arp.randomState();
+        ++self.callbacks;
+        return true;
+    }
+
+    AudioComparison(uint32_t voiceMode, uint32_t arpMode, uint32_t phase, bool callback = false)
+        : useCallback(callback)
     {
         legacy->initialize(); external->initialize();
         for (auto* engine : {legacy.get(), external.get()}) {
@@ -75,14 +96,17 @@ struct AudioComparison {
     {
         for (uint32_t block = 0; block < blocks; ++block) {
             frames += CTL;
-            clock.time = {frames};
-            assert(arp.seed(legacy->rnd_state) == music::ArpResult::Ok);
-            auto output = sink();
-            assert(arp.tick(clock, output) == music::ArpResult::Ok);
-            external->rnd_state = arp.randomState();
+            if (!useCallback) {
+                clock.time = {frames};
+                assert(arp.seed(legacy->rnd_state) == music::ArpResult::Ok);
+                auto output = sink();
+                assert(arp.tick(clock, output) == music::ArpResult::Ok);
+                external->rnd_state = arp.randomState();
+            }
             int32_t reference[CTL * 2] {}, actual[CTL * 2] {};
             legacy->render_audio(reference, CTL);
-            external->render_audio(actual, CTL);
+            if (useCallback) assert(external->render_audio_with_arpeggiator(actual, CTL, tick, this));
+            else external->render_audio(actual, CTL);
             for (uint32_t i = 0; i < CTL * 2; ++i) {
                 nonzero += reference[i] != 0;
                 if (reference[i] != actual[i]) {
@@ -108,13 +132,13 @@ struct AudioComparison {
     }
 };
 
-static void checkAudio()
+static void checkAudio(bool callback)
 {
     uint64_t blocks = 0;
     for (uint32_t voice = 0; voice < 4; ++voice)
         for (uint32_t mode = 1; mode < NARPMODE; ++mode)
             for (uint32_t phase = 0; phase < 3; ++phase) {
-                AudioComparison c(voice, mode, phase);
+                AudioComparison c(voice, mode, phase, callback);
                 c.input(0x90, 60, 100); c.input(0x90, 64, 80); c.input(0x90, 67, 110);
                 c.render(120);
                 c.input(0x80, 60, 0); c.render(12);
@@ -138,10 +162,11 @@ static void checkAudio()
                 assert(c.external->externalArpeggiator[0]);
                 c.render(120);
                 assert(c.nonzero);
+                assert(c.callbacks == (callback ? c.compared : 0));
                 blocks += c.compared;
             }
-    std::printf("PASS explicit external-ARP bypass: %llu bit-identical stereo control blocks across all 4 voice modes, 8 ARP modes and 3 LFO phases, glide, sustain, Latch, effects and Stop\n",
-        static_cast<unsigned long long>(blocks));
+    std::printf("PASS %s: %llu bit-identical stereo control blocks across all 4 voice modes, 8 ARP modes and 3 LFO phases, glide, sustain, Latch, effects and Stop\n",
+        callback ? "effective-patch callback" : "explicit external-ARP bypass", static_cast<unsigned long long>(blocks));
 }
 
 static void checkTransitions()
@@ -217,8 +242,119 @@ static void checkTransitions()
     std::puts("PASS bypass switching, validation, part isolation, pending-note cleanup, raw note rejection, saved patch preservation and reversible legacy path");
 }
 
+static void checkEffectiveControllers()
+{
+    uint64_t blocks = 0;
+    for (uint32_t mode = 1; mode < NARPMODE; ++mode) {
+        AudioComparison c(M_UNISON, mode, LP_SYNC, true);
+        c.input(0x90, 60, 100); c.input(0x90, 64, 80); c.input(0x90, 67, 110);
+        const uint8_t targets[] = {P_ARP_DIV, P_ARP_OCT, P_ARP_GATE, P_ARP_VEL,
+            P_MODE, P_UNI_DET, P_SPREAD, P_GLIDE, P_LFO_PHASE, P_CUTOFF, P_RESO,
+            P_ARP_MODE, P_ARP_LATCH};
+        for (auto* engine : {c.legacy.get(), c.external.get()}) {
+            engine->ctl_arp_sync = 1;
+            engine->ctl_arp_sync_grid = 3;
+            engine->livePhaseAdjustment = true;
+            for (uint32_t slot = 0; slot < std::size(targets); ++slot) {
+                const uint8_t fields[] = {uint8_t(CS_CC0 + 20 + slot), targets[slot], 1,
+                    0, 128, uint8_t(targets[slot] == P_ARP_LATCH ? 0 : (slot % 2 ? 80 : 48)), 1};
+                for (uint32_t f = 0; f < CONTROLLER_FIELDS; ++f)
+                    engine->apply_parameter(P_CTL1_SRC + slot * CONTROLLER_FIELDS + f, fields[f]);
+            }
+        }
+        const auto base = c.external->live_p[0];
+        c.render(40);
+        for (const uint8_t value : {127, 32, 96, 0, 64, 127, 0}) {
+            for (uint32_t slot = 0; slot < std::size(targets); ++slot) {
+                for (auto* engine : {c.legacy.get(), c.external.get()})
+                    engine->controller_input(0xB0, 20 + slot, value);
+                c.input(0xB0, 20 + slot, value);
+                c.render(24);
+                const auto& e = *c.external;
+                assert(std::equal(std::begin(base.v), std::end(base.v), std::begin(e.live_p[0].v)));
+                if (slot == 2 && value == 127) assert(c.effectiveSettings.gate != c.settings.gate);
+            }
+            for (auto* engine : {c.legacy.get(), c.external.get()}) {
+                engine->phaseAdvance = value > 64 ? 256 : -512;
+                engine->ctl_ext_quarter = value > 64 ? 1200 : 768;
+                engine->hostClock = true;
+                engine->hostBeat = value / 32.0;
+                engine->hostTempo = 60.0 * FS / engine->ctl_ext_quarter;
+                engine->hostFrame = engine->eng_t;
+            }
+            c.render(40);
+            assert(c.clock.time.frame == c.frames && c.clock.hasMasterPhase);
+            assert(c.clock.advanceFrames == c.external->phaseAdvance);
+            assert(c.clock.quarterFrames == c.external->quarter_len());
+        }
+        for (auto* engine : {c.legacy.get(), c.external.get()})
+            for (uint32_t slot = 0; slot < std::size(targets); ++slot)
+                engine->apply_parameter(P_CTL1_SRC + slot * CONTROLLER_FIELDS, CS_OFF);
+        c.render(40);
+        c.input(0x80, 60, 0); c.input(0x80, 64, 0); c.input(0x80, 67, 0);
+        blocks += c.compared;
+    }
+    std::printf("PASS effective controller bridge: %llu bit-identical stereo blocks with signed temporary ARP/voice-start modulation, restored base patch, shared DSP RNG, tempo, host phase and latency changes\n",
+        static_cast<unsigned long long>(blocks));
+}
+
+static void checkCallbackContract()
+{
+    auto engine = std::make_unique<Engine>();
+    engine->initialize();
+    ArpeggiatorContext unused {};
+    assert(!arpeggiator_context(*engine, 0, {}, unused));
+    assert(!arpeggiator_context(*engine, NPART, {}, unused));
+    assert(engine->set_external_arpeggiator(0, true));
+    assert(engine->set_external_arpeggiator(1, true));
+    assert(!arpeggiator_context(*engine, 0, {}, unused));
+    struct Probe {
+        uint32_t calls[NPART] {};
+        bool reject = false;
+        uint64_t start = uint64_t(UINT32_MAX) - 31;
+        static bool tick(void* context, Engine& engine, uint32_t part, uint32_t offset) noexcept
+        {
+            auto& probe = *static_cast<Probe*>(context);
+            ++probe.calls[part];
+            assert(offset % CTL == 0 && offset <= 64);
+            assert(offset == probe.calls[part] * CTL);
+            ArpeggiatorContext current {};
+            assert(arpeggiator_context(engine, part, {probe.start + offset}, current));
+            assert(current.clock.time.frame == probe.start + offset);
+            assert(engine.eng_t == uint32_t(probe.start + offset));
+            assert(current.settings.mode == music::ArpMode(engine.pt[part].p->v[P_ARP_MODE]));
+            if (part == 0 && probe.reject) {
+                assert(engine.external_note(part, 60, 100));
+                return false;
+            }
+            return true;
+        }
+    } probe;
+    engine->eng_t = uint32_t(probe.start);
+    int32_t audio[128] {};
+    assert(engine->render_audio_with_arpeggiator(audio, 64, Probe::tick, &probe));
+    assert(probe.calls[0] == 4 && probe.calls[1] == 4);
+    for (uint32_t part = 2; part < NPART; ++part) assert(!probe.calls[part]);
+    assert(!engine->arpeggiatorTick && !engine->arpeggiatorContext && !engine->controllerRendering);
+    probe.calls[0] = probe.calls[1] = 0;
+    probe.start += 64;
+    probe.reject = true;
+    const auto patch = engine->live_p[0];
+    assert(!engine->render_audio_with_arpeggiator(audio, 64, Probe::tick, &probe));
+    assert(probe.calls[0] == 1 && probe.calls[1] == 4);
+    for (const auto& voice : engine->vc) assert(voice.part != 0 || !voice.gate);
+    assert(std::equal(std::begin(patch.v), std::end(patch.v), std::begin(engine->live_p[0].v)));
+    assert(!engine->arpeggiatorTick && !engine->arpeggiatorContext && !engine->controllerRendering);
+    engine->render_audio(audio, 64);
+    assert(probe.calls[0] == 1 && probe.calls[1] == 4);
+    std::puts("PASS control-boundary callback: per-part order/offsets, 64-bit time across DSP counter wrap, scoped lifetime, explicit failure, failed-part cleanup and independent other parts");
+}
+
 int main()
 {
-    checkAudio();
+    checkAudio(false);
+    checkAudio(true);
+    checkEffectiveControllers();
+    checkCallbackContract();
     checkTransitions();
 }

@@ -168,6 +168,9 @@ output-stage routing are not enabled. The independent
 implemented; production still uses the original DSP arpeggiator.
 The reversible native DSP bypass is implemented and compared against the
 legacy audio/voice path; it is disabled by default and not enabled by either
-platform adapter. Live extraction (including effective controller settings
-and ownership), pattern playback/recording, pattern UI and external MIDI
-output are not yet implemented.
+platform adapter. An optional control-boundary callback and effective
+ARP/clock snapshot bridge are implemented and audio-tested with temporary
+controller modulation and per-instance RNG synchronization. Production
+input-time/render-time settings, direct-voice handover and source ownership
+remain separate live-extraction gates. Pattern playback/recording, pattern UI
+and external MIDI output are not yet implemented.

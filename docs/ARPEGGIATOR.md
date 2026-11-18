@@ -92,11 +92,50 @@ re-arpeggiate or release these notes. Panic/transport Stop still release voices,
 without disabling the bypass. The normal `midi` entry rejects raw notes with
 `false` in external mode; the rack adapter propagates this rejection.
 
-This is a low-level DSP capability, not live extracted-ARP routing. A future
-adapter must trigger at the proper control boundary with the effective
-controller-modulated patch installed, synchronize the shared RNG, reset
-physical-key pressure on fresh input, and handle direct Off-mode voices and
-mode handovers. Do not feed generated notes through the raw MIDI entry.
+This is a low-level DSP capability, not live extracted-ARP routing. Do not feed
+generated notes through the raw MIDI entry.
+
+## Effective-patch control-boundary bridge
+
+`Engine::render_audio_with_arpeggiator` optionally supplies a synchronous,
+non-throwing callback and caller-owned context for that render call only.
+Each externally owned part invokes it at the original `arp_tick` position:
+after input processing and before LFO/global/voice processing. The effective
+controller-modulated patch is already installed. No callback pointer/context
+is retained after rendering. The ordinary `render_audio` entry remains the
+legacy/manual-bypass path; neither platform enables this callback yet.
+
+`native/OberVave/ArpeggiatorContext.h` maps the active part's effective patch,
+sync/grid settings, quarter length, compensated master phase and signed
+latency adjustment into portable `ArpSettings`/`ArpClock`. It rejects reads
+outside rendering or for a part not in external mode. It does not own the
+processor, notes, routing, or another clock.
+
+The callback offset follows the existing DSP scheduler's `eng_t` convention:
+it is 16 at the first tick, then 32, and so on. It is **not** a zero-based
+output-buffer sample index. A caller supplies the corresponding 64-bit time
+from its existing timeline; subtracting the render-start DSP counter remains
+valid across 32-bit wrap. Future platform routing must explicitly translate
+this legacy scheduler timestamp convention rather than pass a block-end
+offset to `withinBlock`.
+
+The test adapter reads effective settings, configures the portable processor,
+seeds it from the same DSP instance's RNG immediately before ticking, and
+writes back the resulting RNG state before LFO/voice synthesis. Generated
+voice starts therefore use the same effective patch and RNG ordering as the
+legacy scheduler, without reading randomness from a reference instance.
+
+Callback rejection returns `false` from rendering, releases that part's voices,
+and suppresses further callbacks for it in that render call. Other parts keep
+processing; base parameters and callback lifetime are restored normally.
+The caller must report failure and clean up its processor's outstanding
+ownership before resuming; releasing DSP gates alone does not clear a
+recorder or external destination's note ledger.
+
+Remaining live-adapter work includes input-time versus render-time settings,
+controller OVERRIDE and interpreted sustain delivery, resetting physical-key
+pressure on fresh input, direct Off-mode voices, mode/transport handovers and
+source ownership. These are deliberately not hidden inside the snapshot helper.
 
 ## Tests
 
@@ -136,5 +175,13 @@ an assumption that independent random generators stay aligned.
 Separate handover tests cover invalid calls, enable/disable/idempotency,
 raw-note rejection, saved patch preservation, pending-note filtering and
 counter wrap, part isolation, parameter edits, Sustain, Panic and restored
-legacy playback. Controller-modulated ARP/voice-start parameters and live
-platform routing remain integration gates; these tests do not certify them.
+legacy playback. Live platform routing remains an integration gate.
+
+The same 66,432-block matrix is also run through the effective-patch callback.
+An additional 20,352 stereo blocks compare signed temporary modulation of
+ARP mode/Latch/division/octaves/gate/velocity and voice-start parameters,
+including mono/unison selection, detune, spread, glide and LFO phase.
+Tests change tempo, host phase and signed latency while notes are held and
+check that the saved base patch is restored after every render. Callback
+contract tests cover per-part order, multiple control ticks in one render,
+64-bit timestamps over DSP counter wrap, scoped lifetime and partial failure.
