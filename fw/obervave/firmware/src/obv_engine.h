@@ -517,6 +517,9 @@ OBV_LOCAL void arp_step(uint32_t p)
 
 OBV_LOCAL void arp_tick(uint32_t p)
 {
+#ifdef OBV_EXTERNAL_ARP
+    if (OBV_EXTERNAL_ARP(p)) return;
+#endif
     const uint8_t *pv = pt[p].p->v;
     arp_t *a = &arp[p];
     uint32_t mode = pv[P_ARP_MODE], div = DIV_PER_QUARTER[pv[P_ARP_DIV] % NDIV], q;
@@ -589,6 +592,9 @@ OBV_LOCAL uint32_t sus_was;                        /* bit p: sound p was held */
 OBV_LOCAL inline uint32_t part_sus(uint32_t p) { return ctl_sustain || (ctl_hold >> p & 1u); }
 OBV_LOCAL void ev_note_on(uint32_t p, uint32_t note, uint32_t vel)
 {
+#ifdef OBV_EXTERNAL_ARP
+    if (OBV_EXTERNAL_ARP(p)) return;
+#endif
     uint32_t i, j, arp_on = pt[p].p->v[P_ARP_MODE] != A_OFF, sus = part_sus(p);
     uint32_t latch = pt[p].p->v[P_ARP_LATCH];
     if (arp_on && (latch == 2u || arp_is_hold(pt[p].p->v[P_ARP_MODE]))) {
@@ -618,6 +624,9 @@ OBV_LOCAL void ev_note_on(uint32_t p, uint32_t note, uint32_t vel)
 
 OBV_LOCAL void ev_note_off(uint32_t p, uint32_t note)
 {
+#ifdef OBV_EXTERNAL_ARP
+    if (OBV_EXTERNAL_ARP(p)) return;
+#endif
     uint32_t i;
     for (i = 0; i < nheld[p]; i++)
         if (held[p][i].note == note) held[p][i].phys = 0;
@@ -631,6 +640,9 @@ OBV_LOCAL void ev_note_off(uint32_t p, uint32_t note)
 
 OBV_LOCAL void ev_sustain_up(uint32_t p)           /* the pedal / its HOLD let go: what no key holds is released */
 {
+#ifdef OBV_EXTERNAL_ARP
+    if (OBV_EXTERNAL_ARP(p)) return;
+#endif
     uint32_t i, j;
     {
         uint8_t gone[NHELD], ng = 0;

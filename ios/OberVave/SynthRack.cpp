@@ -134,13 +134,13 @@ struct OberVaveEngine final : SynthEngine {
         music::MIDIMessage message {};
         if (event.routing.stage != music::Stage::Input ||
             music::encodeMIDI(event, message) != music::EventError::None) return false;
-        midi(message.status, message.data1, message.data2);
-        return true;
+        return midi(message.status, message.data1, message.data2);
     }
-    void midi(uint8_t status, uint8_t d1, uint8_t d2)
+    bool midi(uint8_t status, uint8_t d1, uint8_t d2)
     {
-        dsp.midi(status, d1, d2, false, false);
+        if (!dsp.midi(status, d1, d2, false, false)) return false;
         dsp.engine_events();
+        return true;
     }
     void stop() override { dsp.engine_transport_stop(); }
     void sync(bool on, uint32_t grid) override { dsp.ctl_arp_sync = on; dsp.ctl_arp_sync_grid = grid; }

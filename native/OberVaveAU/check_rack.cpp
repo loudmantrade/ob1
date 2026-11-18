@@ -179,6 +179,15 @@ static void checkEventAdapter()
             }
         }
     }
+    auto external = std::make_unique<rack::OberVaveEngine>();
+    assert(external->dsp.set_external_arpeggiator(0, true));
+    music::Event note {};
+    assert(music::decodeMIDI(0x90, 60, 100, {}, {}, note) == music::EventError::None);
+    assert(!external->event(note));
+    assert(!external->dsp.nheld[0] && external->dsp.nq_r == external->dsp.nq_w);
+    assert(external->dsp.set_external_arpeggiator(0, false));
+    assert(external->event(note));
+    assert(external->dsp.nheld[0] == 1);
     std::puts("PASS event adapter audio is bit-identical to legacy MIDI for every ARP/Latch mode, notes, bend, pressure, sustain and panic");
 }
 static void checkModulationMatrix()

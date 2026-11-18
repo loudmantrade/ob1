@@ -3,8 +3,9 @@
 `native/Musical/Arpeggiator.h` contains a bounded C++17
 `ArpeggiatorProcessor`, derived from the existing GPL-3.0-only OberVave
 arpeggiator. It does not include DSP headers, patch structures, voices, platform
-APIs or SwiftUI. The original implementation remains unchanged and is still
-the production path in both iPad and AU.
+APIs or SwiftUI. The original scheduler is still the production path in both
+iPad and AU. Native-only guards allow an explicit external-note bypass; they
+are inactive by default and do not change the hardware firmware build.
 
 ## Contract
 
@@ -69,10 +70,33 @@ The native engine has no active firmware sequencer (`seq_phase` and
 reimplemented. Future pattern playback must use the shared transport and
 explicit input/output stage flags, not resurrect that firmware sequencer.
 
-Before switching production routing, implement an explicit native DSP bypass,
-effective controller-modulated ARP settings, direct-voice handover, source
-ownership and controller handling. Saved parameters must not be forced to Off.
+Before switching production routing, implement effective controller-modulated
+ARP settings, direct-voice handover, source ownership and controller handling.
 The AU's independent adapter is a separate integration gate.
+
+## Explicit native DSP bypass
+
+`Engine::set_external_arpeggiator(part, enabled)` is an audio-owner operation,
+not a saved parameter. It releases that part's previous voices and clears its
+legacy held/scheduler state and pending raw notes. Other parts' pending notes
+retain FIFO order, including across ring-counter wrap. Repeating the current
+setting is a no-op. Saved ARP/Latch values and effects are not overwritten.
+Disabling restores normal legacy handling; initializing resets the mode.
+
+While enabled, `external_note(part, pitch, velocity)` directly triggers a voice
+or releases it (`velocity == 0`, with the generated-note release semantics).
+It validates part, pitch, velocity and ownership mode and returns acceptance.
+The caller owns musical note IDs, recording and generated-event ordering.
+The old note interception, sustain-release cleanup and scheduler cannot
+re-arpeggiate or release these notes. Panic/transport Stop still release voices,
+without disabling the bypass. The normal `midi` entry rejects raw notes with
+`false` in external mode; the rack adapter propagates this rejection.
+
+This is a low-level DSP capability, not live extracted-ARP routing. A future
+adapter must trigger at the proper control boundary with the effective
+controller-modulated patch installed, synchronize the shared RNG, reset
+physical-key pressure on fresh input, and handle direct Off-mode voices and
+mode handovers. Do not feed generated notes through the raw MIDI entry.
 
 ## Tests
 
@@ -98,5 +122,19 @@ identities, mode changes, tempo changes, positive/negative/repeated latency
 changes, host phase jumps, high notes, duplicate octaves, held-key eviction,
 and transport Stop/rearm. Separate portable tests verify independent seeded
 random reproduction, invalid input and sink failure during both chord On
-and multi-note Off. Voice allocation/audio equivalence is a later bypass gate,
-not inferred from these event tests.
+and multi-note Off.
+
+The additional `external_arpeggiator` CTest target compares 66,432 rendered
+16-frame stereo blocks sample-for-sample between the legacy scheduler and
+the portable processor driving the explicit bypass. It covers all four voice
+modes, all eight enabled ARP modes and all three LFO phase modes, with glide,
+Sustain/Latch/chord changes, Hold Legato common notes, effects and Stop.
+It also compares voice trigger counters, gates, envelopes, oscillator phases
+and shared RNG state. This uses explicit per-tick RNG synchronization, not
+an assumption that independent random generators stay aligned.
+
+Separate handover tests cover invalid calls, enable/disable/idempotency,
+raw-note rejection, saved patch preservation, pending-note filtering and
+counter wrap, part isolation, parameter edits, Sustain, Panic and restored
+legacy playback. Controller-modulated ARP/voice-start parameters and live
+platform routing remain integration gates; these tests do not certify them.

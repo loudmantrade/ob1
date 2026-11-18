@@ -166,5 +166,8 @@ The existing per-channel/pitch activity remains; new per-source ownership and
 output-stage routing are not enabled. The independent
 [arpeggiator core](ARPEGGIATOR.md) and legacy event-comparison tests are
 implemented; production still uses the original DSP arpeggiator.
-DSP bypass and live extraction, pattern playback/recording, pattern UI and
-external MIDI output are not yet implemented.
+The reversible native DSP bypass is implemented and compared against the
+legacy audio/voice path; it is disabled by default and not enabled by either
+platform adapter. Live extraction (including effective controller settings
+and ownership), pattern playback/recording, pattern UI and external MIDI
+output are not yet implemented.

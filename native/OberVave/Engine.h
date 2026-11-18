@@ -30,6 +30,7 @@ inline double lfo_rate_hz(uint32_t value)
 #define OBV_MASTER_PHASE(ph, bar) host_phase(ph, bar)
 #define OBV_ARP_ELAPSED(p) arp_elapsed(p)
 #define OBV_VOICE_CONTROLLERS(v, g, patch) voice_controllers(v, g, patch)
+#define OBV_EXTERNAL_ARP(p) externalArpeggiator[p]
 struct Engine {
     bool seq_phase(uint32_t*) { return false; }
     bool seq_starting() { return false; }
@@ -53,6 +54,37 @@ struct Engine {
     bool controllerPolyMod = false;
     uint8_t previousControllerArp = A_OFF, previousControllerLatch = 0;
     bool controllerPerformanceMod = false;
+    bool externalArpeggiator[NPART] {};
+
+    // Audio-owner operation. Switching clears this part's old notes, not its patch or FX.
+    bool set_external_arpeggiator(uint32_t part, bool enabled)
+    {
+        if (part >= NPART) return false;
+        if (externalArpeggiator[part] == enabled) return true;
+        parts_off(part);
+        arp[part] = {};
+        arp[part].cnt = 0xFFFFFFFFu;
+        delayedFrames[part] = 0;
+        appliedAdvance[part] = phaseAdvance;
+        auto write = nq_r;
+        const auto end = nq_w;
+        for (auto read = nq_r; read != end; ++read) {
+            const auto event = nq[read % NQ];
+            if (event.part % NPART != part) nq[write++ % NQ] = event;
+        }
+        nq_w = write;
+        externalArpeggiator[part] = enabled;
+        return true;
+    }
+
+    bool external_note(uint32_t part, uint32_t note, uint32_t velocity)
+    {
+        if (part >= NPART || note > 127 || velocity > 127 || !externalArpeggiator[part])
+            return false;
+        if (velocity) voice_trigger(part, note, velocity);
+        else voice_release(part, note, 1);
+        return true;
+    }
 
     static uint32_t controller_source(uint8_t status, uint8_t d1)
     {
@@ -144,7 +176,7 @@ struct Engine {
         controller_offsets(live_p[0]);
         const bool performanceMod = live_p[0].v[P_ARP_MODE] != controllerBase.v[P_ARP_MODE] ||
             live_p[0].v[P_ARP_LATCH] != controllerBase.v[P_ARP_LATCH];
-        if ((performanceMod || controllerPerformanceMod) &&
+        if (!externalArpeggiator[0] && (performanceMod || controllerPerformanceMod) &&
             (!part_sus(0) || arp_is_hold(live_p[0].v[P_ARP_MODE])) &&
             ((previousControllerArp != A_OFF && live_p[0].v[P_ARP_MODE] == A_OFF) ||
              (previousControllerLatch && !live_p[0].v[P_ARP_LATCH]))) {
@@ -184,6 +216,7 @@ struct Engine {
 
     void initialize()
     {
+        std::fill_n(externalArpeggiator, NPART, false);
         for (uint32_t i = 0; i < NPART; ++i) {
             patch_from_factory(&live_p[i], &FACTORY[17]);
             pt[i].p = &live_p[i];
@@ -216,6 +249,7 @@ struct Engine {
             if (controller_override(CS_CC0 + 64)) ctl_sustain = 0;
             return;
         }
+        if (externalArpeggiator[0]) return;
         if (part_sus(0) && !(parameter == P_ARP_LATCH && value == 0 &&
                              arp_is_hold(live_p[0].v[P_ARP_MODE]))) return;
         if ((parameter == P_ARP_LATCH && value == 0) ||
@@ -229,8 +263,10 @@ struct Engine {
         }
     }
 
-    void midi(uint8_t status, uint8_t d1, uint8_t d2, bool fixedCC = true, bool controllers = true)
+    bool midi(uint8_t status, uint8_t d1, uint8_t d2, bool fixedCC = true, bool controllers = true)
     {
+        if (externalArpeggiator[0] && ((status & 0xF0) == 0x80 || (status & 0xF0) == 0x90))
+            return false;
         if (controllers) controller_input(status, d1, d2);
         const bool overridden = controller_override(controller_source(status, d1));
         switch (status & 0xF0) {
@@ -257,6 +293,7 @@ struct Engine {
             break;
         case 0xE0: ctl_bend = overridden ? 0 : int32_t(d1 | (uint32_t(d2) << 7)) - 8192; break;
         }
+        return true;
     }
 };
 #undef OBV_LOCAL
@@ -264,6 +301,7 @@ struct Engine {
 #undef OBV_MASTER_PHASE
 #undef OBV_ARP_ELAPSED
 #undef OBV_VOICE_CONTROLLERS
+#undef OBV_EXTERNAL_ARP
 #undef live
 #undef section
 } // namespace obervave
