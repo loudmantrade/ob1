@@ -255,7 +255,11 @@ Empty/recording short taps dispatch immediately. MIDI timing remains on audio;
 the touch timer only resolves user intent. Drag starts within 23 pt of the
 diagram center; pad edges/empty cells/gaps permit nested scroll views to scroll.
 Leaving the viewport, interruption or scene change cancels; no auto-scroll is
-performed during a drag. Source/destination highlighting and MOVE/COPY preview
+performed during a drag. Drag bounds use the union of all pad frames intersected
+with both scroll viewports, never the frame of a single ForEach column. This
+keeps MOVE/COPY active across column gaps and after horizontal/vertical scrolling,
+while excluding clipped cells from drop targets.
+Source/destination highlighting and MOVE/COPY preview
 remain separate from transport indicators. Occupied drops always confirm;
 same-cell/off-grid drops are no-ops.
 

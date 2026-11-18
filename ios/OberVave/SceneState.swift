@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
+import CoreGraphics
 
 enum KeyboardZoneLayout {
     static func isBlack(_ note: Int) -> Bool { [1, 3, 6, 8, 10].contains(note % 12) }
@@ -389,6 +390,22 @@ struct PatternCell: Hashable {
     var slot: Int
     var row: Int
     var id: Int { slot * 8 + row }
+}
+
+enum PatternGridHitTesting {
+    static func contains(_ point: CoreGraphics.CGPoint, cells: [PatternCell: CoreGraphics.CGRect],
+                         verticalViewport: CoreGraphics.CGRect, horizontalViewport: CoreGraphics.CGRect) -> Bool {
+        let content = cells.values.reduce(CoreGraphics.CGRect.null) { $0.union($1) }
+        return content.intersection(verticalViewport).intersection(horizontalViewport).contains(point)
+    }
+
+    static func target(at point: CoreGraphics.CGPoint, cells: [PatternCell: CoreGraphics.CGRect],
+                       verticalViewport: CoreGraphics.CGRect, horizontalViewport: CoreGraphics.CGRect,
+                       recordingCell: Int?) -> PatternCell? {
+        guard contains(point, cells: cells, verticalViewport: verticalViewport,
+                       horizontalViewport: horizontalViewport) else { return nil }
+        return cells.first { $0.value.contains(point) && $0.key.id != recordingCell }?.key
+    }
 }
 
 struct PatternTransfer {

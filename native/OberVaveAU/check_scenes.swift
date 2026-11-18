@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
+import CoreGraphics
 
 @main
 struct SceneChecks {
@@ -199,6 +200,52 @@ struct SceneChecks {
 
     static func main() throws {
         checkCircularLayout()
+        var testedCells = Set<PatternCell>()
+        for offset in [CoreGraphics.CGPoint.zero, CoreGraphics.CGPoint(x: -118 * 8, y: 0),
+                       CoreGraphics.CGPoint(x: 0, y: -240), CoreGraphics.CGPoint(x: -118 * 8, y: -240)] {
+            let cells = Dictionary(uniqueKeysWithValues: (0..<16).flatMap { slot in
+                (0..<8).map { row in
+                    (PatternCell(slot: slot, row: row),
+                     CoreGraphics.CGRect(x: 12 + CGFloat(slot) * 118 + offset.x,
+                            y: 120 + CGFloat(row) * 60 + offset.y, width: 110, height: 54))
+                }
+            })
+            let horizontal = CoreGraphics.CGRect(x: 12, y: 40, width: 1024, height: 700)
+            let vertical = CoreGraphics.CGRect(x: 12 + offset.x, y: 100, width: 1900, height: 340)
+            for (cell, frame) in cells {
+                let center = CoreGraphics.CGPoint(x: frame.midX, y: frame.midY)
+                let visible = horizontal.contains(center) && vertical.contains(center)
+                precondition(PatternGridHitTesting.contains(center, cells: cells,
+                    verticalViewport: vertical, horizontalViewport: horizontal) == visible)
+                precondition(PatternGridHitTesting.target(at: center, cells: cells,
+                    verticalViewport: vertical, horizontalViewport: horizontal, recordingCell: nil) == (visible ? cell : nil))
+                precondition(PatternGridHitTesting.target(at: center, cells: cells,
+                    verticalViewport: vertical, horizontalViewport: horizontal, recordingCell: cell.id) == nil)
+                if visible {
+                    testedCells.insert(cell)
+                    for copying in [false, true] {
+                        var gesture = PatternCellGesture()
+                        _ = gesture.down(at: 0, editable: true, dragAllowed: true)
+                        if copying { precondition(gesture.tick(at: 0.46) == [.copyReady]) }
+                        precondition(gesture.move(distance: 10, at: copying ? 0.5 : 0.1) == [.beginDrag(copy: copying)])
+                        precondition(PatternGridHitTesting.contains(CoreGraphics.CGPoint(x: center.x, y: center.y + 10),
+                            cells: cells, verticalViewport: vertical, horizontalViewport: horizontal))
+                        precondition(gesture.up(at: 0.6) == [.drop])
+                    }
+                }
+            }
+            let gap = CoreGraphics.CGPoint(x: 125, y: 200)
+            precondition(PatternGridHitTesting.contains(gap, cells: cells,
+                verticalViewport: vertical, horizontalViewport: horizontal))
+            precondition(PatternGridHitTesting.target(at: gap, cells: cells,
+                verticalViewport: vertical, horizontalViewport: horizontal, recordingCell: nil) == nil)
+            for outside in [CoreGraphics.CGPoint(x: 11, y: 200), CoreGraphics.CGPoint(x: 200, y: 441)] {
+                precondition(!PatternGridHitTesting.contains(outside, cells: cells,
+                    verticalViewport: vertical, horizontalViewport: horizontal))
+            }
+        }
+        precondition(testedCells.count == 16 * 8)
+        print("PASS grid hit testing: MOVE/COPY from all visible columns and rows, scrolled coordinates, gaps, clipped cells and recording targets")
         var gesture = PatternCellGesture()
         func down(_ time: Double) {
             precondition(gesture.down(at: time, editable: true, dragAllowed: true).isEmpty)

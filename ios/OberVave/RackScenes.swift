@@ -763,8 +763,8 @@ struct SequencerView: View {
     @State private var drag: SequencerCellDrag?
     @State private var copyHint: Int?
     @State private var frames: [PatternCell: CGRect] = [:]
-    @State private var gridFrame = CGRect.zero
     @State private var cellViewport = CGRect.zero
+    @State private var horizontalViewport = CGRect.zero
     @State private var rootFrame = CGRect.zero
     @State private var meters = [Double](repeating: 0, count: 16)
     private let width: CGFloat = 110
@@ -801,10 +801,6 @@ struct SequencerView: View {
                                     ForEach(0..<8, id: \.self) { row in pad(instrument, row: row) }
                                 }.frame(width: width)
                             }
-                            .background(GeometryReader { proxy in
-                                Color.clear.onAppear { gridFrame = proxy.frame(in: .global) }
-                                    .onChange(of: proxy.frame(in: .global)) { gridFrame = $0 }
-                            })
                             VStack(spacing: 6) {
                                 Text("ROW").font(.caption.bold()).frame(height: 54)
                                 ForEach(0..<8, id: \.self) { row in
@@ -837,6 +833,10 @@ struct SequencerView: View {
                 }
                 .frame(width: CGFloat(model.instruments.count) * (width + 8) + 70)
             }
+            .background(GeometryReader { proxy in
+                Color.clear.onAppear { horizontalViewport = proxy.frame(in: .global) }
+                    .onChange(of: proxy.frame(in: .global)) { horizontalViewport = $0 }
+            })
         }
         .padding(.horizontal, 12)
         .disabled(model.pendingSceneName != nil)
@@ -1025,8 +1025,8 @@ struct SequencerView: View {
     }
 
     private func target(at point: CGPoint) -> PatternCell? {
-        guard gridFrame.contains(point), cellViewport.contains(point) else { return nil }
-        return frames.first(where: { $0.value.contains(point) && model.recordingPattern != $0.key.id })?.key
+        PatternGridHitTesting.target(at: point, cells: frames, verticalViewport: cellViewport,
+                                     horizontalViewport: horizontalViewport, recordingCell: model.recordingPattern)
     }
 
     private func handleGesture(_ effect: PatternCellGesture.Effect, cell: PatternCell, point: CGPoint) {
@@ -1044,7 +1044,8 @@ struct SequencerView: View {
             source.copying = copying
             drag = SequencerCellDrag(transfer: source, point: point, target: target(at: point))
         case .drag:
-            guard gridFrame.contains(point), cellViewport.contains(point) else { cancelGesture(); return }
+            guard PatternGridHitTesting.contains(point, cells: frames, verticalViewport: cellViewport,
+                                                horizontalViewport: horizontalViewport) else { cancelGesture(); return }
             drag?.point = point
             drag?.target = target(at: point)
         case .drop:
