@@ -1089,11 +1089,16 @@ void renderBlock()
             uint32_t(double(position % (clip->data().length * music::tickUnit)) * 65535 /
                 double(clip->data().length * music::tickUnit)) : 0);
     }
-    bool playing = recorder.running && !recorder.waiting;
-    for (const auto& player : players) playing |= player.row >= 0;
+    const bool recording = recorder.running && !recorder.waiting;
+    bool patternPlaying = false;
+    for (const auto& player : players) patternPlaying |= player.row >= 0;
+    const bool playing = recording || patternPlaying;
     if (playing && !transportActive) {
         const auto bar = 3840 * music::tickUnit;
-        transportOrigin = musicalPosition.value / bar * bar;
+        // A new take starts on its actual first sound, which may follow the ARP grid.
+        transportOrigin = recording && !patternPlaying && !clock.external
+            ? (recorder.countBeats ? recorder.countStart : recorder.origin)
+            : musicalPosition.value / bar * bar;
     }
     if (playing) {
         const auto beat = uint64_t(std::max(INT64_C(0), musicalPosition.value - transportOrigin) /

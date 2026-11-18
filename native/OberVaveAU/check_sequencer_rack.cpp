@@ -602,8 +602,14 @@ static void checkOutputFirstNoteOrigin()
         const auto firstOutput = rack::musicalPosition.value;
         assert(rack::recorder.origin == firstOutput);
         render();
+        assert(ov_seq_transport_beat() == 0);
         assert(rack::clickFrames);
         assert(rack::clickFrequency == (ov_seq_transport_beat() % 4 == 0 ? 1760 : 1320));
+        const auto quarter = music::ticksPerQuarter * music::tickUnit;
+        while (rack::musicalPosition.value < firstOutput + quarter / 2) render();
+        assert(ov_seq_transport_beat() == 0);
+        while (rack::musicalPosition.value < firstOutput + quarter) render();
+        assert(ov_seq_transport_beat() == 1 && rack::clickFrequency == 1320);
         if (!beats) {
             render(2048);
             assert(ov_seq_finish_record()); render();
@@ -620,6 +626,7 @@ static void checkOutputFirstNoteOrigin()
         }
         assert(lastEnd >= result->length - 1);
         assert(ov_seq_active(0) == 0 && rack::players[0].origin == end);
+        assert(ov_seq_transport_beat() == 4 && rack::clickFrequency == 1760);
         assert(ov_rack_stop_all()); render();
     }
     ov_set_arp_audio_latency_ms(0);
@@ -681,6 +688,10 @@ static void checkRecordingMetronomeAndTransport()
     ov_seq_set_metronome(0);
     assert(ov_seq_arm(0, 1, 1, 1, 4, 1)); render();
     assert(ov_seq_record_phase() == 2 && !rack::clickFrames);
+    assert(ov_seq_transport_beat() == 0);
+    const auto body = rack::recorder.origin;
+    while (rack::musicalPosition.value < body) render();
+    assert(ov_seq_transport_beat() == 4 && !rack::clickFrames);
     assert(ov_rack_stop_all()); render();
     assert(ov_seq_read_record(result.get()));
     ov_seq_set_metronome(1);

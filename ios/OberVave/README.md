@@ -129,6 +129,9 @@ Stop All resets to 1:1. The metronome button toggles clicks during count-in,
 recording and playback, including queued completion, and remembers its setting
 between launches. The high click always matches beat one of the shared counter,
 including delayed ARP Output recording. Waiting for a note alone stays silent.
+When recording starts from idle, 1:1 begins at the actual recording start,
+not the earlier key press while waiting for ARP output. It then advances
+continuously into loop playback; a take joining existing playback does not reset it.
 Enabling during playback starts clicks at the next beat, without replaying one.
 This is audio-clock-driven and does not record metronome sound into MIDI.
 

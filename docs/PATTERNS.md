@@ -259,13 +259,17 @@ same-cell/off-grid drops are no-ops.
 
 The shared count-in/recording/playback metronome uses the existing 25 ms synthesized
 click on the audio owner. Click boundaries and accents use the same quarter index
-as the header, not the recorder's potentially delayed ARP Output origin. Its atomic
+as the header. Its atomic
 enable flag mutes immediately and consumes muted beats so toggling on does not
 replay an old click. Waiting alone does not trigger it. First beat is
 1760 Hz and other quarters 1320 Hz, mixed after MIDI capture.
 The global header's one-based bar/beat counter samples an audio-published
 64-bit quarter index, continuing across concurrent loops and later takes.
-Its origin is the shared bar containing initial transport activity; it freezes
+When a recording starts an idle internal transport, its actual capture origin
+defines 1:1 (the first emitted ARP note in Output/Wait mode), not the preceding
+shared bar. Count-in starts at 1:1 and continues into the body. Joining an already
+active transport never resets the counter; playback-only/external starts retain
+the shared bar grid. The counter freezes
 when no recording/player is active and Stop All resets it. Count-in participates
 in the shared counter; per-pattern loop progress remains independent.
 
