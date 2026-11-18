@@ -239,11 +239,50 @@ the adapter and receiver context until cleanup succeeds, or explicitly panic
 and reconcile the destination before retiring them. There is no success-shaped
 fallback or implicit dropping of pending external ownership.
 
-This adapter does not yet distinguish multiple physical input sources holding
-the same pitch. It preserves legacy pitch-based held semantics, not complete
-source-note ownership. Integrate and test those surfaces,
-scene swaps, endpoint identity, keyboard key locks and the independent AU
-before enabling the extracted scheduler in production.
+### Physical input ownership
+
+The optional final `attach` argument `InputOwnership::SourceNotes` enables
+the portable `native/Musical/NoteOwnership.h` ledger for this destination.
+`LegacyPitch` remains the explicit compatibility default for legacy-oracle
+traces, not the intended final multi-source routing policy. Neither platform
+creates this experimental adapter yet.
+
+The ledger holds up to 256 physical owners keyed by source kind/ID, input
+channel, pitch and note ID. Each accepted On retriggers as before; repeating
+the same key replaces its captured On without growing storage. Distinct
+nonzero IDs allow overlapping notes from the same source; zero retains
+traditional same-source/channel/pitch replacement behavior. A matching Off
+removes only its owner and reaches the synth/ARP held list only when it was
+the final physical owner of that pitch. Unmatched/duplicate/stale Offs are
+recognized no-ops, not a release of another source's note.
+
+Sustain and Latch remain downstream: the ledger tracks physical presses, not
+pedal-retained voices. Successful Stop or interpreted Panic clears owners.
+Sustain release does not resurrect physically released owners. No MIDI source
+is invented by this layer: the caller must supply real endpoint identities and
+consistent On/Off note IDs. Existing platform inputs still lack that complete
+ingress wiring, so enabling the policy alone cannot distinguish two external
+keyboards both reported as source zero.
+
+`releaseSource(source, time)` removes a disconnected source's physical owners,
+using each accepted On's captured channel, note ID and routing. Other sources'
+same-pitch keys remain held. It behaves like releasing keys, so Sustain/Latch
+may intentionally retain the resulting notes; it is not destination Panic.
+This destination-local ledger does not replace rack-wide captured routing:
+the rack must still deliver each Off/source cleanup to its original instruments
+after selection, channel, zone or scene edits.
+
+Invalid input fails before mutation. Capacity overflow returns `Full` in the
+portable core; adapter overflow explicitly faults and releases local gates,
+retaining owner state until successful Stop. A rejected downstream final Off
+remains owned for retry. Source cleanup can make partial progress: accepted
+releases are removed, the rejected release and remaining owners stay pending.
+The portable callback must reject without side effects and must not re-enter
+the same ledger. The adapter's own processing failure requires Stop, not
+blindly retrying a partially processed input.
+
+Live rack/key-lock/scene integration, real endpoint identity propagation and
+independent AU validation remain required before production enablement.
 
 ## Tests
 
@@ -317,3 +356,10 @@ trace, checking order, pitch/velocity, monotonic 64-bit time, pinned destination
 source lifetime ID and matching note ownership. Failure tests reject part of
 a chord and then reject its cleanup Off, verifying retained ownership,
 repeatable Stop cleanup, local gate release, immutable destination and recovery.
+The additional `note_ownership` suite covers same-pitch source kind/endpoint/
+channel/note-ID isolation, repeat retrigger, captured source cleanup, partial
+rejection/retry, capacity and validation. Source-aware adapter tests cover all
+ARP/Latch modes, held voices after another source releases, Sustain, Panic and
+overflow recovery. The complete 29,184-block single-source lifecycle matrix is
+also run with `SourceNotes` enabled against legacy audio, while the legacy
+mixed trace retains its intentionally different unmatched-Off behavior.

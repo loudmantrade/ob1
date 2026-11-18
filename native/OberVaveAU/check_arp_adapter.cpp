@@ -36,11 +36,12 @@ struct Comparison {
         self.output.push_back(event);
         return true;
     }
-    Comparison()
+    explicit Comparison(ArpeggiatorAdapter::InputOwnership ownership =
+                            ArpeggiatorAdapter::InputOwnership::LegacyPitch)
     {
         legacy->initialize();
         external->initialize();
-        assert(adapter.attach(7, 9, 42, receive, this));
+        assert(adapter.attach(7, 9, 42, receive, this, ownership));
         assert(!adapter.attach());
     }
     void parameter(uint32_t p, uint8_t value)
@@ -183,8 +184,85 @@ static void checkOutputFailure()
     std::puts("PASS generated-output rejection: accepted-note ownership retained, failed Note Off retried, DSP gates released, destination immutable and Stop recovery");
 }
 
+static void checkSourceOwnership()
+{
+    for (uint8_t mode = 0; mode < NARPMODE; ++mode) {
+        for (uint8_t latch = 0; latch < 3; ++latch) {
+            auto engine = std::make_unique<Engine>();
+            engine->initialize();
+            ArpeggiatorAdapter adapter {*engine};
+            assert(adapter.attach(0, 0, 0, nullptr, nullptr,
+                                  ArpeggiatorAdapter::InputOwnership::SourceNotes));
+            assert(adapter.parameter(P_ARP_MODE, mode, {}));
+            assert(adapter.parameter(P_ARP_LATCH, latch, {}));
+            music::Event midi {}, touch {};
+            assert(music::decodeMIDI(0x90, 60, 100, {music::SourceKind::ExternalMIDI, 1}, {}, midi)
+                   == music::EventError::None);
+            touch = midi;
+            touch.source = {music::SourceKind::TouchKeyboard, 1};
+            assert(adapter.input(midi) && adapter.input(touch) && adapter.inputOwnerCount() == 2);
+            int32_t audio[CTL * 2] {};
+            assert(adapter.render(audio, CTL, {}));
+            const auto sequence = engine->vseq;
+            midi.kind = music::Kind::NoteOff; midi.data2 = 0; midi.time.frame = CTL;
+            assert(adapter.input(midi) && adapter.inputOwnerCount() == 1);
+            assert(adapter.processor().heldCount() == 1);
+            // Stale source Off must not remove the other source's physical key.
+            assert(adapter.input(midi) && engine->vseq == sequence);
+            assert(adapter.render(audio, CTL, {CTL}));
+            if (mode == A_OFF || mode >= A_CHORD) {
+                assert(std::any_of(std::begin(engine->vc), std::end(engine->vc), [](const auto& voice) {
+                    return voice.gate && voice.note == 60;
+                }));
+            }
+            assert(adapter.releaseSource(touch.source, {CTL * 2}));
+            assert(adapter.inputOwnerCount() == 0);
+            assert(adapter.processor().heldCount() == (mode && latch ? 1u : 0u));
+            assert(adapter.stop({CTL * 2}));
+            for (const auto& voice : engine->vc) assert(!voice.gate);
+            assert(!adapter.inputOwnerCount() && !adapter.processor().heldCount());
+            touch.note = 7;
+            assert(adapter.input(touch));
+            touch.note = 8;
+            assert(adapter.input(touch) && adapter.inputOwnerCount() == 2);
+            touch.kind = music::Kind::NoteOff; touch.data2 = 0;
+            assert(adapter.input(touch) && adapter.inputOwnerCount() == 1);
+            music::Event pedal {};
+            assert(music::decodeMIDI(0xB0, 64, 127, {}, {32}, pedal) == music::EventError::None);
+            assert(adapter.input(pedal));
+            touch.note = 7;
+            assert(adapter.input(touch) && !adapter.inputOwnerCount());
+            assert(adapter.processor().heldCount() == 1);
+            pedal.data2 = 0;
+            assert(adapter.input(pedal) && !adapter.processor().heldCount());
+            touch.kind = music::Kind::NoteOn; touch.data2 = 100;
+            assert(adapter.input(touch));
+            music::Event panic {};
+            assert(music::decodeMIDI(0xB0, 123, 0, {}, {32}, panic) == music::EventError::None);
+            assert(adapter.input(panic) && !adapter.inputOwnerCount());
+        }
+    }
+    auto engine = std::make_unique<Engine>();
+    engine->initialize();
+    ArpeggiatorAdapter adapter {*engine};
+    assert(adapter.attach(0, 0, 0, nullptr, nullptr, ArpeggiatorAdapter::InputOwnership::SourceNotes));
+    music::Event note {};
+    assert(music::decodeMIDI(0x90, 60, 100, {}, {}, note) == music::EventError::None);
+    for (uint32_t i = 0; i < music::NoteOwnership::capacity; ++i) {
+        note.note = i + 1;
+        assert(adapter.input(note));
+    }
+    note.note = music::NoteOwnership::capacity + 1;
+    assert(!adapter.input(note) && adapter.faulted());
+    assert(adapter.inputOwnerCount() == music::NoteOwnership::capacity);
+    for (const auto& voice : engine->vc) assert(!voice.gate);
+    assert(adapter.stop({}) && !adapter.inputOwnerCount() && !adapter.faulted());
+    std::puts("PASS source-aware adapter: shared pitch across keyboard/MIDI and note IDs, unmatched release, source cleanup, Sustain/Latch, Panic/Stop and explicit capacity-fault recovery");
+}
+
 int main()
 {
+    checkSourceOwnership();
     checkOutputFailure();
     {
         Comparison c;
@@ -230,10 +308,12 @@ int main()
         assert(!occupied.attach() && !engine->externalArpeggiator[0]);
     }
     uint64_t blocks = 0;
-    for (uint8_t voice = 0; voice < 4; ++voice)
+    for (const auto ownership : {ArpeggiatorAdapter::InputOwnership::LegacyPitch,
+                                 ArpeggiatorAdapter::InputOwnership::SourceNotes})
+      for (uint8_t voice = 0; voice < 4; ++voice)
         for (uint8_t mode = 1; mode < NARPMODE; ++mode)
             for (uint8_t latch = 0; latch < 3; ++latch) {
-                Comparison c;
+                Comparison c(ownership);
                 c.parameter(P_MODE, voice);
                 c.parameter(P_ARP_MODE, A_OFF);
                 c.parameter(P_ARP_LATCH, latch);

@@ -35,7 +35,7 @@ xcodebuild -project ios/OberVave/OberVave.xcodeproj \
 ### macOS Audio Unit
 
 Requires macOS 13+, Xcode command-line tools, CMake 3.21+ and Ninja.
-Build and run all nine native test suites without replacing an installed AU:
+Build and run all ten native test suites without replacing an installed AU:
 
 ```sh
 NO_INSTALL=1 ARCH=x86_64 tools/build_obervave_au.sh

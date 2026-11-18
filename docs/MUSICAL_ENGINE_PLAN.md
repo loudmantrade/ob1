@@ -179,7 +179,11 @@ Neither platform instantiates it yet. The adapter now publishes accepted
 generated output to an optional synchronous receiver with a pinned logical
 instrument/channel, explicit processor-lifetime source ID and matching note
 IDs. Receiver rejection retains outstanding ownership for Stop retries and
-faults/releases local DSP gates. Connecting that boundary to the rack and
-implementing physical-input source ownership, key-lock/scene integration and
-the independent AU remain production gates. Pattern playback/recording,
+faults/releases local DSP gates. Rack/key-lock/scene integration and the
+independent AU remain production gates.
+An opt-in bounded physical-input ownership ledger now isolates same-pitch
+source/channel/note IDs, retains the final owner and supports captured source
+release and explicit overflow/rejection cleanup. Real endpoint identity and
+rack-wide captured destination wiring are still pending; neither platform
+enables this ledger or the new adapter yet. Pattern playback/recording,
 pattern UI and external MIDI output are not yet implemented.

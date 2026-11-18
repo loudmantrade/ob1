@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include "ArpeggiatorContext.h"
+#include "../Musical/NoteOwnership.h"
 
 namespace obervave {
 
 // Experimental single-native-part adapter. All operations belong to the audio owner.
 class ArpeggiatorAdapter {
 public:
+    enum class InputOwnership : uint8_t { LegacyPitch, SourceNotes };
     using EventSink = bool (*)(void*, const ob1::music::Event&) noexcept;
     explicit ArpeggiatorAdapter(Engine& engine) : engine_(engine) {}
     ArpeggiatorAdapter(const ArpeggiatorAdapter&) = delete;
     ArpeggiatorAdapter& operator=(const ArpeggiatorAdapter&) = delete;
 
     bool attach(uint32_t instrument = 0, uint32_t channel = 0, uint32_t sourceID = 0,
-                EventSink sink = nullptr, void* context = nullptr)
+                EventSink sink = nullptr, void* context = nullptr,
+                InputOwnership ownership = InputOwnership::LegacyPitch)
     {
-        if (attached_ || (context && !sink) || instrument >= ob1::music::instrumentCapacity ||
+        if ((ownership != InputOwnership::LegacyPitch && ownership != InputOwnership::SourceNotes) ||
+            attached_ || (context && !sink) || instrument >= ob1::music::instrumentCapacity ||
             channel > 15 || std::any_of(std::begin(engine_.externalArpeggiator),
                                     std::end(engine_.externalArpeggiator),
                                     [](bool external) { return external; })) return false;
@@ -24,6 +28,7 @@ public:
         outputSourceID_ = sourceID;
         eventSink_ = sink;
         eventContext_ = context;
+        sourceOwnership_ = ownership == InputOwnership::SourceNotes;
         attached_ = true;
         return view() || fail();
     }
@@ -45,6 +50,28 @@ public:
     }
 
     bool input(const ob1::music::Event& event, bool fixedCC = false, bool controllers = true)
+    {
+        if (!ready()) return false;
+        if (!sourceOwnership_ || !ob1::music::isNote(event))
+            return inputPitch(event, fixedCC, controllers);
+        auto sink = [&](const ob1::music::Event& note) { return inputPitch(note, fixedCC, controllers); };
+        const auto result = ownership_.input(event, sink);
+        if (result == ob1::music::OwnershipResult::Full ||
+            result == ob1::music::OwnershipResult::OutputRejected) return fail();
+        return result != ob1::music::OwnershipResult::InvalidInput;
+    }
+
+    bool releaseSource(ob1::music::Source source, ob1::music::Time time)
+    {
+        if (!ready() || !sourceOwnership_) return false;
+        auto sink = [&](const ob1::music::Event& off) { return inputPitch(off, false, false); };
+        const auto result = ownership_.releaseSource(source, time, sink);
+        if (result == ob1::music::OwnershipResult::OutputRejected) return fail();
+        return result != ob1::music::OwnershipResult::InvalidInput;
+    }
+
+private:
+    bool inputPitch(const ob1::music::Event& event, bool fixedCC, bool controllers)
     {
         namespace music = ob1::music;
         if (!ready() || music::validate(event) != music::EventError::None ||
@@ -91,6 +118,7 @@ public:
         return syncSustain();
     }
 
+public:
     bool render(int32_t* output, uint32_t frames, ob1::music::Time start)
     {
         if (!ready() || !output || !frames || frames > HALF_FRAMES || frames % CTL ||
@@ -113,10 +141,13 @@ public:
 
     bool faulted() const { return fault_; }
     const ob1::music::ArpeggiatorProcessor& processor() const { return processor_; }
+    uint32_t inputOwnerCount() const { return ownership_.count(); }
 
 private:
     Engine& engine_;
     ob1::music::ArpeggiatorProcessor processor_;
+    ob1::music::NoteOwnership ownership_;
+    bool sourceOwnership_ = false;
     ob1::music::Time time_ {}, renderStart_ {};
     ob1::music::ArpSettings previousEffective_ {};
     bool attached_ = false, fault_ = false, sustain_ = false, wasOn_ = false;
@@ -209,6 +240,7 @@ private:
     {
         auto sink = output();
         if (processor_.stop(time_, sink) != ob1::music::ArpResult::Ok) return fail();
+        ownership_.clear();
         sustain_ = wasOn_ = false;
         return true;
     }
