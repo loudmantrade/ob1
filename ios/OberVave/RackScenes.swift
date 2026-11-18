@@ -622,7 +622,7 @@ struct SequencerRecordModeControl: View {
                     Text("Input · before ARP").tag(false)
                 }.pickerStyle(.segmented)
                 Text(help).font(.caption).foregroundStyle(.secondary)
-                Text("During scene playback, Wait for note and Immediate join the next bar and capture the pickup. Count-in counts full bars. Tap the recording pad again to finish at the end of the bar and play.")
+                Text("Wait for note always waits for the selected instrument's first note, even during playback. Immediate joins the next bar during playback and captures the pickup. Count-in counts full bars. Tap the recording pad again to finish at the end of the bar and play.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .padding(20).frame(width: 380)

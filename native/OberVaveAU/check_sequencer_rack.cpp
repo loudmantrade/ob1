@@ -200,8 +200,9 @@ static void checkPadRecording()
     backing->notes[0].pitch = 48;
     assert(ov_seq_set_clip(backing.get())); assert(ov_seq_launch(1, 0, 0)); render();
     assert(ov_seq_record_phase() == 1);
+    const auto playingAnchor = rack::sequencerAnchor;
     ov_note_on(60, 100); render();
-    assert(ov_seq_record_phase() == 3 && rack::recorder.origin % (3840 * music::tickUnit) == 0);
+    assert(ov_seq_record_phase() == 3 && rack::sequencerAnchor == playingAnchor);
     render(1024); ov_note_off(60); render();
     render(rack::clock.length());
     assert(ov_seq_recording_slot() == -1 && ov_seq_active(0) == 0);
@@ -288,7 +289,7 @@ static void checkPadRecording()
     for (const auto& note : rack::players[0].active) if (note.used) assert(note.on.data1 != 67);
     stop();
 
-    for (uint32_t mode : {0u, 2u, 1u}) {
+    for (uint32_t mode : {2u, 1u}) {
         assert(ov_seq_launch(1, 0, 0)); render();
         assert(ov_seq_arm(0, 3, mode, 1, 1, 0)); render();
         const auto bar = 3840 * music::tickUnit;
@@ -634,6 +635,59 @@ static void checkOutputFirstNoteOrigin()
     std::puts("PASS Output Wait-for-note: compensated ARP first emitted onset defines zero, full bar capture and final held gate reach endpoint, audio-owned loop handover");
 }
 
+static void checkWaitDuringPlayback()
+{
+    for (uint32_t output : {0u, 1u}) {
+        auto scene = std::make_unique<ov_scene_config>();
+        scene->tempo = 120;
+        scene->slots[0] = {1, config(output ? rack::A_UP : 0)};
+        scene->slots[0].config.parameters[rack::P_ARP_LATCH] = 1;
+        scene->slots[1] = {1, config()};
+        scene->slots[1].config.channel = 2;
+        auto own = std::make_unique<ov_seq_clip>(clip(0, 0));
+        auto backing = std::make_unique<ov_seq_clip>(clip(1, 0));
+        assert(ov_rack_load(scene.get())); render();
+        assert(ov_seq_set_clip(own.get()) && ov_seq_set_clip(backing.get()));
+        assert(ov_seq_launch(0, 0, 0) && ov_seq_launch(1, 0, 0)); render();
+        const auto anchor = rack::sequencerAnchor;
+        const auto transportOrigin = rack::transportOrigin;
+        const auto backingOrigin = rack::players[1].origin;
+        ov_set_arp_audio_latency_ms(20);
+        assert(ov_seq_arm(0, 1, 0, 1, 4, output)); render();
+        render(rack::clock.length() * 8);
+        assert(rack::recorder.waiting && ov_seq_record_phase() == 1);
+        assert(rack::recorder.stopAt == INT64_MAX && !rack::recorder.started);
+        ov_midi_message(0x91, 72, 100); render();
+        ov_midi_message(0x81, 72, 0); render();
+        assert(rack::recorder.waiting); // Another instrument cannot trigger this take.
+        const auto before = rack::musicalPosition.value;
+        ov_midi_message(0x90, 67, 100); render();
+        assert(rack::sequencerAnchor == anchor);
+        assert(rack::musicalPosition.value - before < 2 * CTL * music::ticksPerQuarter *
+            music::tickUnit / rack::clock.length());
+        if (output) assert(rack::recorder.waiting);
+        while (!rack::recorder.started) render();
+        assert(!rack::recorder.waiting && rack::recorder.data.notes[0].start == 0);
+        const auto start = rack::recorder.origin;
+        assert(rack::recorder.stopAt == start + 3840 * music::tickUnit);
+        assert(rack::transportOrigin == transportOrigin && rack::players[1].origin == backingOrigin);
+        assert(ov_seq_active(0) == 0 && ov_seq_active(1) == 0);
+        render(1024);
+        ov_midi_message(0x80, 67, 0); render();
+        while (rack::recorder.running) render();
+        auto result = std::make_unique<ov_seq_clip>();
+        assert(ov_seq_read_record(result.get()) && result->count && result->notes[0].start == 0);
+        assert(result->length == 3840 && result->intro == 0);
+        assert(ov_seq_active(0) == 1 && ov_seq_active(1) == 0);
+        assert(rack::players[0].origin == start + 3840 * music::tickUnit);
+        assert(rack::transportOrigin == transportOrigin && rack::sequencerAnchor == anchor);
+        assert(ov_rack_stop_all()); render();
+        assert(!ov_rack_take_error());
+    }
+    ov_set_arp_audio_latency_ms(0);
+    std::puts("PASS Wait during playback: multiple bars/pattern notes/other channels do not trigger, Input and compensated ARP Output start at first note, no clock reset, full take and loop handover");
+}
+
 static void checkRecordingMetronomeAndTransport()
 {
     auto scene = std::make_unique<ov_scene_config>();
@@ -701,5 +755,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

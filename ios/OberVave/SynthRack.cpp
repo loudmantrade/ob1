@@ -571,7 +571,9 @@ void observeInput(uint32_t slot, const music::Event& event)
     if (recorder.running && recorder.slot == slot && recorder.waiting &&
         event.kind == music::Kind::NoteOn && event.source.kind != music::SourceKind::Pattern) {
         if (!recordingClockPrimed) {
-            alignRecordingClock();
+            bool playing = clock.external;
+            for (const auto& player : players) playing |= player.row >= 0 || player.pendingRow >= 0;
+            if (!playing) alignRecordingClock();
             recordingClockPrimed = true;
         }
         if (!recorder.output) recorder.firstNote(musicalPosition.value);

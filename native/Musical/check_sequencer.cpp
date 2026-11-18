@@ -236,7 +236,15 @@ static void checkRecordModes()
     recorder->arm(0, 0, settings->data(), 0, RecordMode::WaitForNote, 1, 0, false, true);
     recorder->finish(10000 * tickUnit);
     assert(recorder->cancelled && !recorder->publish(*recorded));
-    for (auto mode : {RecordMode::WaitForNote, RecordMode::Immediate}) {
+    recorder->arm(0, 0, settings->data(), 3500 * tickUnit, RecordMode::WaitForNote, 1, 4, true, true);
+    assert(recorder->waiting && recorder->stopAt == INT64_MAX);
+    assert(recorder->phase(20000 * tickUnit) == 1 && !recorder->withIntro);
+    recorder->firstNote(20123 * tickUnit);
+    assert(recorder->origin == 20123 * tickUnit && recorder->stopAt == 23963 * tickUnit);
+    assert(recorder->capture(note(Kind::NoteOn), recorder->origin));
+    recorder->finish(recorder->stopAt);
+    assert(recorder->data.notes[0].start == 0 && recorder->data.intro == 0);
+    for (auto mode : {RecordMode::Immediate}) {
         recorder->arm(0, 0, settings->data(), 3500 * tickUnit, mode, 1, 3, true, true);
         assert(!recorder->waiting && recorder->origin == 3840 * tickUnit);
         assert(recorder->capture(note(Kind::NoteOn), 3600 * tickUnit));

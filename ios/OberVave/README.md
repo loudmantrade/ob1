@@ -92,13 +92,16 @@ feed their own notes through the saved ARP mode.
   Waiting is a red clock, count-in adds metronome/countdown dots; capture has
   red circular bar progress and queued completion adds a square.
 - The header **Record mode** button selects **Wait for note**, **Count-in** or
-  **Immediate**, plus Input/Output capture. Wait for note arms indefinitely on a
-  stopped scene; Input capture starts on the first live Note On, while Output
+  **Immediate**, plus Input/Output capture. Wait for note arms indefinitely,
+  even during playback; Input capture starts on the selected instrument's first live Note On, while Output
   capture starts on the first actual direct/ARP Note On. ARP grid/latency waiting
   does not add silence at the start or shorten the end of the take. Immediate starts beat
   one at the tap. Count-in counts **1 or 2 complete 4/4 bars** with **4 or 8
   audible metronome clicks**; playing during the count becomes one-shot intro.
-  When a scene is playing, Wait for note/Immediate join its next bar and record
+  Wait for note never starts merely because a bar boundary passes; existing
+  pattern notes and notes routed only to other instruments do not trigger it.
+  The first note defines tick zero without resetting an already playing clock.
+  When a scene is playing, Immediate joins its next bar and records
   everything before that boundary as intro. Count-in instead begins its full
   count on the next bar, then starts the body. Stopping before the body begins
   cancels the take without creating/replacing the cell.

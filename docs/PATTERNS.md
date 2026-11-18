@@ -172,7 +172,11 @@ or generated ARP). The first live input primes the stopped master clock only
 once, but ARP grid/latency wait is not captured as leading silence or deducted
 from the take's ending. The first output defines tick zero and the full capture
 deadline; later chord inputs never re-anchor the clock while waiting for ARP.
-`Immediate` starts on arm when stopped. During scene playback both join the
+Wait remains armed during scene playback, across any number of bar boundaries.
+Only a non-pattern note routed to the selected instrument can start it; its
+actual first input/output note defines zero without an intro or resetting an
+already active internal/external clock.
+`Immediate` starts on arm when stopped. During scene playback it joins the
 next bar, recording the pre-boundary region as intro. `CountIn` counts 4 or 8
 quarter-note clicks; on a playing scene counting starts at its next bar and
 the whole count is retained. The metronome is synthesized on the shared audio

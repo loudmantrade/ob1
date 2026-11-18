@@ -178,13 +178,13 @@ public:
         freeLength = beats == 0;
         data.length = beats ? Tick(beats) * ticksPerQuarter : maxPatternTicks;
         data.loop = true;
-        waiting = mode == RecordMode::WaitForNote && !scenePlaying;
+        waiting = mode == RecordMode::WaitForNote;
         origin = scenePlaying ? ClipPlayer::boundary(now, LaunchGrid::Bar) : now;
         if (mode == RecordMode::CountIn) {
             countStart = origin; countBeats = bars * 4;
             origin += int64_t(countBeats) * ticksPerQuarter * tickUnit;
         }
-        withIntro = mode == RecordMode::CountIn || scenePlaying;
+        withIntro = mode == RecordMode::CountIn || (scenePlaying && !waiting);
         data.introEnabled = withIntro;
         stopAt = waiting || freeLength ? INT64_MAX : origin + data.length * tickUnit;
     }
