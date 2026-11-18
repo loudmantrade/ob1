@@ -48,6 +48,15 @@ documented in [the arpeggiator integration contract](../../docs/ARPEGGIATOR.md).
 The AU retains its separate legacy scheduler for now; this does not add
 pattern recording/playback or external MIDI output.
 
+The top header contains a **square Stop icon** next to Tempo, grouped as the
+global transport panel for future sequencer controls. It stops all instruments'
+playback on one audio boundary, releases direct/ARP/Chord/Hold notes despite
+Latch or Sustain, clears screen Key-Lock notes and cancels already scheduled
+MIDI playback. It does not change modes, patches, tempo, sync or mixer settings.
+Release envelopes and chorus/delay/reverb tails continue naturally; effects
+are neither reset nor muted. New live input after Stop plays immediately.
+There is no sequencer or external MIDI Stop transmission yet.
+
 LFO Rate displays Hz to two decimal places, calculated from the DSP phase
 increment table and the 44.1 kHz / 16-sample control rate. The parameter's
 0-127 scale is nonlinear; correcting the readout does not change saved sounds.

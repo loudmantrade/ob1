@@ -646,6 +646,13 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         ov_all_notes_off()
     }
 
+    func stopAllPlayback() {
+        keyboardLock.clear()
+        if ov_rack_stop_all() == 0 {
+            errorMessage = "The transport stop queue overflowed. Notes will be stopped to prevent stuck notes."
+        }
+    }
+
     func parameterValue(_ parameter: SynthParameter) -> Int {
         guard parameter.rawValue < parameterValues.count else { return 0 }
         return parameterValues[parameter.rawValue]
@@ -1597,10 +1604,28 @@ struct ContentView: View {
             Spacer()
             Text("\(model.instruments.count)/16")
                 .font(.caption.monospaced()).foregroundStyle(.secondary)
-            SynthTempoControl(model: model)
+            transportControls
         }
         .font(.subheadline.weight(.semibold))
         .padding(.horizontal, 12)
+    }
+
+    private var transportControls: some View {
+        HStack(spacing: 8) {
+            Button(action: model.stopAllPlayback) {
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 44, height: 44)
+                    .foregroundStyle(.white)
+                    .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Stop all playback")
+            .accessibilityHint("Releases all notes and stops all arpeggiators, preserving effect tails.")
+            SynthTempoControl(model: model)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Transport")
     }
 
     private var instrumentHeader: some View {

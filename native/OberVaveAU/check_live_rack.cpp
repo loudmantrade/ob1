@@ -319,10 +319,80 @@ static void checkRack()
     std::puts("PASS production extracted-ARP rack: 16 instances/all modes, no legacy held/FIFO activity, source/channel/touch ownership, captured routing, pedals, disconnect/scheduled cleanup, Latch, Stop/rearm, VALUE controls and 64-bit wrap");
 }
 
+static void checkStopAll()
+{
+    ov_scene_config scene {};
+    scene.tempo = 123;
+    for (uint32_t slot = 0; slot < rack::capacity; ++slot) {
+        auto c = config(slot + 1, slot % rack::NARPMODE);
+        c.parameters[rack::P_ARP_LATCH] = slot % 3;
+        c.parameters[rack::P_AR] = 0;
+        c.parameters[rack::P_DLY_MIX] = 100;
+        c.parameters[rack::P_DLY_FB] = 100;
+        c.parameters[rack::P_REV_MIX] = 100;
+        scene.slots[slot] = {1, c};
+    }
+    assert(ov_rack_load(&scene)); render();
+    ov_keyboard_channels(0xFFFF);
+    ov_note_on(60, 100);
+    ov_keyboard_control(0xB0, 64, 127);
+    render(44100);
+    for (uint32_t slot = 0; slot < rack::capacity; ++slot) {
+        assert(held(slot) && engine(slot).dsp.ctl_sustain);
+        ov_midi_message_at(0x90 | slot, 67, 100, ov_audio_frame() + 44100);
+    }
+    render();
+    assert(rack::scheduledCount == rack::capacity);
+    const std::vector<int16_t> memory(std::begin(engine(0).dsp.fx_mem), std::end(engine(0).dsp.fx_mem));
+    const auto generation = ov_rack_stop_generation();
+    assert(ov_rack_stop_all());
+    assert(!rack::keyboardHeld[60].load());
+    rack::drain();
+    assert(ov_rack_stop_generation() == generation + 1 && !rack::scheduledCount);
+    assert(!ov_sustain_down_channels());
+    assert(std::equal(memory.begin(), memory.end(), std::begin(engine(0).dsp.fx_mem)));
+    for (uint32_t slot = 0; slot < rack::capacity; ++slot) {
+        assert(!held(slot) && !engine(slot).arpeggiator.processor().activeCount());
+        assert(!rack::scene->slots[slot]->noteOwners.count() && !engine(slot).dsp.ctl_sustain);
+        for (const auto& voice : engine(slot).dsp.vc) assert(!voice.gate);
+        for (uint32_t p = 0; p < rack::NPARAM; ++p)
+            assert(engine(slot).parameter(p) == scene.slots[slot].config.parameters[p]);
+    }
+    // Let zero-release envelopes settle, then require audible FX with every gate released.
+    render(4410);
+    double tailEnergy = 0;
+    for (uint32_t i = 0; i < 256; ++i) {
+        float left[256], right[256];
+        ov_render(left, right, 256);
+        for (uint32_t j = 0; j < 256; ++j) {
+            assert(std::isfinite(left[j]) && std::isfinite(right[j]));
+            tailEnergy += double(left[j]) * left[j] + double(right[j]) * right[j];
+        }
+    }
+    assert(tailEnergy > 0.000001 && !rack::scheduledCount);
+    for (uint32_t slot = 0; slot < rack::capacity; ++slot) assert(!held(slot));
+    assert(ov_rack_stop_all()); render();
+    // FIFO preserves edits and new input *after* Stop, without requiring a mode toggle.
+    assert(ov_rack_stop_all());
+    ov_rack_select(0); ov_set_parameter(rack::P_CUTOFF, 91);
+    ov_note_on(62, 100); render();
+    assert(held(0) == 1 && engine(0).parameter(rack::P_CUTOFF) == 91);
+    ov_note_off(62); render();
+    assert(!held(0));
+    for (uint32_t i = 0; i < rack::queueSize; ++i) ov_set_parameter(rack::P_CUTOFF, 64);
+    assert(!ov_rack_stop_all() && ov_rack_take_error() == 1);
+    render();
+    for (uint32_t slot = 0; slot < rack::capacity; ++slot) assert(!held(slot));
+    assert(!ov_rack_take_error());
+    ov_rack_collect();
+    std::puts("PASS Stop All: all 16 instruments/all ARP modes, direct notes/Latch/Sustain, scheduled cancellation, unchanged parameters/FX memory, audible effect tails, repeat/rearm/FIFO and overflow fallback");
+}
+
 int main()
 {
     checkAudio();
     checkLifecycle();
     checkClock();
     checkRack();
+    checkStopAll();
 }

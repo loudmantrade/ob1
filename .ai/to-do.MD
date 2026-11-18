@@ -265,7 +265,14 @@ Preserve existing parameter values and their serialization behavior.
 
 ### STOP ALL ARPS
 
-Add a global **STOP ALL ARPS** button to stop arpeggio playback
+Implemented in standalone as an icon-only **square Stop playback** button in
+the top header next to Tempo. This shared transport panel will also control
+the sequencer when it is implemented. The action stops all playback, including
+direct notes, clears scheduled MIDI and Key-Lock notes, and releases Sustain
+and Latch-held notes without changing settings. Release envelopes and FX tails
+continue naturally; no effect reset/mute is performed.
+
+Provide a global **STOP ALL ARPS / Stop All** action to stop arpeggio playback
 simultaneously on all MIDI channels and all rack instruments, not only the
 currently selected channel or instrument.
 

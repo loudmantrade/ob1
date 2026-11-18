@@ -313,7 +313,7 @@ void forgetPedals(uint32_t slot)
     for (auto& pedal : pedalOwners) pedal.destinations &= ~(1u << slot);
 }
 
-enum class Kind { MIDI, SourceClose, Parameter, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
+enum class Kind { MIDI, StopAll, SourceClose, Parameter, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
 struct Command {
     Kind kind = Kind::MIDI;
     uint32_t slot = 0, a = 0, b = 0, c = 0, due = 0;
@@ -521,6 +521,11 @@ void routeEvent(const music::Event& event)
 }
 void apply(const Command& c)
 {
+    if (c.kind == Kind::StopAll) {
+        stopAll();
+        scheduledCount = 0;
+        return;
+    }
     if (c.kind == Kind::SourceClose) {
         uint32_t retained = 0;
         for (uint32_t i = 0; i < scheduledCount; ++i)
@@ -851,6 +856,13 @@ uint32_t ov_rack_take_level(uint32_t slot)
     return slot < rack::capacity ? rack::snapshots[slot].peak.exchange(0, std::memory_order_relaxed) : 0;
 }
 uint32_t ov_rack_stop_generation(void) { return rack::stopGeneration.load(std::memory_order_relaxed); }
+int ov_rack_stop_all(void)
+{
+    for (auto& held : rack::keyboardHeld) held.store(0);
+    rack::Command c;
+    c.kind = rack::Kind::StopAll;
+    return rack::enqueue(c);
+}
 int ov_rack_configure(uint32_t slot, uint32_t channel, uint32_t low, uint32_t high,
                       float db, float pan, uint32_t muted)
 {

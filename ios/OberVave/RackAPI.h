@@ -44,6 +44,9 @@ int ov_rack_read(uint32_t slot, ov_instrument_config *config);
 /* Post-instrument level/pan/mute stereo peak, normalized to 0...65535; read clears it. */
 uint32_t ov_rack_take_level(uint32_t slot);
 uint32_t ov_rack_stop_generation(void);
+/* Ordered global transport stop: releases notes, clears scheduled playback,
+   preserves patches and effect tails. Failure reports the existing overflow error/Panic. */
+int ov_rack_stop_all(void);
 int ov_rack_configure(uint32_t slot, uint32_t channel, uint32_t low, uint32_t high,
                       float level_db, float pan, uint32_t muted);
 void ov_rack_select(uint32_t slot);

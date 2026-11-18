@@ -290,6 +290,19 @@ independent AU integration/validation remains outstanding.
 
 ## Live standalone integration
 
+The standalone header's icon-only square Stop button calls the ordered
+`ov_rack_stop_all` transport command. Unlike selecting ARP Off, it releases all
+direct and generated voices across all 16 instruments, clears physical/pedal
+ownership and pending scheduled MIDI, and retains every sound/ARP parameter.
+The model clears Key-Lock notes without disabling Key-Lock; keyboard input
+capture is reset before enqueueing Stop. Generated Offs use the adapter's
+existing Stop sink and preserve source/note/destination identity. FX memory is
+untouched, rendering continues, and natural release/chorus/delay/reverb tails
+are preserved. Later FIFO edits/live input can play immediately. Queue failure
+reports an error and uses existing Panic cleanup. Tests require unchanged FX
+memory at Stop and audible tails afterward, in addition to all-mode,
+all-instrument cleanup, FIFO/rearm and overflow behavior.
+
 `SynthRack.cpp` constructs one `NativeEngine<true>` per logical instrument and
 attaches its processor to the initial slot/channel with a monotonically
 allocated, non-reused processor-lifetime source ID. ID exhaustion rejects engine
