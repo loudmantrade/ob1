@@ -95,6 +95,39 @@ static void checkEventBoundary()
     ov_midi_message(0x80, 50, 0); render();
     assert(sinks[0]->count == 4);
 
+    const auto sourceA = ov_midi_source_open(), sourceB = ov_midi_source_open();
+    assert(sourceA && sourceB && sourceA != sourceB);
+    const auto start = sinks[0]->count;
+    const auto deadline = ov_audio_frame();
+    assert(ov_midi_source_byte_at(sourceA, 0x90, deadline));
+    assert(ov_midi_source_byte_at(sourceA, 51, deadline));
+    assert(ov_midi_source_byte_at(sourceB, 100, deadline)); // Independent parser has no status.
+    assert(ov_midi_source_message_at(sourceB, 0x90, 52, 90, deadline));
+    assert(ov_midi_source_byte_at(sourceA, 100, deadline));
+    render();
+    assert(sinks[0]->count == start + 2);
+    assert(sinks[0]->received[start].data1 == 52 && sinks[0]->received[start].source.id == sourceB);
+    assert(sinks[0]->received[start + 1].data1 == 51 && sinks[0]->received[start + 1].source.id == sourceA);
+    assert(sinks[0]->received[start].source.kind == music::SourceKind::ExternalMIDI);
+    assert(ov_midi_source_close(sourceA));
+    const auto sourceC = ov_midi_source_open();
+    assert(sourceC && sourceC != sourceA);
+    assert(!ov_midi_source_byte_at(sourceA, 80, deadline));
+    assert(!ov_midi_source_message_at(sourceA, 0x90, 53, 100, deadline));
+    assert(ov_midi_source_byte_at(sourceC, 100, deadline));
+    render();
+    assert(sinks[0]->count == start + 2);
+    const auto later = ov_audio_frame() + 64;
+    assert(ov_midi_source_message_at(sourceB, 0x90, 53, 90, later));
+    assert(ov_midi_source_close(sourceB) && ov_midi_source_close(sourceC));
+    render();
+    assert(sinks[0]->count == start + 3 && sinks[0]->received[start + 2].source.id == sourceB);
+    assert(sinks[0]->received[start + 2].data1 == 53);
+    // Legacy path still owns release behavior until source-aware rack routing is enabled.
+    ov_midi_message(0x80, 51, 0); ov_midi_message(0x80, 52, 0);
+    ov_midi_message(0x80, 53, 0); render();
+    sinks[0]->count = start;
+
     music::Event targeted {};
     assert(music::decodeMIDI(0x90, 100, 100, {music::SourceKind::Pattern, 42},
         {rack::processedFrames, 960, true}, targeted) == music::EventError::None);

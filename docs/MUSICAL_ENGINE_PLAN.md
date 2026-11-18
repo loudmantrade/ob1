@@ -30,16 +30,17 @@ Baseline: `master` at `ca75825`; implementation branch: `feat/musical-event-engi
   free-running sequencer clock.
 - CoreMIDI input and the custom BLE parser enter the rack through the existing
   C MIDI APIs. Timestamps are converted to frame deadlines with configurable
-  lookahead. CoreMIDI endpoint identity is not yet propagated: its input
-  callback receives a nil connection context, and the byte parser is shared.
-  External MIDI output is not implemented. Future endpoint ownership must
-  address parser state as well as output routing; do not claim endpoint-level
-  feedback protection before this is wired and tested.
+  lookahead. CoreMIDI and BLE connections now receive distinct non-reused
+  runtime IDs; CoreMIDI connection context selects independent byte-parser
+  state. The command queue preserves these IDs. Disconnect currently closes
+  ingress, not queued/sounding notes; audio-owner cleanup with captured rack
+  destinations is still pending. External MIDI output and endpoint-level
+  feedback protection are not implemented.
 - Keyboard Note On captures its channel mask; Note Off uses the captured
   channels rather than the current selection. SwiftUI `KeyboardLockState`
-  retains locked note/channel pairs. Source identity is currently lost after
-  entry to `rack::send`; the event model must retain it without changing
-  Key-Lock gestures or controller timing.
+  retains locked note/channel pairs. Source identity survives `rack::send`;
+  complete source-aware captured routing must preserve Key-Lock gestures and
+  controller timing.
 - `native/OberVave/Engine.h` wraps the vendored DSP per instance, handles raw
   controllers, signed temporary modulation and latency compensation.
   Controller routes can change effective ARP/Latch settings while sounding;
@@ -183,7 +184,9 @@ faults/releases local DSP gates. Rack/key-lock/scene integration and the
 independent AU remain production gates.
 An opt-in bounded physical-input ownership ledger now isolates same-pitch
 source/channel/note IDs, retains the final owner and supports captured source
-release and explicit overflow/rejection cleanup. Real endpoint identity and
-rack-wide captured destination wiring are still pending; neither platform
+release and explicit overflow/rejection cleanup. Standalone connection IDs
+and independent ingress parsers are wired through the existing queue.
+Audio-owner disconnect cleanup and rack-wide captured destination wiring are
+still pending; neither platform
 enables this ledger or the new adapter yet. Pattern playback/recording,
 pattern UI and external MIDI output are not yet implemented.

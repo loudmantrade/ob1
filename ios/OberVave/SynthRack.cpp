@@ -2,6 +2,7 @@
 #include "OberVave-Bridging-Header.h"
 #include "../../native/OberVave/Engine.h"
 #include "../../native/Musical/Routing.h"
+#include "../../native/Musical/MIDIIngress.h"
 #include <array>
 #include <atomic>
 #include <memory>
@@ -226,7 +227,8 @@ music::Frame processedFrames = 0;
 ov_scene_config capturedScene {};
 std::atomic<uint32_t> captureState {0};
 std::array<std::atomic<uint32_t>, 128> keyboardHeld {};
-uint8_t midiStatus = 0, midiData[2] {}, midiCount = 0;
+music::MIDIByteParser legacyMIDIParser;
+music::MIDIIngress midiIngress;
 std::atomic<uint32_t> keyLearn {0};
 std::atomic<uint32_t> controllerLearnSlot {0}, controllerLearned {0};
 std::atomic<uint32_t> sustainInverted {0}, sustainInput {0};
@@ -573,10 +575,11 @@ void command(Kind kind, uint32_t a = 0, uint32_t b = 0)
     c.b = b;
     enqueue(c);
 }
-void send(uint32_t status, uint32_t d1, uint32_t d2, uint32_t frame, bool timed, bool external = true)
+bool send(uint32_t status, uint32_t d1, uint32_t d2, uint32_t frame, bool timed,
+          bool external = true, uint32_t sourceID = 0)
 {
     if (!((status >= 0x80 && status < 0xF0 && d1 <= 127 && d2 <= 127) ||
-          status == 0xF8 || status == 0xFA || status == 0xFB || status == 0xFC)) return;
+          status == 0xF8 || status == 0xFA || status == 0xFB || status == 0xFC)) return false;
     if ((status & 0xF0) == 0xB0 && d1 == 64)
         sustainInput.store(0x10000 | ((status & 15) << 8) | d2);
     if (external && (status & 0xF0) == 0x90 && d2 != 0) {
@@ -586,7 +589,8 @@ void send(uint32_t status, uint32_t d1, uint32_t d2, uint32_t frame, bool timed,
     Command c;
     c.a = status; c.b = d1; c.c = d2; c.due = frame; c.scheduled = timed;
     c.source.kind = external ? music::SourceKind::ExternalMIDI : music::SourceKind::TouchKeyboard;
-    enqueue(c);
+    c.source.id = sourceID;
+    return enqueue(c);
 }
 } // namespace rack
 
@@ -814,17 +818,31 @@ static void midiByte(uint32_t value, uint32_t frame, bool timed)
 {
     using namespace rack;
     std::lock_guard<std::mutex> lock(parserMutex);
-    const auto byte = uint8_t(value);
-    if (byte >= 0xF8) { send(byte, 0, 0, frame, timed); return; }
-    if (byte & 0x80) { midiStatus = byte < 0xF0 ? byte : 0; midiCount = 0; return; }
-    if (!midiStatus) return;
-    midiData[midiCount++] = byte & 0x7F;
-    const auto kind = midiStatus & 0xF0;
-    const uint32_t expected = kind == 0xC0 || kind == 0xD0 ? 1 : 2;
-    if (midiCount == expected) {
-        send(midiStatus, midiData[0], expected == 2 ? midiData[1] : 0, frame, timed);
-        midiCount = 0;
-    }
+    auto sink = [&](uint32_t s, uint32_t a, uint32_t b) { return send(s, a, b, frame, timed); };
+    legacyMIDIParser.input(value, sink);
+}
+uint32_t ov_midi_source_open(void)
+{
+    std::lock_guard<std::mutex> lock(rack::parserMutex);
+    return rack::midiIngress.open();
+}
+uint32_t ov_midi_source_close(uint32_t source)
+{
+    std::lock_guard<std::mutex> lock(rack::parserMutex);
+    return rack::midiIngress.close(source);
+}
+uint32_t ov_midi_source_byte_at(uint32_t source, uint32_t byte, uint32_t frame)
+{
+    std::lock_guard<std::mutex> lock(rack::parserMutex);
+    auto sink = [&](uint32_t s, uint32_t a, uint32_t b) {
+        return rack::send(s, a, b, frame, true, true, source);
+    };
+    return rack::midiIngress.input(source, byte, sink);
+}
+uint32_t ov_midi_source_message_at(uint32_t source, uint32_t status, uint32_t a, uint32_t b, uint32_t frame)
+{
+    std::lock_guard<std::mutex> lock(rack::parserMutex);
+    return rack::midiIngress.contains(source) && rack::send(status, a, b, frame, true, true, source);
 }
 void ov_midi_byte(uint32_t byte) { midiByte(byte, 0, false); }
 void ov_midi_byte_at(uint32_t byte, uint32_t frame) { midiByte(byte, frame, true); }

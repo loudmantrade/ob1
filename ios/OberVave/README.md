@@ -22,6 +22,14 @@ and have been removed. The original emulator's MIT notice is preserved in
 
 ## Scenes and multitimbral rack
 
+CoreMIDI ports and custom Bluetooth MIDI peripherals have separate runtime
+connection IDs. CoreMIDI running status and incomplete messages are parsed
+independently per connection, so interleaved inputs cannot complete one another's
+messages. Reconnecting creates a fresh ID/parser; legacy synth/ARP routing and
+clock behavior remain unchanged. Source-specific sounding-note cleanup on
+disconnect is still a pending event-routing integration step; closing a port
+currently rejects new input without cancelling accepted scheduled messages.
+
 LFO Rate displays Hz to two decimal places, calculated from the DSP phase
 increment table and the 44.1 kHz / 16-sample control rate. The parameter's
 0-127 scale is nonlinear; correcting the readout does not change saved sounds.

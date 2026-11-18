@@ -413,13 +413,14 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     private var centralManager: CBCentralManager!
     private var midiClient = MIDIClientRef()
     private var midiInput = MIDIPortRef()
-    private var connectedSources = Set<MIDIEndpointRef>()
+    private var connectedSources: [MIDIEndpointRef: UInt32] = [:]
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
     private var peripheralNames: [UUID: String] = [:]
     private var connectingPeripherals = Set<UUID>()
     private var connectedBluetoothPeripherals = Set<UUID>()
     private var bluetoothMIDICharacteristics: [UUID: CBCharacteristic] = [:]
     private var bleMIDIParsers: [UUID: BLEMIDINoteParser] = [:]
+    private var bluetoothSourceIDs: [UUID: UInt32] = [:]
     private var midiConnectionErrors: [String] = []
     private let bluetoothMIDIService = CBUUID(string: "03B80E5A-EDE8-4B33-A751-6CE34EC4C700")
     private let bluetoothMIDICharacteristic = CBUUID(string: "7772E5DB-3868-4112-A1A9-F2669D106BF3")
@@ -877,19 +878,28 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             guard source != 0 else { continue }
             currentSources.insert(source)
             sourceNames.append(midiDeviceName(for: source) ?? "MIDI input \(index + 1)")
-            guard !connectedSources.contains(source) else { continue }
-            let status = MIDIPortConnectSource(midiInput, source, nil)
+            guard connectedSources[source] == nil else { continue }
+            let sourceID = ov_midi_source_open()
+            guard sourceID != 0 else {
+                midiConnectionErrors.append("\(sourceNames.last ?? "MIDI input"): input capacity exhausted")
+                errorMessage = "Could not allocate MIDI input state."
+                continue
+            }
+            let status = MIDIPortConnectSource(midiInput, source, UnsafeMutableRawPointer(bitPattern: UInt(sourceID)))
             if status != noErr {
+                _ = ov_midi_source_close(sourceID)
                 midiConnectionErrors.append("\(sourceNames.last ?? "MIDI input"): \(status)")
                 errorMessage = "Could not connect MIDI source (\(status))."
             } else {
-                connectedSources.insert(source)
+                connectedSources[source] = sourceID
             }
         }
-        for source in connectedSources.subtracting(currentSources) {
+        for source in Set(connectedSources.keys).subtracting(currentSources) {
             let status = MIDIPortDisconnectSource(midiInput, source)
             if status == noErr {
-                connectedSources.remove(source)
+                if let sourceID = connectedSources.removeValue(forKey: source) {
+                    _ = ov_midi_source_close(sourceID)
+                }
             } else {
                 errorMessage = "Could not disconnect MIDI source (\(status))."
             }
@@ -935,6 +945,11 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         bluetoothState = central.state
         if central.state != .poweredOn {
             isScanningBluetoothMIDI = false
+            for sourceID in bluetoothSourceIDs.values {
+                _ = ov_midi_source_close(sourceID)
+            }
+            bluetoothSourceIDs.removeAll()
+            bleMIDIParsers.removeAll()
         }
     }
 
@@ -1002,6 +1017,14 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             failBluetoothMIDISetup(for: peripheral, message: "The device refused MIDI input notifications.")
             return
         }
+        if bluetoothSourceIDs[peripheral.identifier] == nil {
+            let sourceID = ov_midi_source_open()
+            guard sourceID != 0 else {
+                failBluetoothMIDISetup(for: peripheral, message: "Could not allocate MIDI input state.")
+                return
+            }
+            bluetoothSourceIDs[peripheral.identifier] = sourceID
+        }
         connectingPeripherals.remove(peripheral.identifier)
         connectedBluetoothPeripherals.insert(peripheral.identifier)
         bleMIDIParsers[peripheral.identifier] = BLEMIDINoteParser()
@@ -1019,7 +1042,8 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             errorMessage = "Could not receive Bluetooth MIDI data: \(error.localizedDescription)"
             return
         }
-        guard let packet = characteristic.value else { return }
+        guard let packet = characteristic.value,
+              let sourceID = bluetoothSourceIDs[peripheral.identifier] else { return }
         let receivedAt = ProcessInfo.processInfo.systemUptime
         var parser = bleMIDIParsers[peripheral.identifier] ?? BLEMIDINoteParser()
         let messages = parser.consume(packet, receivedAt: receivedAt)
@@ -1032,7 +1056,8 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         for message in messages {
             let delay = max(0, message.hostTime + buffer - receivedAt)
             let frame = baseFrame &+ UInt32((delay * 44_100).rounded())
-            ov_midi_message_at(
+            _ = ov_midi_source_message_at(
+                sourceID,
                 UInt32(message.status),
                 UInt32(message.data1),
                 UInt32(message.data2),
@@ -1044,6 +1069,10 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     private func failBluetoothMIDISetup(for peripheral: CBPeripheral, message: String) {
         connectingPeripherals.remove(peripheral.identifier)
         bluetoothMIDICharacteristics.removeValue(forKey: peripheral.identifier)
+        bleMIDIParsers.removeValue(forKey: peripheral.identifier)
+        if let sourceID = bluetoothSourceIDs.removeValue(forKey: peripheral.identifier) {
+            _ = ov_midi_source_close(sourceID)
+        }
         updateBluetoothDevice(peripheral)
         errorMessage = "\(peripheralNames[peripheral.identifier] ?? "Bluetooth device"): \(message)"
         centralManager.cancelPeripheralConnection(peripheral)
@@ -1068,6 +1097,9 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         connectedBluetoothPeripherals.remove(peripheral.identifier)
         bluetoothMIDICharacteristics.removeValue(forKey: peripheral.identifier)
         bleMIDIParsers.removeValue(forKey: peripheral.identifier)
+        if let sourceID = bluetoothSourceIDs.removeValue(forKey: peripheral.identifier) {
+            _ = ov_midi_source_close(sourceID)
+        }
         updateBluetoothDevice(peripheral)
         refreshMIDISources()
     }
@@ -1271,13 +1303,15 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             midiClient,
             "OberVave MIDI In" as CFString,
             &midiInput,
-            { [weak self] packetList, _ in
+            { [weak self] packetList, connectionContext in
+                guard let connectionContext else { return }
+                let sourceID = UInt32(UInt(bitPattern: connectionContext))
                 if packetList.pointee.numPackets > 0 {
                     DispatchQueue.main.async { [weak self] in
                         self?.recordMIDIActivity()
                     }
                 }
-                consumeMIDIPacketList(packetList)
+                consumeMIDIPacketList(packetList, sourceID: sourceID)
             }
         )
         guard portStatus == noErr else {
@@ -1310,7 +1344,7 @@ final class OutputMeterModel: ObservableObject {
     }
 }
 
-private func consumeMIDIPacketList(_ packetList: UnsafePointer<MIDIPacketList>) {
+private func consumeMIDIPacketList(_ packetList: UnsafePointer<MIDIPacketList>, sourceID: UInt32) {
     let packetOffset = MemoryLayout<MIDIPacketList>.offset(of: \.packet)!
     let listAddress = UnsafeRawPointer(packetList)
     let currentHostTime = mach_absolute_time()
@@ -1338,7 +1372,7 @@ private func consumeMIDIPacketList(_ packetList: UnsafePointer<MIDIPacketList>) 
         let targetFrame = baseFrame &+ UInt32(delayFrames)
         withUnsafeBytes(of: packet.pointee.data) { bytes in
             for byte in bytes.prefix(length) {
-                ov_midi_byte_at(UInt32(byte), targetFrame)
+                _ = ov_midi_source_byte_at(sourceID, UInt32(byte), targetFrame)
             }
         }
         packet = UnsafeMutablePointer(mutating: MIDIPacketNext(packet))

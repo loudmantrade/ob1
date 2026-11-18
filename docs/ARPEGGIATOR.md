@@ -260,9 +260,10 @@ Sustain and Latch remain downstream: the ledger tracks physical presses, not
 pedal-retained voices. Successful Stop or interpreted Panic clears owners.
 Sustain release does not resurrect physically released owners. No MIDI source
 is invented by this layer: the caller must supply real endpoint identities and
-consistent On/Off note IDs. Existing platform inputs still lack that complete
-ingress wiring, so enabling the policy alone cannot distinguish two external
-keyboards both reported as source zero.
+consistent On/Off note IDs. Standalone CoreMIDI/BLE ingress now supplies
+connection-lifetime IDs through the rack queue, but the live rack has not yet
+connected this adapter/ledger. Legacy C callers still use source zero and
+cannot distinguish separate devices through that compatibility path alone.
 
 `releaseSource(source, time)` removes a disconnected source's physical owners,
 using each accepted On's captured channel, note ID and routing. Other sources'
@@ -281,8 +282,9 @@ The portable callback must reject without side effects and must not re-enter
 the same ledger. The adapter's own processing failure requires Stop, not
 blindly retrying a partially processed input.
 
-Live rack/key-lock/scene integration, real endpoint identity propagation and
-independent AU validation remain required before production enablement.
+Live rack/key-lock/scene integration, disconnect cleanup using captured
+destinations and independent AU validation remain required before production
+enablement.
 
 ## Tests
 

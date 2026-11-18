@@ -76,7 +76,7 @@ irregular block offsets and stable generated-event ordering.
 ## Standalone integration
 
 The existing rack command queue retains raw MIDI/deadlines and now also keeps
-source kind. At dispatch it decodes to an `Event`; `routeEvent` validates the
+source kind and connection-lifetime ID. At dispatch it decodes to an `Event`; `routeEvent` validates the
 event and selects destinations through `Routing.h`. Channel targets preserve
 splits/layers and only filter Note On by zone. Explicit instrument masks bypass
 channel/zone selection and pin each delivered event to its logical slot.
@@ -106,8 +106,9 @@ bounded panic cleanup rather than leaving a possibly half-delivered layer held.
 This is not yet a full note-ownership router. The existing per-slot/channel/
 pitch activity and Key-Lock destination capture are retained. The model
 transports nonzero note IDs but does not yet allocate or match them. Distinct
-external endpoints still share source ID zero. Per-source overlapping-note
-ownership, destination generations, endpoint parsing and feedback protection
+external endpoints now have independent connection IDs/parsers as described
+below. Per-source overlapping-note ownership in live rack routing, destination
+generations and feedback protection
 must be completed with arpeggiator/output integration before external routing
 is exposed. No new public MIDI output or pattern UI is enabled here.
 
@@ -116,3 +117,43 @@ legacy MIDI in all ARP/Latch modes. A mock engine verifies split/layer dispatch,
 source and pinned-target context, keyboard releases after channel selection
 changes, zero-velocity Off, explicit logical targeting, output-stage rejection,
 32-bit deadline wrap with 64-bit delivery time, and failed-sink cleanup.
+
+## Standalone MIDI connection ingress
+
+`native/Musical/MIDIIngress.h` provides a portable byte parser and a bounded
+64-connection producer-side registry. CoreMIDI connections and custom BLE
+peripheral connections share this ID namespace. `ov_midi_source_open` returns
+a nonzero, monotonically increasing process-lifetime ID, or zero on capacity/
+ID exhaustion. IDs are not reused after close: a late callback cannot become
+input for a new connection occupying the same registry slot.
+
+CoreMIDI passes this integer token through `MIDIPortConnectSource` connection
+context; no object pointer is retained or dereferenced by its callback.
+Each connection has independent running status and partial-message state.
+Realtime bytes do not disturb incomplete channel messages. System-common/
+SysEx statuses clear running status; unsupported system data is not emitted
+as channel voice input. The BLE timestamp parser remains per peripheral;
+decoded messages now carry the same connection-lifetime identity model.
+This identifies a connection, not a persistent CoreMIDI unique device ID.
+
+The source-specific C byte/message APIs retain IDs through the existing
+scheduled command queue. They reject unknown/closed IDs and invalid bytes;
+queue overflow still uses the existing rack error/Panic path. Registry/parser
+access is serialized by the existing producer-side parser mutex, never by
+rendering. Musical scheduling, MIDI Clock selection and timestamp-to-deadline
+conversion are unchanged. Legacy C APIs continue with source ID zero and an
+independent legacy parser for compatibility.
+
+Closing a source discards only its ingress/parser state and rejects future
+submissions; already queued messages retain their ID and timing. It does
+**not** yet cancel scheduled notes or release that source's sounding notes.
+Source-specific audio-owner disconnect cleanup must be wired with captured
+rack destinations and the ownership ledger before claiming complete endpoint
+disconnect safety. Closing on CoreMIDI disconnect, BLE disconnect/setup failure
+or Bluetooth shutdown prevents stale parser state from leaking on reconnect.
+
+The `midi_ingress` suite covers interleaved streams, running status, partial
+messages, realtime/SysEx, single-byte channel messages, unknown/stale IDs,
+reconnect reset, capacity and sink rejection. Rack tests verify IDs, FIFO
+and parser isolation through the actual scheduled queue. Physical multi-device
+MIDI/BLE testing remains a separate hardware validation step.
