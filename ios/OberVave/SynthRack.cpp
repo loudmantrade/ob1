@@ -4,6 +4,7 @@
 #include "../../native/Musical/Routing.h"
 #include "../../native/Musical/MIDIIngress.h"
 #include "../../native/Musical/NoteOwnership.h"
+#include "../../native/OberVave/ArpeggiatorAdapter.h"
 #include <array>
 #include <atomic>
 #include <memory>
@@ -104,11 +105,25 @@ struct Timing {
     uint32_t frame, quarter;
     double beat;
     int32_t advance;
+    music::Frame timeline = frame;
 };
+void engineFailure();
+std::atomic<uint32_t> nextArpeggiatorSource {1};
+struct EngineCreationFailure {};
+
+uint32_t arpeggiatorSource()
+{
+    auto next = nextArpeggiatorSource.load();
+    while (next != UINT32_MAX) {
+        if (nextArpeggiatorSource.compare_exchange_weak(next, next + 1)) return next;
+    }
+    throw EngineCreationFailure {};
+}
 
 // New engines implement this contract and add a factory entry; routing and clock stay in the rack.
 struct SynthEngine {
     virtual ~SynthEngine() = default;
+    virtual void boundary(music::Time) {}
     virtual void parameter(uint32_t index, uint8_t value) = 0;
     virtual uint8_t parameter(uint32_t index) const = 0;
     virtual bool event(const music::Event& event) = 0;
@@ -120,19 +135,39 @@ struct SynthEngine {
     virtual uint32_t voiceLevel(uint32_t voice) const = 0;
 };
 
-struct OberVaveEngine final : SynthEngine {
+template<bool Extracted>
+struct NativeEngine final : SynthEngine {
     Engine dsp {};
-    OberVaveEngine()
+    obervave::ArpeggiatorAdapter arpeggiator {dsp};
+    music::Time currentTime {};
+    NativeEngine(uint32_t slot = 0, uint32_t channel = 0,
+                 obervave::ArpeggiatorAdapter::EventSink sink = nullptr, void* context = nullptr)
     {
         dsp.initialize();
         dsp.livePhaseAdjustment = true;
+        if constexpr (Extracted)
+            if (!arpeggiator.attach(slot, channel, arpeggiatorSource(), sink, context)) throw EngineCreationFailure {};
     }
-    void parameter(uint32_t p, uint8_t v) override { dsp.apply_parameter(p, v); }
+    void boundary(music::Time time) override { currentTime = time; }
+    void parameter(uint32_t p, uint8_t v) override
+    {
+        if constexpr (Extracted) {
+            if (!arpeggiator.parameter(p, v, currentTime)) engineFailure();
+        } else dsp.apply_parameter(p, v);
+    }
     uint8_t parameter(uint32_t p) const override { return dsp.live_p[0].v[p]; }
-    void controllerInput(uint8_t s, uint8_t d1, uint8_t d2) override { dsp.controller_input(s, d1, d2); }
+    void controllerInput(uint8_t s, uint8_t d1, uint8_t d2) override
+    {
+        if constexpr (Extracted) {
+            auto apply = [&](uint32_t p, uint8_t v) { parameter(p, v); };
+            dsp.controller_input_with_parameters(s, d1, d2, apply);
+        } else dsp.controller_input(s, d1, d2);
+    }
     bool controllerOverride(uint32_t source) const override { return dsp.controller_override(source); }
     bool event(const music::Event& event) override
     {
+        currentTime = event.time;
+        if constexpr (Extracted) return arpeggiator.input(event, false, false);
         music::MIDIMessage message {};
         if (event.routing.stage != music::Stage::Input ||
             music::encodeMIDI(event, message) != music::EventError::None) return false;
@@ -144,10 +179,16 @@ struct OberVaveEngine final : SynthEngine {
         dsp.engine_events();
         return true;
     }
-    void stop() override { dsp.engine_transport_stop(); }
+    void stop() override
+    {
+        if constexpr (Extracted) {
+            if (!arpeggiator.stop(currentTime)) engineFailure();
+        } else dsp.engine_transport_stop();
+    }
     void sync(bool on, uint32_t grid) override { dsp.ctl_arp_sync = on; dsp.ctl_arp_sync_grid = grid; }
     void render(const Timing& timing, int32_t* out) override
     {
+        currentTime = {timing.timeline};
         dsp.ctl_ext_quarter = timing.quarter;
         dsp.hostClock = true;
         dsp.hostBeat = timing.beat;
@@ -157,19 +198,27 @@ struct OberVaveEngine final : SynthEngine {
         dsp.phaseAdvance = timing.advance;
         // Firmware adds its dry signal to the output; each instance needs a clean bus.
         std::fill_n(out, CTL * 2, 0);
-        dsp.render_audio(out, CTL);
+        if constexpr (Extracted) {
+            if (timing.timeline < CTL ||
+                !arpeggiator.render(out, CTL, {timing.timeline - CTL})) engineFailure();
+        } else dsp.render_audio(out, CTL);
     }
     uint32_t voiceLevel(uint32_t voice) const override { return std::clamp(int32_t(dsp.ui_vlevel[voice]), 0, 32767); }
 };
+#ifdef OB1_RACK_ARP_REFERENCE
+using OberVaveEngine = NativeEngine<false>;
+#else
+using OberVaveEngine = NativeEngine<true>;
+#endif
 
 struct EngineType {
     uint32_t id;
     const char* name;
-    std::unique_ptr<SynthEngine> (*create)();
+    std::unique_ptr<SynthEngine> (*create)(uint32_t slot, uint32_t channel);
 };
 const EngineType engines[] = {
-    {OV_ENGINE_OBERVAVE, "OberVave", []() -> std::unique_ptr<SynthEngine> {
-        return std::make_unique<OberVaveEngine>();
+    {OV_ENGINE_OBERVAVE, "OberVave", [](uint32_t slot, uint32_t channel) -> std::unique_ptr<SynthEngine> {
+        return std::make_unique<OberVaveEngine>(slot, channel);
     }}
 };
 const EngineType* engineType(uint32_t id)
@@ -190,7 +239,8 @@ struct Instrument final : Retired {
     uint8_t activeNotes[16][128] {};
     music::NoteOwnership noteOwners;
     float leftGain = 1, rightGain = 1;
-    explicit Instrument(const ov_instrument_config& c) : engine(engineType(c.engine)->create()), config(c)
+    explicit Instrument(const ov_instrument_config& c, uint32_t slot = 0)
+        : engine(engineType(c.engine)->create(slot, c.channel - 1)), config(c)
     {
         for (uint32_t p = 0; p < NPARAM; ++p) engine->parameter(p, c.parameters[p]);
         engine->sync(c.sync, c.grid);
@@ -227,6 +277,7 @@ std::atomic<Retired*> retired {nullptr};
 std::unique_ptr<Scene> scene;
 Clock clock;
 music::Frame processedFrames = 0;
+void engineFailure() { error.store(2); panic.store(1); }
 ov_scene_config capturedScene {};
 std::atomic<uint32_t> captureState {0};
 std::array<std::atomic<uint32_t>, 128> keyboardHeld {};
@@ -324,6 +375,7 @@ bool valid(const ov_instrument_config& c)
 void setProgram(uint32_t slot, uint32_t index)
 {
     auto& inst = *scene->slots[slot];
+    inst.engine->boundary({processedFrames});
     inst.stop();
     forgetPedals(slot);
     patch_t patch {};
@@ -337,7 +389,10 @@ void setProgram(uint32_t slot, uint32_t index)
 }
 void stopAll()
 {
-    for (auto& inst : scene->slots) if (inst) inst->stop();
+    for (auto& inst : scene->slots) if (inst) {
+        inst->engine->boundary({processedFrames});
+        inst->stop();
+    }
     pedalOwners = {};
     sustainDownChannels.store(0);
     stopGeneration.fetch_add(1, std::memory_order_relaxed);
@@ -410,6 +465,7 @@ void routeEvent(const music::Event& event)
             {uint8_t(inst->config.channel - 1), uint8_t(inst->config.low_note), uint8_t(inst->config.high_note)})))
             continue;
         const auto routed = music::forInstrument(event, slot);
+        inst->engine->boundary(event.time);
         const auto source = Engine::controller_source(status, d1);
         const bool overridden = inst->engine->controllerOverride(source);
         if (source) {
@@ -480,6 +536,7 @@ void apply(const Command& c)
         for (uint32_t slot = 0; slot < capacity; ++slot) {
             auto* inst = scene->slots[slot].get();
             if (!inst) continue;
+            inst->engine->boundary({processedFrames});
             auto sink = [&](const music::Event& off) { return deliver(*inst, off); };
             if (inst->noteOwners.releaseSource(c.source, {processedFrames}, sink) ==
                 music::OwnershipResult::OutputRejected) panic.store(1);
@@ -530,7 +587,10 @@ void apply(const Command& c)
     if (c.slot >= capacity) return;
     auto& pointer = scene->slots[c.slot];
     if (c.kind == Kind::Add || c.kind == Kind::Remove) {
-        if (pointer) pointer->stop();
+        if (pointer) {
+            pointer->engine->boundary({processedFrames});
+            pointer->stop();
+        }
         forgetPedals(c.slot);
         snapshots[c.slot].peak.store(0);
         retire(pointer.release());
@@ -540,6 +600,7 @@ void apply(const Command& c)
     }
     if (!pointer) return;
     auto& inst = *pointer;
+    inst.engine->boundary({processedFrames});
     switch (c.kind) {
     case Kind::Parameter:
         inst.config.parameters[c.a] = c.b;
@@ -615,7 +676,7 @@ void renderBlock()
     if (!clock.quarter) clock.bpm = internalTempo.load(std::memory_order_relaxed);
     const auto q = clock.length();
     const int64_t phase = clock.external ? int32_t(clock.frame - clock.anchor) : int64_t(clock.frame);
-    Timing timing {clock.frame, q, double(phase) / q, audioAdvance.load(std::memory_order_relaxed)};
+    Timing timing {clock.frame, q, double(phase) / q, audioAdvance.load(std::memory_order_relaxed), processedFrames};
     if (clock.external) timing.advance += midiBuffer.load(std::memory_order_relaxed) * FS / 1000;
     std::memset(output, 0, sizeof(output));
     int32_t buffer[CTL * 2];
@@ -699,7 +760,8 @@ void ov_init(void)
         c.parameters[p] = ov_rack_factory_parameter(17, p);
         c.cc[p] = defaults[p];
     }
-    scene->slots[0] = std::make_unique<Instrument>(c);
+    try { scene->slots[0] = std::make_unique<Instrument>(c); }
+    catch (const EngineCreationFailure&) { error.store(2); return; }
     publish(0);
 }
 uint32_t ov_engine_count(void) { return uint32_t(std::size(rack::engines)); }
@@ -718,12 +780,13 @@ int ov_rack_add(uint32_t slot, const ov_instrument_config* config)
     using namespace rack;
     if (slot >= capacity || !config || !valid(*config)) { error.store(2); return 0; }
     try {
-        auto instance = std::make_unique<Instrument>(*config);
+        auto instance = std::make_unique<Instrument>(*config, slot);
         Command c; c.kind = Kind::Add; c.slot = slot; c.object = instance.get();
         if (!enqueue(c)) return 0;
         instance.release();
         return 1;
-    } catch (const std::bad_alloc&) { error.store(3); return 0; }
+    } catch (const EngineCreationFailure&) { error.store(2); return 0; }
+    catch (const std::bad_alloc&) { error.store(3); return 0; }
 }
 int ov_rack_remove(uint32_t slot)
 {
@@ -740,12 +803,13 @@ int ov_rack_load(const ov_scene_config* config)
     try {
         auto next = std::make_unique<Scene>();
         for (uint32_t s = 0; s < capacity; ++s)
-            if (config->slots[s].present) next->slots[s] = std::make_unique<Instrument>(config->slots[s].config);
+            if (config->slots[s].present) next->slots[s] = std::make_unique<Instrument>(config->slots[s].config, s);
         Command c; c.kind = Kind::Scene; c.object = next.get(); c.a = config->tempo;
         if (!enqueue(c)) return 0;
         next.release();
         return 1;
-    } catch (const std::bad_alloc&) { error.store(3); return 0; }
+    } catch (const EngineCreationFailure&) { error.store(2); return 0; }
+    catch (const std::bad_alloc&) { error.store(3); return 0; }
 }
 int ov_rack_snapshot_request(void)
 {

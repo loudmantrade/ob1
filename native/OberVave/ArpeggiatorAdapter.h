@@ -5,7 +5,7 @@
 
 namespace obervave {
 
-// Experimental single-native-part adapter. All operations belong to the audio owner.
+// Single-native-part adapter. All operations belong to the audio owner.
 class ArpeggiatorAdapter {
 public:
     enum class InputOwnership : uint8_t { LegacyPitch, SourceNotes };

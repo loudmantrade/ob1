@@ -85,8 +85,8 @@ bounded ownership ledger. Note Off uses the captured destinations, independent
 of current channel, zone, selection or incoming target-mask edits.
 
 The rack's `SynthEngine::event` boundary carries source, pinned destination,
-note ID and timing to adapters; the OberVave adapter converts to its unchanged
-MIDI/DSP interface. Raw controllers and legacy CC maps retain their existing handling. Sustain
+note ID and timing to adapters; the standalone OberVave adapter now runs
+the extracted processor before the direct-voice DSP entry. Raw controllers and legacy CC maps retain their existing handling. Sustain
 retains polarity/hysteresis but aggregates independent source/channel pedals;
 one device's pedal-up cannot clear another device's pressed pedal. Keyboard Off and wheels now retain keyboard
 source identity rather than being relabeled as external MIDI.
@@ -100,8 +100,8 @@ User-constructed events can carry their requested musical/sample position.
 Future processors must distinguish requested scheduling time from actual
 emission time when making output recordings.
 
-This boundary deliberately rejects output-stage events until the DSP bypass is
-implemented: replaying them through the current ARP would silently arpeggiate
+This public rack input boundary deliberately rejects output-stage events until
+output replay/routing is implemented: replaying them through the current ARP would silently arpeggiate
 them twice. Invalid/unsupported events report the rack's existing invalid-input
 error. A failed engine delivery reports an error and requests the existing
 bounded panic cleanup rather than leaving a possibly half-delivered layer held.
@@ -120,7 +120,8 @@ No pointers or old ownership transfer to a replacement in the same slot.
 MIDI 1.0 does not identify separate repeated same-key presses from one source;
 clients needing that distinction must preserve nonzero note IDs. There is no
 new public MIDI output, feedback loop or pattern UI here. The extracted
-arpeggiator's output bus/platform integration remains a separate gate.
+arpeggiator is enabled for local standalone playback; output replay,
+recording, external routing and the independent AU migration remain separate gates.
 
 Additional rack tests compare event-adapter audio bit-for-bit with direct
 legacy MIDI in all ARP/Latch modes. A mock engine verifies split/layer dispatch,

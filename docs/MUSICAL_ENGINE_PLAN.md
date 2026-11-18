@@ -165,29 +165,26 @@ standalone event-routing boundary are complete. See
 now survives the existing queue and logical destination selection is explicit.
 Standalone source-owned captured note routing and ordered disconnect cleanup
 are enabled; output-stage routing is not yet enabled. The independent
-[arpeggiator core](ARPEGGIATOR.md) and legacy event-comparison tests are
-implemented; production still uses the original DSP arpeggiator.
-The reversible native DSP bypass is implemented and compared against the
-legacy audio/voice path; it is disabled by default and not enabled by either
-platform adapter. An optional control-boundary callback and effective
-ARP/clock snapshot bridge are implemented and audio-tested with temporary
-controller modulation and per-instance RNG synchronization. The experimental
-native MIDI adapter now preserves input-time/render-time settings, sequential
+[arpeggiator core](ARPEGGIATOR.md) is now the production standalone scheduler,
+using the native direct-voice bypass; the independent AU still uses the original
+DSP scheduler. The effective control-boundary ARP/clock bridge is audio-tested
+with temporary controller modulation and per-instance RNG synchronization.
+The native MIDI adapter preserves input-time/render-time settings, sequential
 VALUE/MOD controller handling, logical Sustain/OVERRIDE, direct/generated
 handovers, pressure, restart, Panic and Stop/rearm in legacy audio comparisons.
 Its direct Off-mode entry uses the portable held list for Mono/Unison fallback.
-Neither platform instantiates it yet. The adapter now publishes accepted
+The standalone rack instantiates one adapter per instrument. It publishes accepted
 generated output to an optional synchronous receiver with a pinned logical
 instrument/channel, explicit processor-lifetime source ID and matching note
 IDs. Receiver rejection retains outstanding ownership for Stop retries and
-faults/releases local DSP gates. Rack/key-lock/scene integration and the
-independent AU remain production gates.
+faults/releases local DSP gates. Rack/key-lock/scene integration is enabled;
+the independent AU migration remains a separate production gate.
 An opt-in bounded physical-input ownership ledger now isolates same-pitch
 source/channel/note IDs, retains the final owner and supports captured source
 release and explicit overflow/rejection cleanup. Standalone connection IDs
 and independent ingress parsers are wired through the existing queue.
-The live standalone rack now enables this ledger independently of the new
-arpeggiator adapter: channel/zone edits preserve held notes, final-owner Off
+The live standalone rack enables this ledger before the arpeggiator adapter
+(not twice inside both): channel/zone edits preserve held notes, final-owner Off
 uses the captured instrument, disconnect cancels that source's scheduled MIDI
 and releases its captured keys/pedals without stopping other sources.
 Sustain aggregates independent pedals and survives routing edits; intentional
@@ -195,5 +192,11 @@ Latch is retained on physical-source release. Slot/scene/program replacement
 clears instance-local ownership. Capacity and queue failure use visible
 error/Panic cleanup. Actual-rack regressions cover all nine ARP modes,
 same-pitch sources/channels, route edits, scheduled cancellation, replacement
-and overflow. Neither platform enables the new adapter yet. Pattern playback/recording,
+and overflow. The production integration suite additionally compares 233,728
+stereo control blocks bit-for-bit with the legacy backend across all voice/
+ARP/Latch modes, mixed controller/UI lifecycle operations, start grids and
+signed live compensation; it verifies the actual 16-slot factory, source-ID
+exhaustion and 64-bit timing. Legacy DSP-state regression suites remain
+explicit reference builds, not the production selection.
+Pattern playback/recording,
 pattern UI and external MIDI output are not yet implemented.

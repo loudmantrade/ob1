@@ -71,11 +71,18 @@ add_test(NAME native_au COMMAND check_obervave_au "$<TARGET_BUNDLE_DIR:OberVave>
 add_executable(check_obervave_transport check_transport.cpp)
 target_include_directories(check_obervave_transport PRIVATE "../../fw/obervave/firmware/gen")
 target_compile_options(check_obervave_transport PRIVATE -UNDEBUG -Wno-c99-designator)
+# Keep DSP-state assertions as the legacy oracle; ipad_live_arpeggiator exercises production.
+target_compile_definitions(check_obervave_transport PRIVATE OB1_RACK_ARP_REFERENCE)
 add_test(NAME ipad_transport COMMAND check_obervave_transport)
 add_executable(check_obervave_rack check_rack.cpp)
 target_include_directories(check_obervave_rack PRIVATE "../../fw/obervave/firmware/gen")
 target_compile_options(check_obervave_rack PRIVATE -UNDEBUG -Wno-c99-designator)
+target_compile_definitions(check_obervave_rack PRIVATE OB1_RACK_ARP_REFERENCE)
 add_test(NAME ipad_rack COMMAND check_obervave_rack)
+add_executable(check_live_rack check_live_rack.cpp)
+target_include_directories(check_live_rack PRIVATE "../../fw/obervave/firmware/gen")
+target_compile_options(check_live_rack PRIVATE -UNDEBUG -Wno-c99-designator)
+add_test(NAME ipad_live_arpeggiator COMMAND check_live_rack)
 add_executable(check_obervave_scenes check_scenes.swift
     "../../ios/OberVave/KeyboardLockState.swift"
     "../../ios/OberVave/SceneState.swift" "../../ios/OberVave/SynthParameter.swift"

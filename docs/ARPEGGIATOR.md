@@ -3,9 +3,10 @@
 `native/Musical/Arpeggiator.h` contains a bounded C++17
 `ArpeggiatorProcessor`, derived from the existing GPL-3.0-only OberVave
 arpeggiator. It does not include DSP headers, patch structures, voices, platform
-APIs or SwiftUI. The original scheduler is still the production path in both
-iPad and AU. Native-only guards allow an explicit external-note bypass; they
-are inactive by default and do not change the hardware firmware build.
+APIs or SwiftUI. The standalone iPad rack now uses it for production; the AU
+retains its independently validated original scheduler. Native-only guards
+allow an explicit external-note bypass; it is enabled by the standalone
+adapter and does not change the hardware firmware build.
 
 ## Contract
 
@@ -75,9 +76,9 @@ The native engine has no active firmware sequencer (`seq_phase` and
 reimplemented. Future pattern playback must use the shared transport and
 explicit input/output stage flags, not resurrect that firmware sequencer.
 
-Before switching production routing, connect and validate the native input
-adapter at the rack event boundary, including source ownership and generated
-output routing. The AU's independent adapter is a separate integration gate.
+The native adapter is connected at the standalone rack boundary, including
+source-owned captured routes and local generated-output bypass. The AU's
+independent adapter is still a separate integration gate.
 
 ## Explicit native DSP bypass
 
@@ -119,8 +120,8 @@ by the pedal; on pedal release, remove unheld keys before delivering their
 releases in original held-key order. This API does not independently implement
 Sustain, controller OVERRIDE, recording, or input routing. Invalid arguments,
 non-external ownership or an enabled ARP mode return `false` before mutation.
-The experimental adapter below uses this entry for direct/generated handovers;
-production input dispatch is still unchanged.
+The adapter below uses this entry for production standalone direct/generated
+handovers; AU input dispatch is still unchanged.
 
 ## Effective-patch control-boundary bridge
 
@@ -161,13 +162,13 @@ recorder or external destination's note ledger.
 
 Input-time versus render-time settings, controller OVERRIDE, interpreted sustain
 and direct/generated handovers belong to the adapter below, not this snapshot
-helper. Production routing and per-source ownership remain separate gates.
+helper. Standalone routing/ownership integration is described below.
 
-## Experimental native MIDI adapter
+## Native MIDI adapter
 
 `native/OberVave/ArpeggiatorAdapter.h` combines one existing native `Engine`
-(part 0) with one portable processor. It is not instantiated by the iPad rack
-or AU yet. The engine must be initialized before `attach`; attachment releases
+(part 0) with one portable processor. The iPad rack instantiates it for each
+instrument; the AU does not. The engine must be initialized before `attach`; attachment releases
 old part-0 notes and refuses an engine already using any external-ARP owner.
 The engine must outlive the adapter. There is no hot migration of already
 held keys from an old scheduler or implicit ownership transfer on destruction.
@@ -243,9 +244,11 @@ fallback or implicit dropping of pending external ownership.
 
 The optional final `attach` argument `InputOwnership::SourceNotes` enables
 the portable `native/Musical/NoteOwnership.h` ledger for this destination.
-`LegacyPitch` remains the explicit compatibility default for legacy-oracle
-traces, not the intended final multi-source routing policy. Neither platform
-creates this experimental adapter yet.
+`LegacyPitch` remains the compatibility default. The standalone rack uses
+the same ledger **before** the adapter, across captured logical destinations,
+and therefore leaves the adapter-local ledger disabled: filtering the same
+Off twice would strand ownership in the inner ledger. Direct clients without
+a rack owner can opt into `SourceNotes`.
 
 The ledger holds up to 256 physical owners keyed by source kind/ID, input
 channel, pitch and note ID. Each accepted On retriggers as before; repeating
@@ -261,8 +264,8 @@ pedal-retained voices. Successful Stop or interpreted Panic clears owners.
 Sustain release does not resurrect physically released owners. No MIDI source
 is invented by this layer: the caller must supply real endpoint identities and
 consistent On/Off note IDs. Standalone CoreMIDI/BLE ingress now supplies
-connection-lifetime IDs through the rack queue, but the live rack has not yet
-connected this adapter/ledger. Legacy C callers still use source zero and
+connection-lifetime IDs through the rack queue and uses the ledger at the
+live routing boundary. Legacy C callers still use source zero and
 cannot distinguish separate devices through that compatibility path alone.
 
 `releaseSource(source, time)` removes a disconnected source's physical owners,
@@ -282,9 +285,46 @@ The portable callback must reject without side effects and must not re-enter
 the same ledger. The adapter's own processing failure requires Stop, not
 blindly retrying a partially processed input.
 
-Live rack/key-lock/scene integration, disconnect cleanup using captured
-destinations and independent AU validation remain required before production
-enablement.
+Standalone rack/key-lock/scene and captured disconnect cleanup are enabled;
+independent AU integration/validation remains outstanding.
+
+## Live standalone integration
+
+`SynthRack.cpp` constructs one `NativeEngine<true>` per logical instrument and
+attaches its processor to the initial slot/channel with a monotonically
+allocated, non-reused processor-lifetime source ID. ID exhaustion rejects engine
+creation without replacing a working scene. Routing edits preserve held notes;
+captured physical Offs still reach the original processor. Slot, program and
+scene replacement stop the outgoing processor before retirement.
+
+The rack already splits controller learning, raw VALUE handling, Sustain
+interpretation and user CC maps. VALUE callbacks and CC maps now use
+`ArpeggiatorAdapter::parameter`; the subsequent event uses `controllers=false`
+to avoid applying VALUE twice or overwriting interpreted Sustain with raw CC64.
+Effective MOD settings and shared RNG remain scoped to the existing DSP control
+boundary. Parameter/Stop times are assigned by the audio owner, never read
+unsafely from a producer-side engine constructor.
+
+`Timing::timeline` carries the 64-bit control boundary independently of the
+legacy 32-bit MIDI deadline. Adapter render starts one CTL earlier; callback
+offset CTL therefore emits at the actual current boundary, including across
+32-bit wrap. Local generated events bypass the old scheduler and use direct
+voice entry. Off-mode physical notes retain Mono/Unison fallback. There is no
+new external MIDI endpoint or output-recording subscription yet; the optional
+synchronous native receiver remains the output integration boundary.
+
+`NativeEngine<false>` and `OB1_RACK_ARP_REFERENCE` exist for legacy regression
+oracles only. The old DSP-state rack/transport tests retain that reference;
+`ipad_live_arpeggiator` runs the **actual default production** engine/factory.
+It checks 103,680 stereo/RNG blocks across every ARP/Latch/voice combination,
+65,536 blocks from 16,384 mixed lifecycle operations and 64,512 clock blocks
+across every division/start grid with signed live compensation. All are
+bit-exact against the legacy backend. Actual 16-instrument routing tests cover
+source/touch overlap, captured channel/zone edits, pedals, disconnect and
+scheduled cancellation, Stop/Latch/rearm, VALUE changes, capacity/queue failure,
+source-ID exhaustion and 64-bit timing. Legacy held arrays and input FIFO stay
+unused in the production scheduler. Physical iPad/MIDI performance and the
+independent AU scheduler migration are not inferred from these Mac tests.
 
 ## Tests
 

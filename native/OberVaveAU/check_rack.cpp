@@ -571,7 +571,7 @@ static void checkSourceRouting()
     render();
     assert(!dsp(0).nheld[0] && !rack::scene->slots[0]->noteOwners.count());
     assert(ov_rack_take_error() == 0);
-    std::puts("PASS production source-owned notes across all 9 ARP modes, touch/port/channel overlap, captured routes/pedals, disconnect cancellation, slot/scene replacement, intentional Latch and bounded-overflow cleanup");
+    std::puts("PASS source-owned legacy-reference rack across all 9 ARP modes, touch/port/channel overlap, captured routes/pedals, disconnect cancellation, slot/scene replacement, intentional Latch and bounded-overflow cleanup");
 }
 
 int main()

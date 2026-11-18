@@ -100,7 +100,7 @@ int main()
             assert(bar >= uint32_t(88200 + e.phaseAdvance - 1) && bar <= uint32_t(88200 + e.phaseAdvance));
         }
     }
-    std::puts("PASS production iPad engine: start grid, signed/fine/live/repeated compensation, all divisions and grids, sync off");
+    std::puts("PASS legacy DSP clock reference: start grid, signed/fine/live/repeated compensation, all divisions and grids, sync off");
 
     for (uint32_t latch = 0; latch <= 2; ++latch) {
         auto engine = std::make_unique<rack::OberVaveEngine>();
@@ -120,5 +120,5 @@ int main()
         for (const auto& voice : e.vc) assert(!voice.gate);
         assert(e.live_p[0].v[rack::P_ARP_LATCH] == latch);
     }
-    std::puts("PASS production iPad adapter Stop releases all firmware parts and retains ARP/Latch settings");
+    std::puts("PASS legacy DSP adapter Stop reference releases all firmware parts and retains ARP/Latch settings");
 }

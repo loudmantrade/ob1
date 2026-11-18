@@ -37,7 +37,16 @@ Channel/zone edits apply immediately to new notes without cutting held notes:
 their releases and pedal-up return to the original instruments. Scene, program
 and slot replacement clear old ownership instead of transferring it to a new
 instrument. Runtime ownership is bounded; overflow reports an error and stops
-notes safely. The existing synth/ARP scheduler and MIDI Clock are unchanged.
+notes safely. MIDI Clock is unchanged.
+
+Each standalone instrument now runs the extracted musical-event arpeggiator
+outside the voice DSP, with generated notes using the native direct-voice
+entry. The existing ARP modes, Latch, Sustain, controllers, start grids and
+signed live compensation are preserved. Off-mode Mono/Unison key fallback is
+also preserved. Legacy audio/RNG and production 16-instrument regressions are
+documented in [the arpeggiator integration contract](../../docs/ARPEGGIATOR.md).
+The AU retains its separate legacy scheduler for now; this does not add
+pattern recording/playback or external MIDI output.
 
 LFO Rate displays Hz to two decimal places, calculated from the DSP phase
 increment table and the 44.1 kHz / 16-sample control rate. The parameter's
