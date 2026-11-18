@@ -76,7 +76,11 @@ feed their own notes through the saved ARP mode.
 
 - Empty pads show only **+**. Tap to arm/start recording, then tap the same pad
   again to queue completion at the end of the current body bar and start the
-  loop on that boundary. Recording continues until then. A filled pad launches its loop.
+  loop on that boundary. Recording continues until then, without confirmation
+  dialogs. Tap a stopped filled pad to launch it; tap a playing pad to queue
+  its Stop at the next bar boundary (**STOP AT BAR**). Repeat taps do not
+  postpone completion/Stop. Short taps are resolved on audio against the
+  actual pad state, even before the UI reads recording completion.
   Finishing and playback start are audio-owned, without waiting for UI polling.
   Hold a pad for edit, duplicate, delete, recording and column Stop.
   Hold an empty pad for the manual editor. Active pads show progress; queued

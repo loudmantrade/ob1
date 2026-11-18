@@ -339,7 +339,58 @@ static void checkLaunchHandover()
     std::puts("PASS launch handover: queued ARP plays until pickup starts, then only its logical column stops; row, Input/Output and record-autoplay preserve ARP/Latch modes and other columns");
 }
 
+static void checkPadTapTransitions()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config(rack::A_UP)};
+    scene->slots[0].config.parameters[rack::P_ARP_LATCH] = 1;
+    scene->slots[1] = {1, config(rack::A_UP)};
+    scene->slots[1].config.parameters[rack::P_ARP_LATCH] = 1;
+    auto result = std::make_unique<ov_seq_clip>();
+    assert(ov_rack_load(scene.get())); render();
+    auto tap = [&] { assert(ov_seq_tap(0, 0, 0, 1, 0, 1, 0)); render(); };
+    tap();
+    assert(ov_seq_record_phase() == 1 && ov_seq_recording_row() == 0);
+    ov_midi_message(0x90, 60, 100); render(2048); ov_midi_message(0x80, 60, 0); render();
+    tap();
+    assert(ov_seq_record_phase() == 5 && !ov_seq_record_ready());
+    const auto finishAt = rack::recorder.stopAt;
+    tap();
+    assert(rack::recorder.stopAt == finishAt);
+    while (rack::recorder.running) render();
+    assert(ov_seq_recording_slot() == -1 && ov_seq_recording_row() == -1);
+    assert(ov_seq_active(0) == 0 && ov_seq_record_ready());
+    assert(rack::players[0].origin == finishAt);
+    // The UI can still think this pad is recording; audio must treat its next tap as playback Stop.
+    tap();
+    assert(ov_seq_active(0) == 0 && ov_seq_stopping(0));
+    const auto stopAt = rack::players[0].pendingStart;
+    tap();
+    assert(rack::players[0].pendingStart == stopAt);
+    while (ov_seq_active(0) >= 0) render();
+    assert(rack::musicalPosition.value >= stopAt && !ov_seq_stopping(0));
+    assert(!engine(0).arpeggiator.processor().heldCount() && !gate(0));
+    assert(engine(1).arpeggiator.processor().heldCount() && gate(1));
+    assert(ov_seq_record_result() == 1 && ov_seq_read_record(result.get()));
+    assert(result->length == 3840 && !ov_rack_take_error());
+    tap();
+    assert(ov_seq_active(0) == 0 && !ov_seq_stopping(0));
+    assert(ov_rack_stop_all()); render();
+    for (uint32_t output : {0u, 1u}) {
+        result->count = 1; result->notes[0] = {1, 0, 8000, 64, 100, output};
+        assert(ov_seq_set_clip(result.get())); render();
+        tap();
+        if (!output) assert(engine(0).arpeggiator.processor().heldCount());
+        tap(); assert(ov_seq_stopping(0));
+        while (ov_seq_active(0) >= 0) render();
+        assert(!engine(0).arpeggiator.processor().heldCount() && !gate(0));
+        for (const auto& note : rack::players[0].active) assert(!note.used);
+    }
+    assert(!ov_rack_take_error());
+    std::puts("PASS audio-owned short taps: empty arm, recording finish queues once, record-to-loop before mailbox read, stale UI tap stops playback at bar, repeated taps preserve deadline, restart and Input/Latch release");
+}
+
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); ov_rack_collect();
 }

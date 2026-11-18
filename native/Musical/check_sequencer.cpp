@@ -197,6 +197,23 @@ static void checkBarCompletion()
     recorder->requestFinish(origin + 3840 * tickUnit);
     assert(recorder->stopAt == origin + 3840 * tickUnit);
     std::puts("PASS bar completion: free length grows by whole bars, tap queues immutable boundary, capture continues until it, exact-tick cutoff, fixed cap/early finish and waiting state");
+    auto pattern = std::make_unique<Pattern>(makePattern());
+    ClipPlayer player;
+    std::vector<Event> events;
+    auto sink = [&](const Event& event) { events.push_back(event); return true; };
+    player.queue(0, pattern.get(), 0, LaunchGrid::Free);
+    assert(player.process(0, 1, 0, 0, sink));
+    player.requestStop(100 * tickUnit);
+    assert(player.stopping() && player.pendingStart == 3840 * tickUnit);
+    player.requestStop(3900 * tickUnit);
+    assert(player.pendingStart == 3840 * tickUnit);
+    assert(player.process(3839 * tickUnit, 2, 0, 0, sink) && player.row == 0);
+    assert(player.process(3840 * tickUnit, 3, 0, 0, sink) && player.row == -1 && !player.stopping());
+    for (const auto& note : player.active) assert(!note.used);
+    player.queue(0, pattern.get(), 3840 * tickUnit, LaunchGrid::Free);
+    assert(player.process(3840 * tickUnit, 4, 0, 0, sink));
+    player.requestStop(3840 * tickUnit);
+    assert(player.pendingStart == 7680 * tickUnit);
 }
 
 static void checkRecordModes()

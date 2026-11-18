@@ -59,6 +59,12 @@ public:
         pendingOrigin = groupOrigin >= 0 ? groupOrigin : boundary(now + intro, grid);
         pendingStart = pendingOrigin - intro;
     }
+    bool stopping() const { return pendingRow >= 0 && !queued_ && row >= 0; }
+    void requestStop(int64_t now)
+    {
+        if (row < 0 || stopping()) return;
+        queue(row, nullptr, now + 1, LaunchGrid::Bar);
+    }
 
     template<class Sink>
     bool stop(Frame frame, Sink& sink)

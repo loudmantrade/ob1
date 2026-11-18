@@ -326,6 +326,8 @@ ov_seq_clip recordedClip {};
 std::array<std::atomic<int32_t>, capacity> activeRows, pendingRows;
 std::array<std::atomic<uint32_t>, capacity> playPositions {};
 std::atomic<int32_t> recordingSlot {-1};
+std::atomic<int32_t> recordingRow {-1};
+std::array<std::atomic<uint32_t>, capacity> stoppingRows {};
 uint16_t soloMask = 0;
 void finishRecording(bool autoplay = false);
 void stopSequencer(uint32_t slot);
@@ -388,7 +390,7 @@ void forgetPedals(uint32_t slot)
     for (auto& pedal : pedalOwners) pedal.destinations &= ~(1u << slot);
 }
 
-enum class Kind { MIDI, StopAll, SeqClip, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord,
+enum class Kind { MIDI, StopAll, SeqClip, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
     SeqFinish, SourceClose, Parameter, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
 struct Command {
     Kind kind = Kind::MIDI;
@@ -504,6 +506,7 @@ void finishRecording(bool autoplay)
     const auto completion = std::min(musicalPosition.value, recorder.stopAt);
     recorder.finish(musicalPosition.value);
     recordingSlot.store(-1);
+    recordingRow.store(-1);
     recordingPhase.store(0); recordingRemaining.store(0);
     recordingLength.store(0);
     if (recorder.overflow) {
@@ -560,7 +563,7 @@ void stopSequencer(uint32_t slot)
         routeEvent(event); return !panic.load();
     };
     if (!players[slot].stop(processedFrames, sink)) { error.store(2); panic.store(1); }
-    activeRows[slot].store(-1); pendingRows[slot].store(-1); playPositions[slot].store(0);
+    activeRows[slot].store(-1); pendingRows[slot].store(-1); playPositions[slot].store(0); stoppingRows[slot].store(0);
 }
 void refreshActiveNotes(Instrument& instrument)
 {
@@ -701,6 +704,24 @@ void routeEvent(const music::Event& event)
 }
 void apply(const Command& c)
 {
+    if (c.kind == Kind::SeqTap) {
+        auto* request = static_cast<RecordingRequest*>(c.object);
+        if (recorder.running && recorder.slot == c.slot && recorder.row == c.a) {
+            Command finish; finish.kind = Kind::SeqFinish;
+            apply(finish);
+        } else if (players[c.slot].row == int32_t(c.a)) {
+            players[c.slot].requestStop(musicalPosition.value);
+        } else if (clips[c.slot][c.a]) {
+            Command launch; launch.kind = Kind::SeqLaunch; launch.slot = c.slot; launch.a = c.a; launch.b = c.b;
+            apply(launch);
+        } else if (!recorder.running && !recordingReady.load()) {
+            Command record = c; record.kind = Kind::SeqRecord;
+            apply(record);
+            return;
+        } else error.store(2);
+        retire(request);
+        return;
+    }
     if (c.kind == Kind::SeqFinish) {
         if (recordingAutoplay && recorder.running && !recorder.overflow &&
             !recorder.waiting && musicalPosition.value >= recorder.origin)
@@ -766,6 +787,7 @@ void apply(const Command& c)
                 music::RecordMode(request->mode), request->bars, request->beats, playing, request->output);
         }
         recordingSlot.store(c.slot);
+        recordingRow.store(c.a);
         recordingPhase.store(recorder.phase(musicalPosition.value));
         recordingRemaining.store(recorder.remaining(musicalPosition.value));
         recordingLength.store(recorder.lengthAt(musicalPosition.value));
@@ -964,6 +986,7 @@ void renderBlock()
             slot, scene->slots[slot]->config.channel - 1, sink)) { error.store(1); panic.store(1); }
         activeRows[slot].store(players[slot].row);
         pendingRows[slot].store(players[slot].pendingRow);
+        stoppingRows[slot].store(players[slot].stopping());
         const auto* clip = players[slot].clip;
         const auto position = musicalPosition.value - players[slot].origin;
         playPositions[slot].store(clip && position >= 0 ?
@@ -1227,19 +1250,28 @@ int ov_seq_record(uint32_t slot, uint32_t row, uint32_t output, uint32_t intro)
         request.release(); return 1;
     } catch (const std::bad_alloc&) { rack::error.store(3); return 0; }
 }
-int ov_seq_arm(uint32_t slot, uint32_t row, uint32_t mode, uint32_t bars, uint32_t beats, uint32_t output)
+static int enqueuePad(rack::Kind kind, uint32_t slot, uint32_t row, uint32_t mode,
+                      uint32_t bars, uint32_t beats, uint32_t output, uint32_t grid)
 {
     if (slot >= rack::capacity || row >= OV_SEQ_ROWS || mode > 2 || bars < 1 || bars > 2 ||
-        beats > 256 || output > 1) { rack::error.store(2); return 0; }
+        beats > 256 || output > 1 || grid > 2) { rack::error.store(2); return 0; }
     try {
         auto request = std::make_unique<rack::RecordingRequest>();
         request->mode = mode; request->bars = bars; request->beats = beats; request->output = output;
         if (request->pattern.initialize(slot * OV_SEQ_ROWS + row + 1, "Pattern", beats ? beats * 960 : 3840) !=
             rack::music::PatternError::None) { rack::error.store(2); return 0; }
-        rack::Command c; c.kind = rack::Kind::SeqRecord; c.slot = slot; c.a = row; c.object = request.get();
+        rack::Command c; c.kind = kind; c.slot = slot; c.a = row; c.b = grid; c.object = request.get();
         if (!rack::enqueue(c)) return 0;
         request.release(); return 1;
     } catch (const std::bad_alloc&) { rack::error.store(3); return 0; }
+}
+int ov_seq_arm(uint32_t slot, uint32_t row, uint32_t mode, uint32_t bars, uint32_t beats, uint32_t output)
+{
+    return enqueuePad(rack::Kind::SeqRecord, slot, row, mode, bars, beats, output, 0);
+}
+int ov_seq_tap(uint32_t slot, uint32_t row, uint32_t mode, uint32_t bars, uint32_t beats, uint32_t output, uint32_t grid)
+{
+    return enqueuePad(rack::Kind::SeqTap, slot, row, mode, bars, beats, output, grid);
 }
 uint32_t ov_seq_record_phase(void) { return rack::recordingPhase.load(); }
 uint32_t ov_seq_record_remaining(void) { return rack::recordingRemaining.load(); }
@@ -1258,6 +1290,8 @@ int32_t ov_seq_active(uint32_t slot) { return slot < rack::capacity ? rack::acti
 int32_t ov_seq_pending(uint32_t slot) { return slot < rack::capacity ? rack::pendingRows[slot].load() : -1; }
 uint32_t ov_seq_position(uint32_t slot) { return slot < rack::capacity ? rack::playPositions[slot].load() : 0; }
 int32_t ov_seq_recording_slot(void) { return rack::recordingSlot.load(); }
+int32_t ov_seq_recording_row(void) { return rack::recordingRow.load(); }
+uint32_t ov_seq_stopping(uint32_t slot) { return slot < rack::capacity ? rack::stoppingRows[slot].load() : 0; }
 int ov_rack_configure(uint32_t slot, uint32_t channel, uint32_t low, uint32_t high,
                       float db, float pan, uint32_t muted)
 {

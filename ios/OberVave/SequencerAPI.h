@@ -29,6 +29,8 @@ int ov_seq_solo(uint32_t slot, uint32_t enabled);
 int ov_seq_record(uint32_t slot, uint32_t row, uint32_t output, uint32_t intro);
 /* mode: 0 Wait for note, 1 Count-in, 2 Immediate; beats: 0 free, 1..256 fixed. */
 int ov_seq_arm(uint32_t slot, uint32_t row, uint32_t mode, uint32_t count_bars, uint32_t beats, uint32_t output);
+/* Resolve a short pad tap against audio-owned recording/playback state. */
+int ov_seq_tap(uint32_t slot, uint32_t row, uint32_t mode, uint32_t count_bars, uint32_t beats, uint32_t output, uint32_t grid);
 int ov_seq_finish_record(void);
 uint32_t ov_seq_record_phase(void); /* 0 idle, 1 waiting for note, 2 count-in, 3 body, 4 waiting for scene bar, 5 finishing at bar */
 uint32_t ov_seq_record_remaining(void);
@@ -41,6 +43,8 @@ int32_t ov_seq_active(uint32_t slot);
 int32_t ov_seq_pending(uint32_t slot);
 uint32_t ov_seq_position(uint32_t slot); /* 0..65535 */
 int32_t ov_seq_recording_slot(void);
+int32_t ov_seq_recording_row(void);
+uint32_t ov_seq_stopping(uint32_t slot);
 #ifdef __cplusplus
 }
 #endif

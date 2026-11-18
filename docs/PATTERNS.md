@@ -180,6 +180,13 @@ limit on that deadline. Body lengths and held-note releases use the exact
 musical deadline, not the slightly later control-block time. Stopping
 before the body cancels the take. Global/column Stop never auto-starts it.
 
+The short-pad-tap command chooses recording completion, playback Stop, launch
+or empty-cell recording on the audio owner, never from a captured SwiftUI pad
+state. Thus a take already looping but not yet read from the mailbox stops on
+the next tap rather than sending another recording action. Playing-pad Stop
+is bar-queued, idempotent and releases input-stage Latch as well as output
+owners. Confirmation dialogs are only for explicit destructive menu actions.
+
 ## Verification
 
 `musical_patterns` is registered in the existing CTest suite. It can also run

@@ -140,6 +140,11 @@ extension OberVaveModel {
                 }
             }
         }
+        let recordingSlot = Int(ov_seq_recording_slot())
+        let recordingRow = Int(ov_seq_recording_row())
+        if recordingSlot >= 0 && recordingRow >= 0 {
+            recordingPattern = recordingSlot * 8 + recordingRow
+        }
         sequencerRevision &+= 1
         let generation = ov_rack_stop_generation()
         if generation != keyboardStopGeneration {
@@ -467,6 +472,17 @@ extension OberVaveModel {
     func finishPatternRecording() {
         if ov_seq_finish_record() == 0 { errorMessage = "Could not finish recording.";  }
     }
+    func tapPattern(slot: Int, row: Int) {
+        guard let instrument = instruments.first(where: { $0.slot == slot }) else {
+            errorMessage = "The recording instrument is unavailable."; return
+        }
+        if ov_seq_tap(UInt32(slot), UInt32(row), UInt32(recordMode.rawValue), UInt32(recordCountBars),
+                      UInt32(instrument.recordBeats), recordOutput ? 1 : 0, UInt32(launchGrid)) == 0 {
+            errorMessage = "Could not apply the pattern tap."
+        } else if recordingPattern == nil && pattern(slot: slot, row: row) == nil {
+            recordingPattern = slot * 8 + row
+        }
+    }
     func setRecordLength(slot: Int, beats: Int) {
         guard (0...256).contains(beats), let index = instruments.firstIndex(where: { $0.slot == slot }) else {
             errorMessage = "Invalid recording length."; return
@@ -690,22 +706,17 @@ struct SequencerView: View {
         let active = Int(ov_seq_active(UInt32(instrument.slot))) == row
         let queued = Int(ov_seq_pending(UInt32(instrument.slot))) == row
         let recording = model.recordingPattern == instrument.slot * 8 + row
+        let stopping = active && ov_seq_stopping(UInt32(instrument.slot)) != 0
         let phase = ov_seq_record_phase()
         let color = MIDIChannelColors.color(instrument.channel)
         return Button {
-            if recording {
-                model.finishPatternRecording()
-            } else if pattern != nil {
-                model.launchPattern(slot: instrument.slot, row: row)
-            } else {
-                model.recordPattern(slot: instrument.slot, row: row)
-            }
+            model.tapPattern(slot: instrument.slot, row: row)
         } label: {
             VStack(spacing: 3) {
                 HStack {
                     Image(
                         systemName: recording
-                            ? "record.circle.fill" : queued ? "clock" : active ? "play.fill" : pattern == nil ? "plus" : "square.grid.2x2")
+                            ? "record.circle.fill" : stopping ? "stop.fill" : queued ? "clock" : active ? "play.fill" : pattern == nil ? "plus" : "square.grid.2x2")
                     if let pattern {
                         Text(pattern.name).lineLimit(1).font(.caption.bold())
                     }
@@ -717,6 +728,8 @@ struct SequencerView: View {
                         .font(.system(size: 9, design: .monospaced))
                     Text("\(Double(ov_seq_record_length()) / 960, specifier: "%.0f") BEATS")
                         .font(.system(size: 9, design: .monospaced))
+                } else if stopping {
+                    Text("STOP AT BAR").font(.system(size: 9, design: .monospaced))
                 } else if let pattern {
                     Text("\(pattern.notes.count) notes\(pattern.introEnabled && pattern.intro > 0 ? " · INTRO" : "")")
                         .font(.system(size: 9, design: .monospaced))
@@ -729,13 +742,16 @@ struct SequencerView: View {
             .foregroundStyle(recording ? Color.red : active ? Color.black : color)
             .background(active ? color : color.opacity(pattern == nil ? 0.04 : 0.17), in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(queued ? Color.white : color.opacity(0.45), lineWidth: queued ? 2 : 1))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
-            "\(instrument.name), row \(row + 1), \(recording ? "finish recording at end of bar and play loop" : pattern?.name ?? "record pattern")\(queued ? ", queued" : active ? ", playing" : "")"
+            "\(instrument.name), row \(row + 1), \(recording ? "finish recording at end of bar and play loop" : active ? "stop at end of bar" : pattern?.name ?? "record pattern")\(queued ? ", queued" : active ? ", playing" : "")"
         )
         .contextMenu {
-            if let pattern {
+            if recording {
+                Button("Finish at End of Bar", systemImage: "stop.circle") { model.finishPatternRecording() }
+            } else if let pattern {
                 Button("Edit Pattern", systemImage: "pencil") { editing = pattern }
                 Button("Duplicate", systemImage: "doc.on.doc") { model.duplicatePattern(pattern) }
                 Button(pattern.introEnabled ? "Disable Intro" : "Enable Intro") {
