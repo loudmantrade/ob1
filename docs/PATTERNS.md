@@ -194,6 +194,13 @@ the next arm with rack error 4 before changing any clip. Polling drains saved,
 cancelled and failed results in order exactly once. Scene epochs prevent an
 old completion from being applied to a newly loaded scene. Recording indicators
 come only from audio-owned recorder state, not an optimistic tap or unread result.
+An application-model-owned common-run-loop timer drains sequencer results and
+samples transport every 40 ms, independently of SwiftUI body reevaluation.
+The same persistent driver polls full synth/rack parameters at a separate
+250 ms cadence; fast transport refresh never scans synth parameters. Published
+recorder/status values update only when changed. No additional tap/view event
+is needed to acknowledge a completed recording or edit. This timer mirrors
+audio state only; it does not schedule notes or musical boundaries.
 
 Circular MIDI cells render duration arcs clockwise from 12 o'clock. Sorted
 distinct body pitches occupy up to eight radial lanes; larger pitch sets map

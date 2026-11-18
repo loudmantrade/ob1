@@ -122,7 +122,7 @@ extension OberVaveModel {
 
     var selectedInstrument: RackInstrument? { instruments.first { $0.slot == selectedSlot } }
 
-    func syncRackState() {
+    func syncSequencerState() {
         while ov_seq_record_ready() != 0 {
             let revision = ov_seq_record_revision()
             var result: UInt32 = 0
@@ -142,8 +142,9 @@ extension OberVaveModel {
             }
         }
         let state = ov_seq_record_state()
-        recordingPattern = state == 0 ? nil : Int(state >> 3) - 1
-        recordingPhase = state & 7
+        let recordingCell = state == 0 ? nil : Int(state >> 3) - 1
+        if recordingPattern != recordingCell { recordingPattern = recordingCell }
+        if recordingPhase != state & 7 { recordingPhase = state & 7 }
         var editResult = ov_seq_edit_result()
         while ov_seq_read_edit(&editResult) != 0 {
             if let pending = pendingPatternTransfer, pending.token == editResult.token {
@@ -158,7 +159,17 @@ extension OberVaveModel {
                 }
             }
         }
-        sequencerRevision &+= 1
+        var transport: [UInt32] = [state, ov_seq_record_progress(), ov_seq_record_remaining()]
+        for instrument in instruments {
+            let slot = UInt32(instrument.slot)
+            transport.append(contentsOf: [UInt32(ov_seq_active(slot) + 1), UInt32(ov_seq_pending(slot) + 1),
+                                          ov_seq_stopping(slot), ov_seq_position(slot)])
+            for row in 0..<8 { transport.append(ov_seq_pad_pending(slot, UInt32(row))) }
+        }
+        if lastSequencerTransport != transport {
+            lastSequencerTransport = transport
+            sequencerRevision &+= 1
+        }
         let generation = ov_rack_stop_generation()
         if generation != keyboardStopGeneration {
             keyboardStopGeneration = generation
@@ -173,6 +184,10 @@ extension OberVaveModel {
                 : failure == 4 ? "The sequencer result queue is full. Let synchronization finish, then retry the operation."
                 : "The audio rack rejected an invalid configuration."
         }
+    }
+
+    func syncRackState() {
+        syncSequencerState()
         var captured = ov_scene_config()
         if ov_rack_snapshot_read(&captured) != 0 {
             if pendingSceneName != nil { finishSceneSave(captured) }

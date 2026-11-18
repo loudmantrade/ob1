@@ -370,6 +370,8 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var sequencerInteractionEpoch: UInt64 = 0
     @Published var soloSlots: Set<Int> = []
     @Published var sequencerRevision = 0
+    var lastSequencerTransport: [UInt32] = []
+    private let uiRefreshDriver = RackUIRefreshDriver()
     @Published var launchGrid = 2
     @Published var recordingPattern: Int?
     @Published var recordingPhase: UInt32 = 0
@@ -502,6 +504,11 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         observeAudioChanges()
         startMIDI()
         centralManager = CBCentralManager(delegate: self, queue: .main)
+        uiRefreshDriver.start { [weak self] in
+            self?.syncSequencerState()
+        } slow: { [weak self] in
+            self?.refreshParameterValues()
+        }
     }
 
     func selectPreviousProgram() {
@@ -1598,9 +1605,6 @@ struct ContentView: View {
                 model.restoreCurrentPresetDefaults()
             }
             Button("Cancel", role: .cancel) {}
-        }
-        .onReceive(Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()) { _ in
-            model.refreshParameterValues()
         }
         .onReceive(Timer.publish(every: 0.04, on: .main, in: .common).autoconnect()) { _ in
             outputMeters.refresh()

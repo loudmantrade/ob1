@@ -21,6 +21,28 @@ enum KeyboardZoneLayout {
     }
 }
 
+final class RackUIRefreshDriver {
+    static let interval: TimeInterval = 0.04
+    private var timer: Timer?
+
+    func start(fast: @escaping () -> Void, slow: @escaping () -> Void) {
+        guard timer == nil else { return }
+        var nextSlow = ProcessInfo.processInfo.systemUptime
+        let timer = Timer(timeInterval: Self.interval, repeats: true) { _ in
+            fast()
+            let now = ProcessInfo.processInfo.systemUptime
+            if now >= nextSlow {
+                nextSlow = now + 0.25
+                slow()
+            }
+        }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    deinit { timer?.invalidate() }
+}
+
 final class SceneSaveMonitor {
     private var timer: Timer?
 

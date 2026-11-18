@@ -56,6 +56,48 @@ struct SceneChecks {
         print("PASS scene save completes without view refresh, saves again after edits, times out and recovers")
     }
 
+    static func checkUIRefreshDriver() {
+        precondition(RackUIRefreshDriver.interval == 0.04)
+        let driver = RackUIRefreshDriver()
+        var fastTicks = 0
+        var slowTicks = 0
+        var received = false
+        var readyAt = ProcessInfo.processInfo.systemUptime
+        var receivedAt = 0.0
+        driver.start {
+            fastTicks += 1
+            var clip = ov_seq_clip()
+            var result: UInt32 = 0
+            var epoch: UInt64 = 0
+            if ov_seq_read_completion(&clip, &result, &epoch) != 0 {
+                precondition(!received && result == 1 && clip.slot == 0 && clip.row == 7)
+                precondition(ov_seq_record_state() == 0 && ov_seq_active(0) == 7)
+                received = true
+                receivedAt = ProcessInfo.processInfo.systemUptime - readyAt
+            }
+        } slow: {
+            slowTicks += 1
+        }
+        precondition(ov_seq_arm(0, 7, 2, 1, 1, 1) != 0)
+        var left = [Float](repeating: 0, count: 32)
+        var right = left
+        for _ in 0..<900 { ov_render(&left, &right, 32) }
+        precondition(ov_seq_record_ready() != 0)
+        readyAt = ProcessInfo.processInfo.systemUptime
+        let until = Date().addingTimeInterval(0.55)
+        while Date() < until {
+            // Frequent view reevaluations must neither replace callbacks nor postpone polling.
+            driver.start(fast: { fatalError("Refresh driver restarted") }, slow: { fatalError("Refresh driver restarted") })
+            RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+        }
+        precondition(received && fastTicks >= 10 && slowTicks >= 2 && slowTicks <= 4)
+        precondition(receivedAt < 0.15, "Completed take refresh exceeded the UI polling budget")
+        precondition(ov_seq_record_ready() == 0)
+        precondition(ov_rack_stop_all() != 0)
+        ov_render(&left, &right, 32)
+        print("PASS persistent UI refresh: \(fastTicks) fast / \(slowTicks) slow polls, completion delivered at \(receivedAt)s without a view event or another action")
+    }
+
     static func rejects(_ value: RackSceneDocument) {
         do {
             try value.validate()
@@ -309,6 +351,7 @@ struct SceneChecks {
         print("PASS keyboard key-lock: opt-in, independent notes, toggle release, clearing and fast downward boundary swipe")
         ov_init()
         checkSaveMonitor()
+        checkUIRefreshDriver()
         var instruments = (0..<16).map { RackInstrument.oberVave(slot: $0, channel: $0 + 1) }
         instruments[0].channel = 2
         instruments[0].lowNote = 24
