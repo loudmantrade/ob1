@@ -390,7 +390,59 @@ static void checkPadTapTransitions()
     std::puts("PASS audio-owned short taps: empty arm, recording finish queues once, record-to-loop before mailbox read, stale UI tap stops playback at bar, repeated taps preserve deadline, restart and Input/Latch release");
 }
 
+static void checkConsecutiveTakes()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120;
+    for (uint32_t slot = 0; slot < 3; ++slot) scene->slots[slot] = {1, config()};
+    assert(ov_rack_load(scene.get())); render();
+    const auto epoch = ov_seq_scene_epoch();
+    std::array<int64_t, 3> origins {};
+    for (uint32_t slot = 0; slot < 3; ++slot) {
+        assert(ov_seq_tap(slot, 0, 2, 1, 0, 1, 0)); render();
+        while (ov_seq_record_phase() != 3) render();
+        ov_note_on(60 + slot, 100); render(2048); ov_note_off(60 + slot); render();
+        assert(ov_seq_tap(slot, 0, 2, 1, 0, 1, 0)); render();
+        assert(ov_seq_record_phase() == 5);
+        while (rack::recorder.running) render();
+        assert(ov_seq_record_phase() == 0 && ov_seq_recording_slot() == -1);
+        origins[slot] = rack::players[slot].origin;
+        for (uint32_t previous = 0; previous <= slot; ++previous) {
+            assert(ov_seq_active(previous) == 0 && rack::players[previous].origin == origins[previous]);
+        }
+    }
+    auto result = std::make_unique<ov_seq_clip>();
+    for (uint32_t slot = 0; slot < 3; ++slot) {
+        uint32_t status = 0; uint64_t generation = 0;
+        assert(ov_seq_read_completion(result.get(), &status, &generation));
+        assert(status == 1 && generation == epoch && result->slot == slot && result->count == 1);
+    }
+    assert(!ov_seq_record_ready() && !ov_rack_take_error());
+    // Reserve capacity before capture; unread results cannot be overwritten even by cancellation.
+    for (uint32_t i = 0; i < rack::completionCapacity; ++i) {
+        assert(ov_rack_stop_all()); render();
+        assert(ov_seq_arm(0, 1, 0, 1, 0, 1)); render();
+        assert(ov_seq_finish_record()); render();
+        assert(ov_seq_recording_slot() == -1);
+    }
+    assert(ov_seq_arm(0, 1, 0, 1, 0, 1)); render();
+    assert(ov_seq_recording_slot() == -1 && ov_rack_take_error() == 4);
+    for (uint32_t i = 0; i < rack::completionCapacity; ++i) {
+        assert(ov_seq_record_result() == 2 && ov_seq_read_record(result.get()));
+        assert(result->slot == 0 && result->row == 1);
+    }
+    assert(!ov_seq_record_ready());
+    assert(ov_seq_arm(0, 1, 0, 1, 0, 1)); render();
+    assert(ov_seq_recording_slot() == 0);
+    assert(ov_rack_load(scene.get())); render();
+    uint32_t status = 0; uint64_t generation = 0;
+    assert(ov_seq_read_completion(result.get(), &status, &generation));
+    assert(status == 2 && generation != ov_seq_scene_epoch());
+    assert(!ov_seq_record_ready() && !ov_rack_take_error());
+    std::puts("PASS consecutive A/B/C takes without UI polling: independent players, FIFO exactly once, reserved completion capacity, explicit backpressure and scene epochs");
+}
+
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); ov_rack_collect();
 }

@@ -123,12 +123,12 @@ extension OberVaveModel {
     var selectedInstrument: RackInstrument? { instruments.first { $0.slot == selectedSlot } }
 
     func syncRackState() {
-        if ov_seq_record_ready() != 0 {
-            let result = ov_seq_record_result()
+        while ov_seq_record_ready() != 0 {
+            var result: UInt32 = 0
+            var epoch: UInt64 = 0
             var clip = ov_seq_clip()
-            if ov_seq_read_record(&clip) != 0 {
-                recordingPattern = nil
-                if result == 1 {
+            if ov_seq_read_completion(&clip, &result, &epoch) != 0 {
+                if result == 1 && epoch == ov_seq_scene_epoch() {
                     let pattern = SequencerPattern(core: clip)
                     do {
                         try pattern.validate()
@@ -142,9 +142,7 @@ extension OberVaveModel {
         }
         let recordingSlot = Int(ov_seq_recording_slot())
         let recordingRow = Int(ov_seq_recording_row())
-        if recordingSlot >= 0 && recordingRow >= 0 {
-            recordingPattern = recordingSlot * 8 + recordingRow
-        }
+        recordingPattern = recordingSlot >= 0 && recordingRow >= 0 ? recordingSlot * 8 + recordingRow : nil
         sequencerRevision &+= 1
         let generation = ov_rack_stop_generation()
         if generation != keyboardStopGeneration {
@@ -157,6 +155,7 @@ extension OberVaveModel {
             if ov_seq_recording_slot() < 0 && ov_seq_record_ready() == 0 { recordingPattern = nil }
             errorMessage = failure == 1 ? "The MIDI/control queue or note ownership capacity overflowed. Notes were stopped to prevent stuck notes."
                 : failure == 3 ? "Not enough memory to create the requested instruments."
+                : failure == 4 ? "Recording was not started: completed takes are waiting to be synchronized. Try again."
                 : "The audio rack rejected an invalid configuration."
         }
         var captured = ov_scene_config()
@@ -463,9 +462,7 @@ extension OberVaveModel {
             errorMessage = "The recording instrument is unavailable."; return
         }
         if ov_seq_arm(UInt32(slot), UInt32(row), UInt32(recordMode.rawValue), UInt32(recordCountBars),
-                      UInt32(instrument.recordBeats), recordOutput ? 1 : 0) != 0 {
-            recordingPattern = slot * 8 + row
-        } else {
+                      UInt32(instrument.recordBeats), recordOutput ? 1 : 0) == 0 {
             errorMessage = "Could not arm recording."
         }
     }
@@ -479,8 +476,6 @@ extension OberVaveModel {
         if ov_seq_tap(UInt32(slot), UInt32(row), UInt32(recordMode.rawValue), UInt32(recordCountBars),
                       UInt32(instrument.recordBeats), recordOutput ? 1 : 0, UInt32(launchGrid)) == 0 {
             errorMessage = "Could not apply the pattern tap."
-        } else if recordingPattern == nil && pattern(slot: slot, row: row) == nil {
-            recordingPattern = slot * 8 + row
         }
     }
     func setRecordLength(slot: Int, beats: Int) {

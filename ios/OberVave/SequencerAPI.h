@@ -36,9 +36,13 @@ uint32_t ov_seq_record_phase(void); /* 0 idle, 1 waiting for note, 2 count-in, 3
 uint32_t ov_seq_record_remaining(void);
 int64_t ov_seq_record_length(void); /* current length in 960-PPQ ticks */
 uint32_t ov_seq_record_result(void); /* 1 saved, 2 cancelled, 3 failed; read before mailbox */
-/* Recording completion mailbox: poll, then read on the control thread. */
+/* Single control-thread consumer; bounded FIFO. The audio recorder reserves a result entry when armed.
+   Rack error 4 rejects a new take if all 16 completion entries are unread. */
 uint32_t ov_seq_record_ready(void);
 int ov_seq_read_record(ov_seq_clip* clip);
+int ov_seq_read_completion(ov_seq_clip* clip, uint32_t* result, uint64_t* epoch);
+uint64_t ov_seq_scene_epoch(void);
+uint32_t ov_seq_record_progress(void); /* body bar phase, 0..65535 */
 int32_t ov_seq_active(uint32_t slot);
 int32_t ov_seq_pending(uint32_t slot);
 uint32_t ov_seq_position(uint32_t slot); /* 0..65535 */

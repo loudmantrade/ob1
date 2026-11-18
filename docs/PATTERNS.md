@@ -187,6 +187,14 @@ the next tap rather than sending another recording action. Playing-pad Stop
 is bar-queued, idempotent and releases input-stage Latch as well as output
 owners. Confirmation dialogs are only for explicit destructive menu actions.
 
+Completion delivery is a preallocated 16-entry single-producer/single-consumer
+FIFO, independent of recorder availability. Each accepted take reserves an
+entry before capture; unread results never get overwritten. A full FIFO rejects
+the next arm with rack error 4 before changing any clip. Polling drains saved,
+cancelled and failed results in order exactly once. Scene epochs prevent an
+old completion from being applied to a newly loaded scene. Recording indicators
+come only from audio-owned recorder state, not an optimistic tap or unread result.
+
 ## Verification
 
 `musical_patterns` is registered in the existing CTest suite. It can also run
