@@ -741,7 +741,7 @@ void apply(const Command& c)
         const bool recording = recorder.running &&
             ((recorder.slot == s && recorder.row == r) || (recorder.slot == t && recorder.row == u));
         const bool valid = !recording && edit->epoch == sceneEpoch.load() &&
-            scene->slots[s] && scene->slots[t] && clips[s][r] && !clips[t][u] &&
+            scene->slots[s] && scene->slots[t] && clips[s][r] && (!clips[t][u] || edit->mode >= 2) &&
             clipRevisions[s][r].load() == edit->sourceRevision &&
             clipRevisions[t][u].load() == edit->targetRevision &&
             samePattern(clips[s][r]->pattern.data(), edit->expected->pattern.data());
@@ -755,7 +755,7 @@ void apply(const Command& c)
             };
             stopAffected(s, r); stopAffected(t, u);
             retire(clips[t][u].release()); clips[t][u] = std::move(edit->replacement);
-            if (edit->mode == 0) {
+            if (!(edit->mode & 1)) {
                 retire(clips[s][r].release());
                 clipRevisions[s][r].fetch_add(1);
             }
@@ -1295,7 +1295,7 @@ int ov_seq_edit(const ov_seq_clip* source, uint32_t targetSlot, uint32_t targetR
                 uint32_t mode, uint64_t epoch, uint64_t sourceRevision, uint64_t targetRevision, uint64_t token)
 {
     using namespace rack;
-    if (!source || targetSlot >= capacity || targetRow >= OV_SEQ_ROWS || mode > 1 ||
+    if (!source || targetSlot >= capacity || targetRow >= OV_SEQ_ROWS || mode > 3 ||
         (source->slot == targetSlot && source->row == targetRow)) { error.store(2); return 0; }
     try {
         auto edit = std::make_unique<EditRequest>();

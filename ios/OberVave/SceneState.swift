@@ -302,16 +302,19 @@ struct PatternTransfer {
     var targetRevision: UInt64
     var epoch: UInt64
     var copying = false
+    var expectedDestination: SequencerPattern?
+    var replace = false
 
     func applying(to patterns: [SequencerPattern]) throws -> [SequencerPattern] {
         guard patterns.first(where: { $0.id == source.id }) == source,
-              !patterns.contains(where: { $0.id == destination.id }) else {
+              patterns.first(where: { $0.id == destination.id }) == expectedDestination,
+              expectedDestination == nil || replace else {
             throw SceneError.invalid("The source or destination changed. No patterns were modified.")
         }
         var moved = source
         moved.slot = destination.slot; moved.row = destination.row
         try moved.validate()
-        return patterns.filter { copying || $0.id != source.id } + [moved]
+        return patterns.filter { $0.id != destination.id && (copying || $0.id != source.id) } + [moved]
     }
 }
 

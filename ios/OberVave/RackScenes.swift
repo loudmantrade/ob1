@@ -469,7 +469,8 @@ extension OberVaveModel {
             _ = try transfer.applying(to: patterns)
             var source = transfer.source.coreClip()
             patternTransferToken &+= 1
-            guard ov_seq_edit(&source, UInt32(transfer.destination.slot), UInt32(transfer.destination.row), transfer.copying ? 1 : 0,
+            let mode: UInt32 = (transfer.copying ? 1 : 0) | (transfer.replace ? 2 : 0)
+            guard ov_seq_edit(&source, UInt32(transfer.destination.slot), UInt32(transfer.destination.row), mode,
                               transfer.epoch, transfer.sourceRevision, transfer.targetRevision, patternTransferToken) != 0 else {
                 throw SceneError.invalid("Could not queue pattern transfer.")
             }

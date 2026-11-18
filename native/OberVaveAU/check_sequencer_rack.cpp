@@ -479,6 +479,19 @@ static void checkPatternMove()
     assert(rack::clips[0][3]->pattern.data().notes[0].routing.instruments == 1);
     assert(ov_seq_delete(0, 3)); render();
     assert(rack::clips[1][1] && !rack::clips[0][3]);
+    auto replace = [&](uint32_t mode, uint64_t targetRevision) {
+        assert(ov_seq_edit(source.get(), 2, 0, mode, ov_seq_scene_epoch(),
+            ov_seq_cell_revision(1, 1), targetRevision, 4)); render();
+        assert(ov_seq_read_edit(&copied)); return copied.success;
+    };
+    const auto targetRevision = ov_seq_cell_revision(2, 0);
+    assert(!replace(1, targetRevision)); // No confirmation: neither cell changes.
+    assert(rack::clips[2][0]->pattern.data().notes[0].routing.stage == music::Stage::Output);
+    assert(!replace(3, targetRevision + 1));
+    assert(replace(3, targetRevision));
+    assert(rack::clips[1][1] && rack::clips[2][0] && ov_seq_active(2) == -1);
+    assert(rack::clips[2][0]->pattern.data().notes[0].routing.instruments == (1u << 2));
+    assert(rack::clips[2][0]->pattern.data().notes[0].routing.stage == music::Stage::Input);
     assert(!ov_rack_take_error());
     assert(ov_rack_stop_all()); render();
     std::puts("PASS transactional MOVE: stale destination rejection, cross-column retarget, affected-only Stop, immutable publication and acknowledgement");
