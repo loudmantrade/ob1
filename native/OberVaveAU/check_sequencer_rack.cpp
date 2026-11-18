@@ -601,6 +601,9 @@ static void checkOutputFirstNoteOrigin()
         // Output Wait-for-note means the first emitted sound, not the earlier held key.
         const auto firstOutput = rack::musicalPosition.value;
         assert(rack::recorder.origin == firstOutput);
+        render();
+        assert(rack::clickFrames);
+        assert(rack::clickFrequency == (ov_seq_transport_beat() % 4 == 0 ? 1760 : 1320));
         if (!beats) {
             render(2048);
             assert(ov_seq_finish_record()); render();
@@ -653,10 +656,26 @@ static void checkRecordingMetronomeAndTransport()
     while (rack::recorder.running) render();
     assert(ov_seq_read_record(result.get()) && result->count == 0 && ov_seq_active(0) == 0);
     render(FS / 20);
-    assert(!rack::clickFrames); // Playback alone is silent metronome-wise.
+    assert(!rack::clickFrames);
     const auto previous = ov_seq_transport_beat();
-    render(rack::clock.length());
+    while (ov_seq_transport_beat() == previous) render();
     assert(ov_seq_transport_beat() == previous + 1);
+    assert(rack::clickFrames && rack::clickFrequency == (ov_seq_transport_beat() % 4 == 0 ? 1760 : 1320));
+    ov_seq_set_metronome(0); render();
+    assert(!rack::clickFrames);
+    while (ov_seq_transport_beat() < previous + 2) render();
+    assert(!rack::clickFrames);
+    ov_seq_set_metronome(1); render();
+    assert(!rack::clickFrames);
+    for (uint32_t i = 0; i < 8; ++i) {
+        const auto beat = ov_seq_transport_beat();
+        while (ov_seq_transport_beat() == beat) render();
+        assert(rack::clickFrames);
+        assert(rack::clickFrequency == (ov_seq_transport_beat() % 4 == 0 ? 1760 : 1320));
+        const auto phase = rack::clickPhase;
+        render();
+        assert(rack::clickPhase > phase); // No duplicate click on the same beat.
+    }
     assert(ov_rack_stop_all()); render();
     assert(ov_seq_transport_beat() == 0 && !rack::clickFrames);
     ov_seq_set_metronome(0);
@@ -666,7 +685,7 @@ static void checkRecordingMetronomeAndTransport()
     assert(ov_seq_read_record(result.get()));
     ov_seq_set_metronome(1);
     assert(!ov_rack_take_error());
-    std::puts("PASS recording metronome: waiting silent, accented bar/quarter clicks, immediate mute and no toggle catchup, count-in mute, no recorded clicks, playback-only silence; shared transport advances and Stop All resets");
+    std::puts("PASS shared metronome: recording/playback continuity, first-beat accent matches counter, immediate mute and no toggle catchup during playback, no duplicates, count-in mute, no recorded clicks; Stop All resets");
 }
 
 int main()

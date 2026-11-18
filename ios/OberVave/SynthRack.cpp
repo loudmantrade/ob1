@@ -1057,9 +1057,6 @@ void renderBlock()
     musicalPosition.followPhase(clock.external ? int32_t(clock.frame - clock.anchor)
         : int32_t((processedFrames - sequencerAnchor) % (uint64_t(q) * 4)), q);
     if (recorder.running && musicalPosition.value >= recorder.stopAt) finishRecording(true);
-    const auto click = recorder.click(musicalPosition.value, true);
-    if (!metronomeEnabled.load(std::memory_order_relaxed)) clickFrames = 0;
-    else if (click >= 0) { clickFrames = FS / 40; clickPhase = 0; clickFrequency = click == 0 ? 1760 : 1320; }
     recordingPhase.store(recorder.phase(musicalPosition.value));
     recorderState.store(recorder.running ?
         ((recorder.slot * OV_SEQ_ROWS + recorder.row + 1) << 3) | recorder.phase(musicalPosition.value) : 0);
@@ -1098,8 +1095,18 @@ void renderBlock()
         const auto bar = 3840 * music::tickUnit;
         transportOrigin = musicalPosition.value / bar * bar;
     }
-    if (playing) transportBeat.store(uint64_t(std::max(INT64_C(0), musicalPosition.value - transportOrigin) /
-        (960 * music::tickUnit)), std::memory_order_relaxed);
+    if (playing) {
+        const auto beat = uint64_t(std::max(INT64_C(0), musicalPosition.value - transportOrigin) /
+            (960 * music::tickUnit));
+        const bool crossedBeat = !transportActive || beat != transportBeat.load(std::memory_order_relaxed);
+        transportBeat.store(beat, std::memory_order_relaxed);
+        if (metronomeEnabled.load(std::memory_order_relaxed)) {
+            if (crossedBeat) {
+                clickFrames = FS / 40; clickPhase = 0;
+                clickFrequency = beat % 4 == 0 ? 1760 : 1320;
+            }
+        } else clickFrames = 0;
+    } else clickFrames = 0;
     transportActive = playing;
     const int64_t phase = clock.external ? int32_t(clock.frame - clock.anchor)
         : sequencerAnchor ? int64_t(processedFrames - sequencerAnchor) : int64_t(clock.frame);

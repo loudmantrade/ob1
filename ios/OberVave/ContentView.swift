@@ -1691,7 +1691,7 @@ struct ContentView: View {
                     .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Recording metronome")
+            .accessibilityLabel("Metronome")
             .accessibilityValue(model.recordMetronome ? "On" : "Off")
             SequencerRecordModeControl(model: model)
         }

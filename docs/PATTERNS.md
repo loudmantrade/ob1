@@ -257,10 +257,11 @@ same-cell/off-grid drops are no-ops.
 
 ## Verification
 
-Recording/count-in metronome uses the existing 25 ms synthesized click on the
-audio owner, now throughout the take up to its exact deadline. Its atomic
+The shared count-in/recording/playback metronome uses the existing 25 ms synthesized
+click on the audio owner. Click boundaries and accents use the same quarter index
+as the header, not the recorder's potentially delayed ARP Output origin. Its atomic
 enable flag mutes immediately and consumes muted beats so toggling on does not
-replay an old click. Waiting/playback-only do not trigger it. First beat is
+replay an old click. Waiting alone does not trigger it. First beat is
 1760 Hz and other quarters 1320 Hz, mixed after MIDI capture.
 The global header's one-based bar/beat counter samples an audio-published
 64-bit quarter index, continuing across concurrent loops and later takes.

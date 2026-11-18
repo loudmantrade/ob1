@@ -120,15 +120,17 @@ feed their own notes through the saved ARP mode.
   quantization. It is not a full piano-roll editor. Changes to an active cell
   stop its previous playback safely; tap the pad to launch the edited version.
 
-### Transport counter and recording metronome
+### Transport counter and metronome
 
 The transport header shows the shared **BAR : BEAT** counter in 4/4 (both
 one-based). It advances during count-in, recording and pattern playback,
 without restarting when another loop joins. When all activity stops it freezes;
-Stop All resets to 1:1. The metronome button toggles clicks during count-in and
-recording, including queued completion, and remembers its setting between
-launches. Beat one is accented; waiting for a note and playback alone never
-click. This is audio-clock-driven and does not record metronome sound into MIDI.
+Stop All resets to 1:1. The metronome button toggles clicks during count-in,
+recording and playback, including queued completion, and remembers its setting
+between launches. The high click always matches beat one of the shared counter,
+including delayed ARP Output recording. Waiting for a note alone stays silent.
+Enabling during playback starts clicks at the next beat, without replaying one.
+This is audio-clock-driven and does not record metronome sound into MIDI.
 
 ### Cell editing gestures
 
