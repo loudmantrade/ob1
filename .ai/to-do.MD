@@ -263,6 +263,22 @@ Inspect actual enum values and implementation before reproducing them. Do not as
 
 Preserve existing parameter values and their serialization behavior.
 
+### STOP ALL ARPS
+
+Add a global **STOP ALL ARPS** button to stop arpeggio playback
+simultaneously on all MIDI channels and all rack instruments, not only the
+currently selected channel or instrument.
+
+- Stop all active arpeggiators at the same audio-processing boundary.
+- Release their generated notes, including Chord, Hold Retrigger and Hold
+  Legato notes, without leaving stuck notes.
+- Do not change the selected arpeggiator mode or any saved ARP settings.
+  This is a playback-stop action, not setting the mode to Off.
+- Include the resulting Note Off events in output recording and external
+  MIDI output when those features are enabled.
+- Test simultaneous stopping across multiple channels/instruments and verify
+  that their arpeggiator settings remain unchanged.
+
 ### HOLD LEGATO
 
 This mode needs special care.
@@ -951,6 +967,8 @@ The work is complete when the supported application can:
 12. Pass the relevant automated regression tests.
 13. Preserve compatibility with the existing Audio Unit.
 14. Have every completed functional increment represented by its own meaningful Git commit.
+15. Provide STOP ALL ARPS to stop arpeggiators simultaneously across all channels
+    and instruments without changing their modes or saved settings.
 
 ## Final deliverables
 
