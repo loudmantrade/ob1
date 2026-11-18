@@ -240,6 +240,49 @@ same-cell/off-grid drops are no-ops.
 
 ## Verification
 
+The production rack regression guards ordinary C++ `new`/`delete` during every
+render call, including completion, retirement and cell transactions. It also
+covers A/B/C takes without polling, reserved result capacity, stopped audio,
+rapid edit commands, stale source/destination revisions, scene invalidation
+and affected-only playback cleanup. Swift model tests cover gesture ambiguity,
+cancellation, note geometry, independent copy edits, late acknowledgements and
+JSON persistence. These checks do not substitute for physical touch/audio tests.
+
+### Manual iPad acceptance (not automated)
+
+1. In Wait, Count-in and Immediate modes, record A on part 1, tap to finish,
+   keep playing until the bar end and confirm the pad becomes a diagram with
+   progress, with no red recording indicator remaining.
+2. Immediately record B on part 2 and C on part 3, without stopping A/B.
+   Verify all three loop in sync and their rings follow their own lengths.
+3. Check Input and Output recording with ARP/Latch and Sustain; confirm Output
+   is not arpeggiated twice and Stop/record completion release notes as expected.
+4. Compare a long note, short notes, a chord, cross-loop notes and an enabled
+   pickup. Stop a cell: its static duration diagram should remain visible.
+5. Drag from the central diagram onto an empty cell in the same column, then
+   another column: MOVE clears only the source and preserves musical content.
+6. Short-tap+drag and hold+drag: both show COPY before release and leave the
+   source intact. Edit a copy and verify the source is unchanged.
+7. Drop MOVE and COPY onto occupied cells. Cancel first (no change), then
+   confirm replacement; only affected players stop, unrelated loops continue.
+8. Short-tap+stationary hold: release opens destructive Delete confirmation.
+   Cancel, then retry and confirm. Hold+drag must never request deletion.
+9. Double tap: only the Piano Roll placeholder opens; playback must not toggle.
+   Single populated tap dispatches after 240 ms; empty/recording taps are immediate.
+10. Scroll horizontally/vertically from pad edges, empty cells and gaps.
+    No unintended move or recording should occur. Reveal distant destinations
+    before starting a drag (no drag auto-scroll).
+11. Drop on the same cell or outside the visible cell viewport; interrupt a
+    gesture or change scene during it. No partial edits should remain.
+12. Try editing recorded cells and stale confirmations. They must be rejected
+    without losing either valid pattern. Pause audio while submitting an edit:
+    the UI must show pending, not false success; resume and verify acknowledgement.
+13. Stop/restart individual cells, Stop All, save/reload and relaunch the app.
+    Verify successful edits, sound parameters, KEY-LOCK and MIDI input survive.
+14. Check VoiceOver pad activation and Pattern actions, and test the gesture
+    thresholds/scroll trade-off on older iPads. Installation alone does not
+    verify these physical interactions.
+
 `musical_patterns` is registered in the existing CTest suite. It can also run
 independently of Apple frameworks:
 

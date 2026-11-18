@@ -127,6 +127,9 @@ feed their own notes through the saved ARP mode.
 | Double short tap | Deferred Piano Roll placeholder, no playback action |
 | Hold stationary and release | Pattern actions (editor, Duplicate, Delete, etc.) |
 
+Holding an empty pad opens the existing manual pattern editor without arming
+recording. Holding a recording pad never opens an editing action.
+
 Populated-cell taps wait **240 ms** to resolve compound gestures; empty and
 recording short taps remain immediate. Hold is **450 ms**, movement tolerance
 is **8 pt**. Start editing drags within the central **23 pt radius**; drag from
