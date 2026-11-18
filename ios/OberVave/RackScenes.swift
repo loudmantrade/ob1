@@ -149,8 +149,18 @@ extension OberVaveModel {
             if let pending = pendingPatternTransfer, pending.token == editResult.token {
                 defer { pendingPatternTransfer = nil }
                 if editResult.success != 0 && pending.transfer.epoch == ov_seq_scene_epoch() {
-                    do { patterns = try pending.transfer.applying(to: patterns) }
-                    catch { errorMessage = error.localizedDescription }
+                    let transfer = pending.transfer
+                    var updated = patterns
+                    if !transfer.copying && editResult.source_revision == ov_seq_cell_revision(UInt32(transfer.source.slot), UInt32(transfer.source.row)) {
+                        updated.removeAll { $0.id == transfer.source.id }
+                    }
+                    if !transfer.deleting && editResult.target_revision == ov_seq_cell_revision(UInt32(transfer.destination.slot), UInt32(transfer.destination.row)) {
+                        var destination = transfer.source
+                        destination.slot = transfer.destination.slot; destination.row = transfer.destination.row
+                        updated.removeAll { $0.id == destination.id }
+                        updated.append(destination)
+                    }
+                    patterns = updated
                 } else {
                     errorMessage = "The pattern edit was rejected because a cell, scene or recording changed. No patterns were modified."
                 }
@@ -347,6 +357,7 @@ extension OberVaveModel {
         guard let name = pendingSceneName else { return }
         defer { pendingSceneName = nil; pendingSceneURL = nil }
         do {
+            guard ov_seq_recording_slot() < 0 else { throw SceneError.invalid("Finish recording before saving the scene.") }
             let slots = withUnsafeBytes(of: captured.slots) { raw in
                 Array(raw.bindMemory(to: ov_rack_slot.self))
             }
@@ -402,6 +413,7 @@ extension OberVaveModel {
         guard accepted != 0 else {
             throw SceneError.invalid("Could not allocate this scene. The current scene has been kept.")
         }
+        sequencerInteractionEpoch &+= 1
         instruments = document.instruments
         patterns = document.patterns ?? []
         soloSlots = []
@@ -483,6 +495,14 @@ extension OberVaveModel {
         submitPatternTransfer(PatternTransfer(source: pattern, destination: PatternCell(slot: pattern.slot, row: pattern.row),
                                                sourceRevision: revision, targetRevision: revision,
                                                epoch: ov_seq_scene_epoch(), deleting: true))
+    }
+
+    func deletePattern(_ transfer: PatternTransfer) {
+        var deletion = transfer
+        deletion.deleting = true
+        deletion.destination = PatternCell(slot: transfer.source.slot, row: transfer.source.row)
+        deletion.targetRevision = deletion.sourceRevision
+        submitPatternTransfer(deletion)
     }
 
     func duplicatePattern(_ pattern: SequencerPattern) {
@@ -671,6 +691,7 @@ private struct SequencerCellProgress: View {
     var stopping: Bool
     var recording: Bool
     var waiting: Bool
+    var countRemaining = 0
 
     var body: some View {
         ZStack {
@@ -681,21 +702,54 @@ private struct SequencerCellProgress: View {
                     .stroke(style: StrokeStyle(lineWidth: 2, lineCap: .round)).rotationEffect(.degrees(-90))
             }
             if stopping || waiting {
-                Image(systemName: stopping ? "stop.fill" : "clock").font(.system(size: 8))
+                Image(systemName: stopping ? "stop.fill" : countRemaining > 0 ? "metronome" : "clock")
+                    .font(.system(size: 8))
             } else if recording {
                 Circle().frame(width: 4, height: 4)
             }
         }
         .frame(width: 46, height: 46)
+        .overlay {
+            if waiting && countRemaining > 0 {
+                ForEach(0..<min(8, countRemaining), id: \.self) { beat in
+                    Circle().frame(width: 3, height: 3).offset(y: -23)
+                        .rotationEffect(.degrees(Double(beat) * 45))
+                }
+            }
+        }
         .accessibilityHidden(true)
     }
+}
+
+private struct SequencerCellFrames: PreferenceKey {
+    static var defaultValue: [PatternCell: CGRect] = [:]
+    static func reduce(value: inout [PatternCell: CGRect], nextValue: () -> [PatternCell: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
+private struct SequencerCellDrag {
+    var transfer: PatternTransfer
+    var point: CGPoint
+    var target: PatternCell?
 }
 
 struct SequencerView: View {
     @ObservedObject var model: OberVaveModel
     @State private var editing: SequencerPattern?
-    @State private var deleting: SequencerPattern?
+    @State private var deleting: PatternTransfer?
     @State private var replacing: SequencerPattern?
+    @State private var replacement: PatternTransfer?
+    @State private var pianoRoll: SequencerPattern?
+    @State private var menuPattern: SequencerPattern?
+    @State private var afterMenu: (() -> Void)?
+    @State private var heldSource: PatternTransfer?
+    @State private var drag: SequencerCellDrag?
+    @State private var copyHint: Int?
+    @State private var frames: [PatternCell: CGRect] = [:]
+    @State private var gridFrame = CGRect.zero
+    @State private var cellViewport = CGRect.zero
+    @State private var rootFrame = CGRect.zero
     @State private var meters = [Double](repeating: 0, count: 16)
     private let width: CGFloat = 110
     private let padHeight: CGFloat = 54
@@ -715,7 +769,8 @@ struct SequencerView: View {
                         Label("FINISH REC", systemImage: "record.circle.fill").foregroundStyle(.red)
                     }.buttonStyle(.bordered)
                 }
-                Text("HOLD PAD TO EDIT / RECORD").font(.caption2.monospaced()).foregroundStyle(.secondary)
+                Text(model.pendingPatternTransfer == nil ? "DRAG CENTER: MOVE · HOLD: COPY · EDGES: SCROLL" : "APPLYING EDIT · WAITING FOR AUDIO")
+                    .font(.caption2.monospaced()).foregroundStyle(.secondary)
             }
             ScrollView(.horizontal) {
                 VStack(spacing: 0) {
@@ -730,6 +785,10 @@ struct SequencerView: View {
                                     ForEach(0..<8, id: \.self) { row in pad(instrument, row: row) }
                                 }.frame(width: width)
                             }
+                            .background(GeometryReader { proxy in
+                                Color.clear.onAppear { gridFrame = proxy.frame(in: .global) }
+                                    .onChange(of: proxy.frame(in: .global)) { gridFrame = $0 }
+                            })
                             VStack(spacing: 6) {
                                 Text("ROW").font(.caption.bold()).frame(height: 54)
                                 ForEach(0..<8, id: \.self) { row in
@@ -745,6 +804,10 @@ struct SequencerView: View {
                             }.frame(width: 70)
                         }
                     }
+                    .background(GeometryReader { proxy in
+                        Color.clear.onAppear { cellViewport = proxy.frame(in: .global) }
+                            .onChange(of: proxy.frame(in: .global)) { cellViewport = $0 }
+                    })
                     Divider().padding(.vertical, 6)
                     HStack(alignment: .top, spacing: 8) {
                         ForEach(model.instruments) { instrument in mixer(instrument).frame(width: width) }
@@ -761,6 +824,31 @@ struct SequencerView: View {
         }
         .padding(.horizontal, 12)
         .disabled(model.pendingSceneName != nil)
+        .background(GeometryReader { proxy in
+            Color.clear.onAppear { rootFrame = proxy.frame(in: .global) }
+                .onChange(of: proxy.frame(in: .global)) { rootFrame = $0 }
+        })
+        .onPreferenceChange(SequencerCellFrames.self) { frames = $0 }
+        .overlay(alignment: .topLeading) {
+            if let drag, let layout = model.noteLayouts[drag.transfer.source.id] {
+                VStack(spacing: 2) {
+                    SequencerNoteDiagram(layout: layout).frame(width: 48, height: 48)
+                    Label(drag.transfer.copying ? "COPY" : "MOVE",
+                          systemImage: drag.transfer.copying ? "plus.square.on.square" : "arrow.up.and.down.and.arrow.left.and.right")
+                        .font(.caption2.bold())
+                }
+                .padding(6).foregroundStyle(.cyan).background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
+                .position(x: drag.point.x - rootFrame.minX, y: drag.point.y - rootFrame.minY - 38)
+                .allowsHitTesting(false)
+            }
+        }
+        .onChange(of: model.sequencerInteractionEpoch) { _ in
+            if drag != nil || replacement != nil || deleting != nil {
+                model.errorMessage = "The scene changed. The pattern gesture was cancelled."
+            }
+            cancelGesture(); replacement = nil; deleting = nil; pianoRoll = nil; afterMenu = nil; menuPattern = nil
+        }
+        .onDisappear { cancelGesture() }
         .sheet(item: $editing) { pattern in
             SequencerPatternEditor(pattern: pattern) { model.storePattern($0) }
         }
@@ -786,12 +874,63 @@ struct SequencerView: View {
                 "Uses Record mode and this column's fixed/free length. Tap again to finish at the end of the bar and start the loop. Existing playback continues for monitoring."
             )
         }
+        .confirmationDialog("Replace existing pattern?", isPresented: Binding(
+            get: { replacement != nil }, set: { if !$0 { replacement = nil } })
+        ) {
+            Button("Replace", role: .destructive) {
+                if var transfer = replacement {
+                    transfer.replace = true
+                    if transfer.copying { model.copyPattern(transfer) } else { model.movePattern(transfer) }
+                }
+                replacement = nil
+            }
+            Button("Cancel", role: .cancel) { replacement = nil }
+        } message: {
+            if let replacement {
+                Text("Replace instrument \(replacement.destination.slot + 1), row \(replacement.destination.row + 1)? The destination pattern will be replaced; \(replacement.copying ? "the source will remain." : "the source cell will become empty.")")
+            }
+        }
+        .sheet(item: $menuPattern, onDismiss: {
+            let action = afterMenu; afterMenu = nil; action?()
+        }) { pattern in
+            VStack(spacing: 18) {
+                Text("Pattern actions").font(.headline)
+                Button("Edit Pattern") { dismissMenu { editing = pattern } }
+                Button("Duplicate") { dismissMenu { model.duplicatePattern(pattern) } }
+                Button(pattern.introEnabled ? "Disable Intro" : "Enable Intro") {
+                    dismissMenu {
+                        var changed = pattern; changed.introEnabled.toggle(); _ = model.storePattern(changed)
+                    }
+                }
+                Button("Record Again…") { dismissMenu { replacing = pattern } }
+                Button("Stop Column") { dismissMenu { model.stopColumn(pattern.slot, arp: false) } }
+                Button("Delete", role: .destructive) {
+                    let source = transferSource(pattern)
+                    dismissMenu { deleting = source }
+                }
+                Button("Cancel", role: .cancel) { menuPattern = nil }
+            }
+            .padding(24).presentationDetents([.medium, .large])
+        }
+        .sheet(item: $pianoRoll) { pattern in
+            VStack(spacing: 20) {
+                Image(systemName: "pianokeys").font(.largeTitle)
+                Text("Piano Roll").font(.title2.bold())
+                Text("The Piano Roll editor is planned for a later update. This action does not change or launch the pattern.")
+                    .multilineTextAlignment(.center)
+                Button("Close") { pianoRoll = nil }.buttonStyle(.bordered)
+            }.padding(30).presentationDetents([.medium])
+        }
         .onReceive(Timer.publish(every: 0.04, on: .main, in: .common).autoconnect()) { _ in
             meters = (0..<16).map { slot in
                 let peak = Double(ov_seq_take_level(UInt32(slot))) / 65535
                 return max(max(0, min(1, (20 * log10(max(peak, 0.000001)) + 60) / 60)), meters[slot] - 0.08)
             }
         }
+    }
+
+    private func dismissMenu(perform action: @escaping () -> Void) {
+        afterMenu = action; menuPattern = nil
     }
 
     private func pad(_ instrument: RackInstrument, row: Int) -> some View {
@@ -802,18 +941,22 @@ struct SequencerView: View {
         let stopping = active && ov_seq_stopping(UInt32(instrument.slot)) != 0
         let phase = ov_seq_record_phase()
         let color = MIDIChannelColors.color(instrument.channel)
-        return Button {
-            model.tapPattern(slot: instrument.slot, row: row)
-        } label: {
-            ZStack {
+        let cell = PatternCell(slot: instrument.slot, row: row)
+        let commandPending = ov_seq_pad_pending(UInt32(instrument.slot), UInt32(row)) != 0
+        let finishing = recording && phase == 5
+        let waiting = recording && (phase == 1 || phase == 2 || phase == 4) || (queued || commandPending) && !active
+        let position: Double = Double(recording ? ov_seq_record_progress() : ov_seq_position(UInt32(instrument.slot))) / 65535
+        let showCopyHint = copyHint == cell.id
+        let highlighted = drag?.target == cell
+        let visual = ZStack {
                 if !recording, let pattern, let layout = model.noteLayouts[pattern.id] {
                     SequencerNoteDiagram(layout: layout).equatable()
                 }
-                if recording || active || queued {
+                if recording || active || queued || commandPending {
                     SequencerCellProgress(
-                        position: Double(recording ? ov_seq_record_progress() : ov_seq_position(UInt32(instrument.slot))) / 65535,
-                        queued: queued || recording && phase == 5, stopping: stopping || recording && phase == 5,
-                        recording: recording, waiting: recording && (phase == 1 || phase == 2 || phase == 4) || queued && !active)
+                        position: position, queued: queued || finishing || commandPending, stopping: stopping || finishing,
+                        recording: recording, waiting: waiting,
+                        countRemaining: recording && phase == 2 ? Int(ov_seq_record_remaining()) : 0)
                 } else if pattern == nil {
                     Image(systemName: "plus")
                 }
@@ -823,28 +966,94 @@ struct SequencerView: View {
             .background(color.opacity(active ? 0.32 : pattern == nil ? 0.04 : 0.17), in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(queued ? Color.white : color.opacity(0.45), lineWidth: queued ? 2 : 1))
             .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+        let interactive = visual
+            .overlay {
+                SequencerTouchSurface(editable: pattern != nil && !recording, epoch: model.sequencerInteractionEpoch,
+                                      onDown: { heldSource = pattern.map(transferSource) },
+                                      onEffect: { effect, point in handleGesture(effect, cell: cell, point: point) },
+                                      onCancel: { cancelGesture() })
+                    .accessibilityHidden(true)
+            }
+            .overlay(RoundedRectangle(cornerRadius: 8)
+                .stroke(highlighted ? Color.cyan : .clear, lineWidth: 3).allowsHitTesting(false))
+            .overlay(alignment: .topTrailing) {
+                if showCopyHint {
+                    Image(systemName: "plus.square.on.square").font(.caption).foregroundStyle(.cyan).allowsHitTesting(false)
+                }
+            }
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: SequencerCellFrames.self, value: [cell: proxy.frame(in: .global)])
+            })
+        return interactive.accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { model.tapPattern(slot: instrument.slot, row: row) }
         .accessibilityLabel(
             "\(instrument.name), row \(row + 1), \(recording ? "finish recording at end of bar and play loop" : active ? "stop at end of bar" : pattern?.name ?? "record pattern")\(queued ? ", queued" : active ? ", playing" : "")"
         )
-        .contextMenu {
-            if recording {
-                Button("Finish at End of Bar", systemImage: "stop.circle") { model.finishPatternRecording() }
-            } else if let pattern {
-                Button("Edit Pattern", systemImage: "pencil") { editing = pattern }
-                Button("Duplicate", systemImage: "doc.on.doc") { model.duplicatePattern(pattern) }
-                Button(pattern.introEnabled ? "Disable Intro" : "Enable Intro") {
-                    var changed = pattern; changed.introEnabled.toggle(); _ = model.storePattern(changed)
-                }
-                Button("Record Again…", systemImage: "record.circle") { replacing = pattern }
-                Button("Stop Column", systemImage: "stop.fill") { model.stopColumn(instrument.slot, arp: false) }
-                Button("Delete", role: .destructive) { deleting = pattern }
-            } else {
-                Button("Create Pattern") { editing = SequencerPattern(slot: instrument.slot, row: row, name: "Pattern \(row + 1)") }
-            }
+        .accessibilityAction(named: "Pattern actions") { if let pattern { menuPattern = pattern } }
+        .accessibilityAction(named: "Piano Roll") { if let pattern { pianoRoll = pattern } }
+        .accessibilityAction(named: "Create Pattern") {
+            if pattern == nil { editing = SequencerPattern(slot: instrument.slot, row: row, name: "Pattern \(row + 1)") }
         }
     }
+
+        private func transferSource(_ pattern: SequencerPattern) -> PatternTransfer {
+            let revision = ov_seq_cell_revision(UInt32(pattern.slot), UInt32(pattern.row))
+            return PatternTransfer(source: pattern, destination: PatternCell(slot: pattern.slot, row: pattern.row),
+                                   sourceRevision: revision, targetRevision: revision, epoch: ov_seq_scene_epoch())
+        }
+
+        private func cancelGesture() {
+            drag = nil; heldSource = nil; copyHint = nil
+        }
+
+        private func target(at point: CGPoint) -> PatternCell? {
+            guard gridFrame.contains(point), cellViewport.contains(point) else { return nil }
+            return frames.first(where: { $0.value.contains(point) })?.key
+        }
+
+        private func handleGesture(_ effect: PatternCellGesture.Effect, cell: PatternCell, point: CGPoint) {
+            switch effect {
+            case .tap:
+                copyHint = nil
+                model.tapPattern(slot: cell.slot, row: cell.row)
+            case .copyReady:
+                copyHint = cell.id
+            case .beginDrag(let copying):
+                guard var source = heldSource, source.source.id == cell.id,
+                      model.recordingPattern != cell.id, model.pendingPatternTransfer == nil else {
+                    model.errorMessage = "The pattern is not available for editing."; cancelGesture(); return
+                }
+                source.copying = copying
+                drag = SequencerCellDrag(transfer: source, point: point, target: target(at: point))
+            case .drag:
+                guard gridFrame.contains(point), cellViewport.contains(point) else { cancelGesture(); return }
+                drag?.point = point
+                drag?.target = target(at: point)
+            case .drop:
+                defer { cancelGesture() }
+                guard let drag, let target = target(at: point), target.id != drag.transfer.source.id else { return }
+                guard model.recordingPattern != target.id else {
+                    model.errorMessage = "The destination is recording. No patterns were modified."; return
+                }
+                var transfer = drag.transfer
+                transfer.destination = target
+                transfer.targetRevision = ov_seq_cell_revision(UInt32(target.slot), UInt32(target.row))
+                transfer.expectedDestination = model.pattern(slot: target.slot, row: target.row)
+                if transfer.expectedDestination != nil { replacement = transfer }
+                else if transfer.copying { model.copyPattern(transfer) }
+                else { model.movePattern(transfer) }
+            case .delete:
+                deleting = heldSource; cancelGesture()
+            case .edit:
+                if let pattern = model.pattern(slot: cell.slot, row: cell.row) { pianoRoll = pattern }
+                cancelGesture()
+            case .menu:
+                menuPattern = model.pattern(slot: cell.slot, row: cell.row); cancelGesture()
+            case .scroll:
+                cancelGesture()
+            }
+        }
 
     private func mixer(_ instrument: RackInstrument) -> some View {
         VStack(spacing: 5) {

@@ -78,19 +78,19 @@ feed their own notes through the saved ARP mode.
   again to queue completion at the end of the current body bar and start the
   loop on that boundary. Recording continues until then, without confirmation
   dialogs. Tap a stopped filled pad to launch it; tap a playing pad to queue
-  its Stop at the next bar boundary. Recorded pads show only a circular dot
-  diagram: note start time runs clockwise from the top, and distance from
-  the center is proportional to MIDI pitch (0 at the center, 127 outside).
-  There are no names, counts, icons or progress bars on recorded pads;
-  playback and queued actions retain their background/border highlighting.
-  Enabled pickup notes wrap around the same circular timeline.
+  its Stop at the next bar boundary. Recorded pads show circular duration
+  arcs, clockwise from 12 o'clock, on up to eight pitch-adaptive lanes.
+  Enabled pickup uses a separate dashed inner lane. The outer ring shows
+  audio-owned playback phase independently for each cell; a dashed ring
+  marks a queued launch, and a square marks queued Stop.
   Repeat taps do not
   postpone completion/Stop. Short taps are resolved on audio against the
   actual pad state, even before the UI reads recording completion.
   Finishing and playback start are audio-owned, without waiting for UI polling.
-  Hold a pad for edit, duplicate, delete, recording and column Stop.
-  Hold an empty pad for the manual editor. Active pads show progress; queued
-  pads show a clock; recording pads show WAIT, count-in beats or REC.
+  A completed take releases the recorder immediately, even before UI polling:
+  record A, then B, then C on different columns without stopping their loops.
+  Waiting is a red clock, count-in adds metronome/countdown dots; capture has
+  red circular bar progress and queued completion adds a square.
 - The header **Record mode** button selects **Wait for note**, **Count-in** or
   **Immediate**, plus Input/Output capture. Wait for note arms indefinitely on a
   stopped scene; the first live Note On starts beat one. Immediate starts beat
@@ -105,7 +105,7 @@ feed their own notes through the saved ARP mode.
   and starts playback automatically at the chosen length. Free recording
   grows by **one complete 4/4 bar** whenever the current bar fills, with **no
   automatic 256-beat cutoff**. A short second tap queues finishing at the
-  current bar's end; **LOOP IN** shows the remaining beats and the final length.
+  current bar's end; the red ring and square persist only until that deadline.
   Repeated taps do not push that deadline later. Fixed length remains a cap:
   a requested bar end never extends past it, even for non-bar-sized limits.
   Manual completion skips
@@ -114,6 +114,34 @@ feed their own notes through the saved ARP mode.
   pitch/velocity/start/duration, loop length and non-destructive playback
   quantization. It is not a full piano-roll editor. Changes to an active cell
   stop its previous playback safely; tap the pad to launch the edited version.
+
+### Cell editing gestures
+
+| Gesture on a completed pad | Action |
+|---|---|
+| Single short tap | Launch / bar-queued Stop |
+| Drag from the central diagram | MOVE |
+| Short tap, then drag the same pad | COPY |
+| Hold, then drag | COPY |
+| Short tap, then hold stationary and release | DELETE confirmation |
+| Double short tap | Deferred Piano Roll placeholder, no playback action |
+| Hold stationary and release | Pattern actions (editor, Duplicate, Delete, etc.) |
+
+Populated-cell taps wait **240 ms** to resolve compound gestures; empty and
+recording short taps remain immediate. Hold is **450 ms**, movement tolerance
+is **8 pt**. Start editing drags within the central **23 pt radius**; drag from
+pad edges, empty cells or gaps to scroll. Leaving the visible grid cancels a
+drag; off-grid and same-cell drops do nothing. Source preview follows the
+finger with MOVE/COPY feedback; valid targets are highlighted. There is no
+edge auto-scroll during a pattern drag: scroll first to reveal the destination.
+
+Occupied targets require **Replace existing pattern?**; Cancel leaves both
+cells unchanged. Edits reject recorded cells and stale source/destination
+revisions. Successful MOVE/COPY/DELETE stops only affected players, releases
+their ARP/Latch notes, and leaves FX tails/unrelated columns intact. Copies
+never auto-start. The UI updates its saved pattern model only after audio
+acknowledgement; save/load waits for pending edits. VoiceOver retains pad
+activation, Pattern actions, Piano Roll and manual Create Pattern actions.
 - The **intro marker** reserves up to twelve beats before zero (two full
   count-in bars plus up to one bar waiting for scene alignment). Negative-start
   notes play once before the main loop, not on subsequent iterations.

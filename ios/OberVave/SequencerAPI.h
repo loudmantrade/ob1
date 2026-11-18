@@ -54,12 +54,13 @@ uint32_t ov_seq_stopping(uint32_t slot);
    Mode 4 DELETE requires source and target to be the same cell.
    Expected immutable source + cell revisions reject stale UI.
    One control-thread consumer reads acknowledgements. No model mutation before success. */
-typedef struct { uint64_t token; uint32_t success; } ov_seq_edit_result;
+typedef struct { uint64_t token, source_revision, target_revision; uint32_t success; } ov_seq_edit_result;
 uint64_t ov_seq_cell_revision(uint32_t slot, uint32_t row);
 int ov_seq_edit(const ov_seq_clip* source, uint32_t target_slot, uint32_t target_row,
                 uint32_t mode, uint64_t epoch, uint64_t source_revision,
                 uint64_t target_revision, uint64_t token);
 int ov_seq_read_edit(ov_seq_edit_result* result);
+uint32_t ov_seq_pad_pending(uint32_t slot, uint32_t row);
 #ifdef __cplusplus
 }
 #endif

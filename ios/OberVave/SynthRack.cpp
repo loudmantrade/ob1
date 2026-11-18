@@ -285,6 +285,7 @@ struct Scene final : Retired {
 };
 ClipGrid clips;
 std::array<std::array<std::atomic<uint64_t>, music::sequencerRows>, capacity> clipRevisions {};
+std::array<std::array<std::atomic<uint32_t>, music::sequencerRows>, capacity> padCommands {};
 struct EditRequest final : Retired {
     std::unique_ptr<SequencerClip> expected, replacement;
     uint32_t sourceSlot = 0, sourceRow = 0, targetSlot = 0, targetRow = 0, mode = 0;
@@ -412,6 +413,7 @@ struct Command {
     Kind kind = Kind::MIDI;
     uint32_t slot = 0, a = 0, b = 0, c = 0, due = 0;
     bool scheduled = false;
+    bool padAcknowledgement = false;
     music::Source source {};
     Retired* object = nullptr;
     ov_instrument_config config {};
@@ -735,6 +737,7 @@ bool samePattern(const music::PatternData& a, const music::PatternData& b)
 }
 void apply(const Command& c)
 {
+    if (c.padAcknowledgement) padCommands[c.slot][c.a].fetch_sub(1);
     if (c.kind == Kind::SeqEdit) {
         auto* edit = static_cast<EditRequest*>(c.object);
         const auto s = edit->sourceSlot, r = edit->sourceRow, t = edit->targetSlot, u = edit->targetRow;
@@ -765,7 +768,7 @@ void apply(const Command& c)
             }
         }
         const auto write = editWrite.load(std::memory_order_relaxed);
-        editResults[write % editCapacity] = {edit->token, valid ? 1u : 0u};
+        editResults[write % editCapacity] = {edit->token, clipRevisions[s][r].load(), clipRevisions[t][u].load(), valid ? 1u : 0u};
         editWrite.store(write + 1, std::memory_order_release);
         retire(edit);
         return;
@@ -781,7 +784,7 @@ void apply(const Command& c)
             Command launch; launch.kind = Kind::SeqLaunch; launch.slot = c.slot; launch.a = c.a; launch.b = c.b;
             apply(launch);
         } else if (!recorder.running) {
-            Command record = c; record.kind = Kind::SeqRecord;
+            Command record = c; record.kind = Kind::SeqRecord; record.padAcknowledgement = false;
             apply(record);
             return;
         } else error.store(2);
@@ -1376,9 +1379,15 @@ static int enqueuePad(rack::Kind kind, uint32_t slot, uint32_t row, uint32_t mod
         if (request->pattern.initialize(slot * OV_SEQ_ROWS + row + 1, "Pattern", beats ? beats * 960 : 3840) !=
             rack::music::PatternError::None) { rack::error.store(2); return 0; }
         rack::Command c; c.kind = kind; c.slot = slot; c.a = row; c.b = grid; c.object = request.get();
-        if (!rack::enqueue(c)) return 0;
+        c.padAcknowledgement = true;
+        rack::padCommands[slot][row].fetch_add(1);
+        if (!rack::enqueue(c)) { rack::padCommands[slot][row].fetch_sub(1); return 0; }
         request.release(); return 1;
     } catch (const std::bad_alloc&) { rack::error.store(3); return 0; }
+}
+uint32_t ov_seq_pad_pending(uint32_t slot, uint32_t row)
+{
+    return slot < rack::capacity && row < OV_SEQ_ROWS ? rack::padCommands[slot][row].load() : 0;
 }
 int ov_seq_arm(uint32_t slot, uint32_t row, uint32_t mode, uint32_t bars, uint32_t beats, uint32_t output)
 {

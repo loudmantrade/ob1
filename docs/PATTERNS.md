@@ -161,7 +161,7 @@ control-thread-preallocated destination receives the recorder's validated,
 canonical data on audio, replacing the immutable cell without allocation or
 quadratic snapshot validation. Automatic/manual completion queues main-loop
 playback on that same audio boundary, skipping pickup already performed.
-The one-result mailbox only mirrors the saved/cancelled/failed result to the UI;
+The bounded completion FIFO only mirrors saved/cancelled/failed results to the UI;
 UI polling never re-publishes or restarts the take. Overflow reports an error and does not publish a
 success-shaped partial take. Scheduling is at 16-sample control resolution,
 not per-sample voice synthesis. No UI timer schedules or records events.
@@ -205,8 +205,38 @@ part of the repeating body. Static geometry is cached when immutable patterns
 change; progress refreshes only draw the cached arcs and audio-owned positions.
 Playing cells have a separate outer progress ring; queued launches are dashed,
 queued Stops have a square marker. Recording is red, waiting/count-in uses a
-clock, and queued completion keeps red capture progress with a square until
+clock (count-in adds metronome/countdown dots), and queued completion keeps red capture progress with a square until
 the actual boundary. There are no text labels on completed pads.
+
+### Transactional cell editing
+
+MOVE/COPY/confirmed REPLACE/DELETE prepare immutable snapshots on control.
+The audio command checks scene epoch, source and destination revisions,
+source content and recording endpoint before changing either cell. Stale or
+busy edits acknowledge failure with neither cell modified. Successful edits
+stop affected active/pending players and their generated owners before retiring
+snapshots; unrelated columns continue. Logical destination routing and pattern
+identity are rebuilt, note content/settings are preserved, and copied patterns
+remain independent and stopped. Scene JSON persists the acknowledged model.
+
+An independent 16-entry edit-ack FIFO reserves capacity before command enqueue.
+The model does not mutate on submission, and waits for acknowledgement before
+save/load or another edit. Revisions on recording completions and edit acks
+prevent delayed notifications from undoing a later recording or cell mutation.
+Parameters/MIDI still use the existing bounded command stream without GUI locks.
+
+One portable gesture state machine resolves all pad touch actions. Populated
+single taps wait 240 ms; 450 ms is hold, 8 pt is the drag threshold. Direct
+central drag MOVEs; tap+drag or hold+drag COPY; tap+stationary hold requests
+DELETE on release; double tap opens the deferred Piano Roll placeholder without
+musical actions. Plain hold opens accessible Pattern actions on release.
+Empty/recording short taps dispatch immediately. MIDI timing remains on audio;
+the touch timer only resolves user intent. Drag starts within 23 pt of the
+diagram center; pad edges/empty cells/gaps permit nested scroll views to scroll.
+Leaving the viewport, interruption or scene change cancels; no auto-scroll is
+performed during a drag. Source/destination highlighting and MOVE/COPY preview
+remain separate from transport indicators. Occupied drops always confirm;
+same-cell/off-grid drops are no-ops.
 
 ## Verification
 
