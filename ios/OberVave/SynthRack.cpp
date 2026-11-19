@@ -304,6 +304,10 @@ struct CellChangeRequest final : Retired {
 constexpr uint32_t editCapacity = 16;
 std::array<ov_seq_edit_result, editCapacity> editResults {};
 std::atomic<uint32_t> editRead {0}, editWrite {0}, editOutstanding {0};
+constexpr uint32_t externalHistoryCapacity = 256;
+std::array<ov_rack_external_change, externalHistoryCapacity> externalHistory {};
+std::atomic<uint32_t> externalHistoryRead {0}, externalHistoryWrite {0}, externalHistoryLost {0};
+std::atomic<bool> externalHistoryEnabled {false};
 std::unique_ptr<SequencerClip> prepareClip(const ov_seq_clip& input)
 {
     if (input.slot >= capacity || input.row >= music::sequencerRows ||
@@ -775,6 +779,11 @@ void routeEvent(const music::Event& event)
             continue;
         const auto routed = music::forInstrument(event, slot);
         inst->engine->boundary(event.time);
+        const bool captureExternal = externalHistoryEnabled.load(std::memory_order_relaxed) &&
+            event.source.kind == music::SourceKind::ExternalMIDI &&
+            (kind == 0xB0 || kind == 0xC0 || kind == 0xD0 || kind == 0xE0);
+        ov_instrument_config before;
+        if (captureExternal) before = inst->config;
         const auto source = Engine::controller_source(status, d1);
         const bool overridden = inst->engine->controllerOverride(source);
         if (source) {
@@ -828,6 +837,23 @@ void routeEvent(const music::Event& event)
         } else {
             deliver(*inst, routed);
             publish(slot);
+        }
+        if (captureExternal) {
+            const auto write = externalHistoryWrite.load(std::memory_order_relaxed);
+            if (write - externalHistoryRead.load(std::memory_order_acquire) >= externalHistoryCapacity) {
+                externalHistoryLost.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                auto& change = externalHistory[write % externalHistoryCapacity];
+                change.epoch = sceneEpoch.load(std::memory_order_relaxed);
+                change.frame = event.time.frame;
+                change.slot = slot;
+                change.source = event.source.id;
+                change.status = status;
+                change.data1 = d1; change.data2 = d2;
+                change.before = before;
+                change.after = inst->config;
+                externalHistoryWrite.store(write + 1, std::memory_order_release);
+            }
         }
     }
     if (gestureStop) {
@@ -1788,6 +1814,24 @@ void ov_rack_collect(void)
 {
     auto* head = rack::retired.exchange(nullptr, std::memory_order_acquire);
     while (head) { auto* next = head->next; delete head; head = next; }
+}
+void ov_rack_external_history_enable(uint32_t enabled)
+{
+    rack::externalHistoryEnabled.store(enabled != 0, std::memory_order_relaxed);
+}
+int ov_rack_read_external_change(ov_rack_external_change* change)
+{
+    using namespace rack;
+    if (!change) return 0;
+    const auto read = externalHistoryRead.load(std::memory_order_relaxed);
+    if (read == externalHistoryWrite.load(std::memory_order_acquire)) return 0;
+    *change = externalHistory[read % externalHistoryCapacity];
+    externalHistoryRead.store(read + 1, std::memory_order_release);
+    return 1;
+}
+uint32_t ov_rack_external_history_lost(void)
+{
+    return rack::externalHistoryLost.exchange(0, std::memory_order_relaxed);
 }
 uint32_t ov_rack_take_error(void) { return rack::error.exchange(0); }
 uint32_t ov_program_count(void) { return 768; }

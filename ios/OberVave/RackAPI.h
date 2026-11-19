@@ -41,6 +41,17 @@ int ov_rack_load(const ov_scene_config *scene);
 int ov_rack_snapshot_request(void);
 int ov_rack_snapshot_read(ov_scene_config *scene);
 int ov_rack_read(uint32_t slot, ov_instrument_config *config);
+/* Optional single-consumer feed of external MIDI changes, captured on the
+   audio owner. The feed is disabled until enabled. A nonzero lost count means
+   the consumer must invalidate any history that may span the missing events. */
+typedef struct {
+    uint64_t epoch, frame;
+    uint32_t slot, source, status, data1, data2;
+    ov_instrument_config before, after;
+} ov_rack_external_change;
+void ov_rack_external_history_enable(uint32_t enabled);
+int ov_rack_read_external_change(ov_rack_external_change *change);
+uint32_t ov_rack_external_history_lost(void);
 /* Post-instrument level/pan/mute stereo peak, normalized to 0...65535; read clears it. */
 uint32_t ov_rack_take_level(uint32_t slot);
 uint32_t ov_rack_stop_generation(void);

@@ -66,6 +66,55 @@ static ov_seq_clip clip(uint32_t slot, uint32_t row, uint32_t output = 1)
     result.notes[0] = {1, 0, 480, 60, 100, output};
     return result;
 }
+static void checkExternalHistoryFeed()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120;
+    scene->slots[0] = {1, config()};
+    scene->slots[1] = {1, config()};
+    scene->slots[2] = {1, config()};
+    scene->slots[2].config.channel = 2;
+    scene->slots[0].config.cc[rack::P_CUTOFF] = 74;
+    scene->slots[1].config.cc[rack::P_CUTOFF] = 74;
+    assert(ov_rack_load(scene.get())); render();
+    ov_rack_external_history_enable(1);
+    assert(rack::send(0xB0, 74, 42, 0, false, true, 123)); render();
+    ov_rack_external_change first {}, second {};
+    assert(ov_rack_read_external_change(&first) && ov_rack_read_external_change(&second));
+    assert(first.slot == 0 && second.slot == 1 && first.source == 123 && first.status == 0xB0);
+    assert(first.epoch == ov_seq_scene_epoch() && first.data1 == 74 && first.data2 == 42);
+    assert(first.before.parameters[rack::P_CUTOFF] == scene->slots[0].config.parameters[rack::P_CUTOFF]);
+    assert(first.after.parameters[rack::P_CUTOFF] == 42 && second.after.parameters[rack::P_CUTOFF] == 42);
+    assert(!ov_rack_read_external_change(&first));
+    assert(rack::send(0xB0, 74, 43, 0, false, false)); render();
+    ov_set_parameter(rack::P_CUTOFF, 44); render();
+    assert(!ov_rack_read_external_change(&first));
+    music::Event automation {};
+    automation.kind = music::Kind::ControlChange;
+    automation.data1 = 74; automation.data2 = 55;
+    automation.source = {music::SourceKind::Pattern, 1};
+    rack::routeEvent(automation);
+    assert(!ov_rack_read_external_change(&first));
+    assert(rack::send(0xB0, 74, 42, 0, false, true, 123)); render();
+    assert(ov_rack_read_external_change(&first) && ov_rack_read_external_change(&second));
+    assert(first.before.parameters[rack::P_CUTOFF] == 55 && first.after.parameters[rack::P_CUTOFF] == 42);
+    assert(second.before.parameters[rack::P_CUTOFF] == 55 && second.after.parameters[rack::P_CUTOFF] == 42);
+    assert(rack::send(0xC0, 3, 0, 0, false, true, 123)); render();
+    assert(ov_rack_read_external_change(&first) && ov_rack_read_external_change(&second));
+    assert(first.before.program != first.after.program && first.after.program == 3 && second.after.program == 3);
+    for (uint32_t i = 0; i < rack::externalHistoryCapacity / 2 + 1; ++i) {
+        assert(rack::send(0xB0, 74, i % 128, 0, false, true, 123)); render();
+    }
+    assert(ov_rack_external_history_lost() == 2 && ov_rack_external_history_lost() == 0);
+    uint32_t count = 0;
+    while (ov_rack_read_external_change(&first)) ++count;
+    assert(count == rack::externalHistoryCapacity);
+    ov_rack_external_history_enable(0);
+    assert(rack::send(0xB0, 74, 20, 0, false, true, 123)); render();
+    assert(!ov_rack_read_external_change(&first));
+    assert(!ov_rack_take_error());
+    std::puts("PASS external MIDI history feed: source, before/after, per-slot routing, exclusions and overflow");
+}
 static void checkRack()
 {
     auto scene = std::make_unique<ov_scene_config>();
@@ -1153,5 +1202,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicCellHistory(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkExternalHistoryFeed(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicCellHistory(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }
