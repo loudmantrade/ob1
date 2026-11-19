@@ -291,6 +291,16 @@ struct EditRequest final : Retired {
     uint32_t sourceSlot = 0, sourceRow = 0, targetSlot = 0, targetRow = 0, mode = 0;
     uint64_t epoch = 0, sourceRevision = 0, targetRevision = 0, token = 0;
 };
+struct CellChangeRequest final : Retired {
+    struct Cell {
+        uint32_t slot = 0, row = 0;
+        uint64_t revision = 0;
+        std::unique_ptr<SequencerClip> expected, replacement;
+    };
+    std::array<Cell, 2> cells {};
+    uint32_t count = 0;
+    uint64_t epoch = 0, token = 0;
+};
 constexpr uint32_t editCapacity = 16;
 std::array<ov_seq_edit_result, editCapacity> editResults {};
 std::atomic<uint32_t> editRead {0}, editWrite {0}, editOutstanding {0};
@@ -444,7 +454,7 @@ void forgetPedals(uint32_t slot)
     for (auto& pedal : pedalOwners) pedal.destinations &= ~(1u << slot);
 }
 
-enum class Kind { MIDI, Audition, StopAll, SeqClip, SeqEdit, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
+enum class Kind { MIDI, Audition, StopAll, SeqClip, SeqEdit, SeqChangeCells, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
     SeqFinish, SourceClose, Parameter, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
 struct Command {
     Kind kind = Kind::MIDI;
@@ -851,6 +861,43 @@ bool samePattern(const music::PatternData& a, const music::PatternData& b)
 void apply(const Command& c)
 {
     if (c.padAcknowledgement) padCommands[c.slot][c.a].fetch_sub(1);
+    if (c.kind == Kind::SeqChangeCells) {
+        auto* edit = static_cast<CellChangeRequest*>(c.object);
+        bool valid = edit->epoch == sceneEpoch.load();
+        for (uint32_t i = 0; i < edit->count; ++i) {
+            const auto& cell = edit->cells[i];
+            const auto& current = clips[cell.slot][cell.row];
+            valid = valid && scene->slots[cell.slot] &&
+                !(recordings[cell.slot].recorder.running && recordings[cell.slot].recorder.row == cell.row) &&
+                clipRevisions[cell.slot][cell.row].load() == cell.revision &&
+                bool(current) == bool(cell.expected);
+            if (current && cell.expected)
+                valid = valid && samePattern(current->pattern.data(), cell.expected->pattern.data());
+        }
+        if (valid) for (uint32_t i = 0; i < edit->count; ++i) {
+            auto& cell = edit->cells[i];
+            auto& current = clips[cell.slot][cell.row];
+            if (current && cell.replacement) {
+                players[cell.slot].replaceSnapshot(&current->pattern, &cell.replacement->pattern);
+            } else if (current && (players[cell.slot].row == int32_t(cell.row) ||
+                                   players[cell.slot].pendingRow == int32_t(cell.row))) {
+                stopSequencer(cell.slot);
+                scene->slots[cell.slot]->engine->boundary({processedFrames});
+                scene->slots[cell.slot]->engine->stopArpeggiator();
+            }
+            retire(current.release());
+            current = std::move(cell.replacement);
+            clipRevisions[cell.slot][cell.row].fetch_add(1);
+        }
+        const auto write = editWrite.load(std::memory_order_relaxed);
+        const auto& first = edit->cells[0];
+        const auto& last = edit->cells[edit->count - 1];
+        editResults[write % editCapacity] = {edit->token, clipRevisions[first.slot][first.row].load(),
+                                             clipRevisions[last.slot][last.row].load(), valid ? 1u : 0u};
+        editWrite.store(write + 1, std::memory_order_release);
+        retire(edit);
+        return;
+    }
     if (c.kind == Kind::SeqEdit) {
         auto* edit = static_cast<EditRequest*>(c.object);
         const auto s = edit->sourceSlot, r = edit->sourceRow, t = edit->targetSlot, u = edit->targetRow;
@@ -1552,6 +1599,36 @@ int ov_seq_replace_pattern(const ov_seq_clip* expected, const ov_seq_clip* repla
         Command c; c.kind = Kind::SeqEdit; c.object = edit.get();
         if (!enqueue(c)) { editOutstanding.fetch_sub(1); return 0; }
         edit.release(); return 1;
+    } catch (const EngineCreationFailure&) { error.store(2); return 0; }
+    catch (const std::bad_alloc&) { error.store(3); return 0; }
+}
+int ov_seq_change_cells(const ov_seq_cell_change* changes, uint32_t count, uint64_t epoch, uint64_t token)
+{
+    using namespace rack;
+    if (!changes || !count || count > 2) { error.store(2); return 0; }
+    try {
+        auto request = std::make_unique<CellChangeRequest>();
+        request->count = count; request->epoch = epoch; request->token = token;
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& input = changes[i];
+            if (input.slot >= capacity || input.row >= OV_SEQ_ROWS ||
+                (!input.expected && !input.replacement) ||
+                (i && input.slot == changes[0].slot && input.row == changes[0].row) ||
+                (input.expected && (input.expected->slot != input.slot || input.expected->row != input.row)) ||
+                (input.replacement && (input.replacement->slot != input.slot || input.replacement->row != input.row))) {
+                error.store(2); return 0;
+            }
+            auto& cell = request->cells[i];
+            cell.slot = input.slot; cell.row = input.row; cell.revision = input.revision;
+            if (input.expected) cell.expected = prepareClip(*input.expected);
+            if (input.replacement) cell.replacement = prepareClip(*input.replacement);
+        }
+        if (editOutstanding.fetch_add(1) >= editCapacity) {
+            editOutstanding.fetch_sub(1); error.store(4); return 0;
+        }
+        Command command; command.kind = Kind::SeqChangeCells; command.object = request.get();
+        if (!enqueue(command)) { editOutstanding.fetch_sub(1); return 0; }
+        request.release(); return 1;
     } catch (const EngineCreationFailure&) { error.store(2); return 0; }
     catch (const std::bad_alloc&) { error.store(3); return 0; }
 }

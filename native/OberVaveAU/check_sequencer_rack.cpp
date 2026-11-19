@@ -921,6 +921,67 @@ static void checkAudition()
     std::puts("PASS audition: timed release, same-pitch owners, recorder isolation, stale scene and unrelated instrument");
 }
 
+static void checkAtomicCellHistory()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
+    auto first = std::make_unique<ov_seq_clip>(clip(0, 0));
+    auto second = std::make_unique<ov_seq_clip>(*first); second->row = 1;
+    auto backing = std::make_unique<ov_seq_clip>(clip(1, 0));
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(first.get()) && ov_seq_set_clip(backing.get()));
+    assert(ov_seq_launch(0, 0, 0) && ov_seq_launch(1, 0, 0)); render();
+    assert(ov_seq_active(0) == 0 && ov_seq_active(1) == 0);
+    const auto epoch = ov_seq_scene_epoch();
+    ov_seq_cell_change changes[2] {
+        {0, 0, ov_seq_cell_revision(0, 0), first.get(), nullptr},
+        {0, 1, ov_seq_cell_revision(0, 1), nullptr, second.get()}
+    };
+    assert(ov_seq_change_cells(changes, 2, epoch, 710)); render();
+    ov_seq_edit_result result {};
+    assert(ov_seq_read_edit(&result) && result.success);
+    assert(!rack::clips[0][0] && rack::clips[0][1]);
+    assert(ov_seq_active(0) == -1 && ov_seq_active(1) == 0);
+    changes[0] = {0, 0, ov_seq_cell_revision(0, 0), nullptr, first.get()};
+    changes[1] = {0, 1, ov_seq_cell_revision(0, 1) - 1, second.get(), nullptr};
+    assert(ov_seq_change_cells(changes, 2, epoch, 711)); render();
+    assert(ov_seq_read_edit(&result) && !result.success);
+    assert(!rack::clips[0][0] && rack::clips[0][1]);
+    changes[1].revision = ov_seq_cell_revision(0, 1);
+    assert(ov_seq_change_cells(changes, 2, epoch, 712)); render();
+    assert(ov_seq_read_edit(&result) && result.success);
+    assert(rack::clips[0][0] && !rack::clips[0][1]);
+    assert(ov_seq_active(1) == 0);
+    auto replacement = std::make_unique<ov_seq_clip>(*first);
+    replacement->notes[0].pitch = 62;
+    assert(ov_seq_launch(0, 0, 0)); render();
+    const auto origin = rack::players[0].origin;
+    changes[0] = {0, 0, ov_seq_cell_revision(0, 0), first.get(), replacement.get()};
+    assert(ov_seq_change_cells(changes, 1, epoch, 713)); render();
+    assert(ov_seq_read_edit(&result) && result.success);
+    assert(ov_seq_active(0) == 0 && rack::players[0].origin == origin);
+    assert(rack::players[0].clip == &rack::clips[0][0]->pattern && ov_seq_active(1) == 0);
+    changes[0] = {0, 0, ov_seq_cell_revision(0, 0), first.get(), nullptr};
+    assert(ov_seq_change_cells(changes, 1, epoch, 714)); render();
+    assert(ov_seq_read_edit(&result) && !result.success);
+    assert(rack::clips[0][0] && ov_seq_active(0) == 0 && ov_seq_active(1) == 0);
+    assert(ov_seq_change_cells(changes, 1, epoch - 1, 715)); render();
+    assert(ov_seq_read_edit(&result) && !result.success);
+    auto queued = std::make_unique<ov_seq_clip>(clip(0, 1));
+    assert(ov_seq_set_clip(queued.get()) && ov_seq_launch(0, 1, 2)); render();
+    assert(ov_seq_pending(0) == 1);
+    auto updatedQueued = std::make_unique<ov_seq_clip>(*queued);
+    updatedQueued->notes[0].pitch = 76;
+    changes[0] = {0, 1, ov_seq_cell_revision(0, 1), queued.get(), updatedQueued.get()};
+    assert(ov_seq_change_cells(changes, 1, epoch, 716)); render();
+    assert(ov_seq_read_edit(&result) && result.success && ov_seq_pending(0) == 1);
+    while (ov_seq_active(0) != 1) render();
+    assert(rack::players[0].clip == &rack::clips[0][1]->pattern);
+    assert(rack::players[0].clip->data().notes[0].pitch == 76 && ov_seq_active(1) == 0);
+    assert(!ov_rack_take_error());
+    std::puts("PASS atomic cell history: empty restoration and stale two-cell rejection");
+}
+
 static void checkGroupedRecording()
 {
     for (uint32_t output : {0u, 1u}) {
@@ -1092,5 +1153,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicCellHistory(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

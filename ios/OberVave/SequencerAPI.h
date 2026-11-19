@@ -83,6 +83,20 @@ int ov_seq_read_edit(ov_seq_edit_result* result);
    transport position; already sounding notes retain their original Note Off. */
 int ov_seq_replace_pattern(const ov_seq_clip* expected, const ov_seq_clip* replacement,
                            uint64_t epoch, uint64_t revision, uint64_t token);
+/* Atomically replace one or two distinct cells. A null expected or replacement
+   represents an empty cell; both may not be null for the same change.
+   The audio owner checks the scene epoch, cell revisions and expected contents
+   before changing any cell. Completion is reported by ov_seq_read_edit: its
+   source and target revisions refer to the first and last cells respectively.
+   Clips are copied before this function returns. */
+typedef struct {
+    uint32_t slot, row;
+    uint64_t revision;
+    const ov_seq_clip* expected;
+    const ov_seq_clip* replacement;
+} ov_seq_cell_change;
+int ov_seq_change_cells(const ov_seq_cell_change* changes, uint32_t count,
+                        uint64_t epoch, uint64_t token);
 /* Brief, output-stage preview for this instrument. Audio owner schedules Note Off;
    previews do not enter the recorder and have independent note ownership. */
 int ov_seq_audition(uint32_t slot, uint32_t pitch, uint32_t velocity, uint64_t epoch);
