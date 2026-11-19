@@ -306,7 +306,9 @@ pattern, not the current selection; changing or disabling it retains the
 recorded note timings. The separate Quantize Selection / All command stores
 per-note version 5 overrides for start-only or start/end quantization at
 25–100% strength; with no selection it applies to all notes. Choosing Off
-restores original note timing even if the global setting is enabled.
+restores original note timing even if the global setting is enabled. The Snap
+menu accepts a custom grid of 1–3840 ticks; that same custom value is available
+in both quantization menus. Visible subdivisions are thinned at low zoom.
 
 Pattern schema version 4 supports up to 256 ordered step controller points,
 including MIDI CC and 14-bit channel pitch bend. It retains legacy or version 3

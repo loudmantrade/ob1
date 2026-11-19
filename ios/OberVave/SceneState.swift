@@ -494,6 +494,19 @@ struct PianoRollViewport: Equatable {
     }
 }
 
+enum PianoRollGrid {
+    static func visibleTicks(from start: Double, through end: Double, snap: Int64,
+                             beatWidth: Double) -> [Int64] {
+        guard snap > 0, beatWidth > 0, start.isFinite, end.isFinite, start <= end else { return [] }
+        let minimumStep = max(6 * 960 / beatWidth, (end - start) / 2048)
+        let multiple = max(1, Int64(ceil(minimumStep / Double(snap))))
+        let step = snap * multiple
+        let first = Int64(ceil(start / Double(step))) * step
+        guard Double(first) <= end else { return [] }
+        return Array(stride(from: first, through: Int64(floor(end)), by: Int(step)).prefix(2049))
+    }
+}
+
 struct PianoRollNavigation {
     private struct Axis {
         var separation: Double

@@ -200,6 +200,11 @@ struct SceneChecks {
 
     static func main() throws {
         checkCircularLayout()
+        precondition(PianoRollGrid.visibleTicks(from: -300, through: 500, snap: 120, beatWidth: 96)
+                     == [-240, -120, 0, 120, 240, 360, 480])
+        precondition(PianoRollGrid.visibleTicks(from: 0, through: 100, snap: 0, beatWidth: 96).isEmpty)
+        let denseGrid = PianoRollGrid.visibleTicks(from: 0, through: 100_000, snap: 1, beatWidth: 24)
+        precondition(denseGrid.count <= 2049 && denseGrid.allSatisfy { $0 % 240 == 0 })
         var viewport = PianoRollViewport()
         let first = CoreGraphics.CGPoint(x: 100, y: 120)
         let second = CoreGraphics.CGPoint(x: 200, y: 220)

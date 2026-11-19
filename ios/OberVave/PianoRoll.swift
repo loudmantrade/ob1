@@ -16,6 +16,9 @@ struct PianoRollView: View {
     @State private var lastTap: (id: UInt64, time: TimeInterval)?
     @State private var selectionRect: CGRect?
     @State private var snap: Int64 = 240
+    @State private var customGrid: Int64 = 240
+    @State private var customGridInput = ""
+    @State private var showCustomGrid = false
     @State private var clipboard: [SequencerNote] = []
     @State private var pasteAnchor: Int64 = 0
     @State private var scaleRoot = 0
@@ -107,6 +110,7 @@ struct PianoRollView: View {
                         Button("1/16") { command { try $0.playbackQuantization(grid: 240) } }
                         Button("1/32") { command { try $0.playbackQuantization(grid: 120) } }
                         Button("1/8 triplet") { command { try $0.playbackQuantization(grid: 320) } }
+                        Button("Custom · \(customGrid) ticks") { command { try $0.playbackQuantization(grid: Int(customGrid)) } }
                     }
                     Menu("Quantize selection / all") {
                         Picker("Strength", selection: $quantizeStrength) {
@@ -120,6 +124,7 @@ struct PianoRollView: View {
                         Button("1/16") { quantize(grid: 240) }
                         Button("1/32") { quantize(grid: 120) }
                         Button("1/8 triplet") { quantize(grid: 320) }
+                        Button("Custom · \(customGrid) ticks") { quantize(grid: Int(customGrid)) }
                     }
                     Picker("Root", selection: $scaleRoot) {
                         ForEach(0..<12, id: \.self) { Text(["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"][$0]).tag($0) }
@@ -136,11 +141,15 @@ struct PianoRollView: View {
                         command { try $0.conform(root: scaleRoot, scale: scale, direction: scaleDirection) }
                     }
                 }.disabled(busy)
-                Picker("Snap", selection: $snap) {
-                    Text("Off").tag(Int64(0)); Text("1/4").tag(Int64(960))
-                    Text("1/8").tag(Int64(480)); Text("1/16").tag(Int64(240))
-                    Text("1/32").tag(Int64(120)); Text("1/8T").tag(Int64(320))
-                }.pickerStyle(.menu)
+                Menu("Snap · \(snap == 0 ? "Off" : "\(snap) ticks")") {
+                    Button("Off") { snap = 0 }
+                    Button("1/4") { snap = 960 }
+                    Button("1/8") { snap = 480 }
+                    Button("1/16") { snap = 240 }
+                    Button("1/32") { snap = 120 }
+                    Button("1/8 triplet") { snap = 320 }
+                    Button("Custom…") { customGridInput = String(customGrid); showCustomGrid = true }
+                }
                 Button("Close", action: close).buttonStyle(.bordered)
             }
             Text("Two fingers: pan/zoom · Hold empty: create · Tap empty: paste anchor · Left: velocity · Right: length")
@@ -190,16 +199,27 @@ struct PianoRollView: View {
                 command { try $0.regions(patternStart: start, loopStart: loopStart, loopEnd: loopEnd,
                                          tailEnd: tailEnd, loop: loop) }
             }
-            .alert("Transpose by semitones", isPresented: $showTranspose) {
-                TextField("Semitones", text: $transposeAmount).keyboardType(.numbersAndPunctuation)
-                Button("Apply") {
-                    guard let amount = Int(transposeAmount) else {
-                        model.errorMessage = "Enter an integer number of semitones."; return
-                    }
-                    command { try $0.transpose(by: amount) }
+        }
+        .alert("Transpose by semitones", isPresented: $showTranspose) {
+            TextField("Semitones", text: $transposeAmount).keyboardType(.numbersAndPunctuation)
+            Button("Apply") {
+                guard let amount = Int(transposeAmount) else {
+                    model.errorMessage = "Enter an integer number of semitones."; return
                 }
-                Button("Cancel", role: .cancel) {}
+                command { try $0.transpose(by: amount) }
             }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Custom grid", isPresented: $showCustomGrid) {
+            TextField("Ticks (1–3840)", text: $customGridInput).keyboardType(.numberPad)
+            Button("Apply") {
+                guard let value = Int64(customGridInput), (1...3840).contains(value) else {
+                    model.errorMessage = "Enter a grid size between 1 and 3840 ticks."; return
+                }
+                customGrid = value
+                snap = value
+            }
+            Button("Cancel", role: .cancel) {}
         }
         .onAppear {
             do { editor = try PianoRollEditBuffer(pattern: pattern) }
@@ -554,6 +574,13 @@ struct PianoRollView: View {
             if tailX < size.width {
                 context.fill(Path(CGRect(x: tailX, y: top, width: size.width - tailX, height: grid.height)),
                              with: .color(.orange.opacity(0.10)))
+            }
+            for tick in PianoRollGrid.visibleTicks(from: viewport.tick(at: 0),
+                                                   through: viewport.tick(at: Double(grid.width)),
+                                                   snap: snap, beatWidth: viewport.beatWidth) where tick % 960 != 0 {
+                let x = left + viewport.x(forTick: Double(tick))
+                var line = Path(); line.move(to: CGPoint(x: x, y: top)); line.addLine(to: CGPoint(x: x, y: grid.maxY))
+                context.stroke(line, with: .color(.white.opacity(0.08)), lineWidth: 0.5)
             }
         }
         let first = Int64(floor(viewport.tick(at: 0) / 960))
