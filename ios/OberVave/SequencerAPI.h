@@ -155,6 +155,19 @@ int ov_seq_change_bundle_with_slots(const ov_rack_sound_change* sounds, uint32_t
                                     const ov_seq_slot_guard* guards, uint32_t guard_count,
                                     const ov_seq_slot_change* slots, uint32_t slot_count,
                                     uint64_t epoch, uint64_t token);
+/* An optional tempo change is checked and committed with the entire bundle.
+   It is rejected while MIDI clock controls the transport or if the internal
+   tempo no longer equals expected. */
+typedef struct { uint32_t expected, replacement; } ov_seq_tempo_change;
+uint32_t ov_seq_internal_tempo(void);
+int ov_seq_change_full_bundle(const ov_rack_sound_change* sounds, uint32_t sound_count,
+                              const ov_rack_mixer_change* mixer, uint32_t mixer_count,
+                              const ov_seq_cell_change* cells, uint32_t cell_count,
+                              const ov_seq_route_change* routes, uint32_t route_count,
+                              const ov_seq_slot_guard* guards, uint32_t guard_count,
+                              const ov_seq_slot_change* slots, uint32_t slot_count,
+                              const ov_seq_tempo_change* tempo,
+                              uint64_t epoch, uint64_t token);
 /* Brief, output-stage preview for this instrument. Audio owner schedules Note Off;
    previews do not enter the recorder and have independent note ownership. */
 int ov_seq_audition(uint32_t slot, uint32_t pitch, uint32_t velocity, uint64_t epoch);

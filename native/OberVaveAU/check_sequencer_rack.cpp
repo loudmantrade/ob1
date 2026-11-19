@@ -1422,6 +1422,52 @@ static void checkBundleProgramChange()
     std::puts("PASS bundle program change: checked sound, mixer, route and clip with isolated playback stop");
 }
 
+static void checkBundleTempo()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()};
+    assert(ov_rack_load(scene.get())); render();
+    const auto epoch = ov_seq_scene_epoch();
+    ov_rack_sound_change sound {0, rack::scene->slots[0]->config, rack::scene->slots[0]->config};
+    sound.replacement.parameters[rack::P_CUTOFF] = 18;
+    ov_seq_slot_guard guard {0, 0};
+    assert(ov_rack_slot_generation(0, &guard.generation));
+    ov_seq_tempo_change tempo {120, 130};
+    ov_rack_parameter_result result {};
+    assert(ov_seq_internal_tempo() == 120);
+    assert(ov_seq_change_full_bundle(&sound, 1, nullptr, 0, nullptr, 0, nullptr, 0,
+                                     &guard, 1, nullptr, 0, &tempo, epoch, 960));
+    ov_set_tempo(121); render();
+    assert(ov_rack_read_parameter_result(&result) && result.token == 960 && !result.success);
+    assert(ov_seq_internal_tempo() == 121);
+    assert(rack::scene->slots[0]->config.parameters[rack::P_CUTOFF] == sound.expected.parameters[rack::P_CUTOFF]);
+    tempo.expected = 121;
+    auto staleSound = sound;
+    staleSound.expected.parameters[rack::P_CUTOFF] = 19;
+    assert(ov_seq_change_full_bundle(&staleSound, 1, nullptr, 0, nullptr, 0, nullptr, 0,
+                                     &guard, 1, nullptr, 0, &tempo, epoch, 961)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success && ov_seq_internal_tempo() == 121);
+    assert(rack::send(0xFA, 0, 0, 0, false, false)); render();
+    assert(ov_seq_change_full_bundle(&sound, 1, nullptr, 0, nullptr, 0, nullptr, 0,
+                                     &guard, 1, nullptr, 0, &tempo, epoch, 962)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success && ov_seq_internal_tempo() == 121);
+    assert(rack::scene->slots[0]->config.parameters[rack::P_CUTOFF] == sound.expected.parameters[rack::P_CUTOFF]);
+    assert(rack::send(0xFC, 0, 0, 0, false, false)); render();
+    assert(ov_seq_change_full_bundle(&sound, 1, nullptr, 0, nullptr, 0, nullptr, 0,
+                                     &guard, 1, nullptr, 0, &tempo, epoch, 963)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.success && ov_seq_internal_tempo() == 130);
+    assert(ov_tempo() == 130 && rack::scene->slots[0]->config.parameters[rack::P_CUTOFF] == 18);
+    tempo = {130, 140};
+    assert(ov_seq_change_full_bundle(nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0,
+                                     nullptr, 0, nullptr, 0, &tempo, epoch, 964)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.success && ov_tempo() == 140);
+    tempo.replacement = 241;
+    assert(!ov_seq_change_full_bundle(nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0,
+                                      nullptr, 0, nullptr, 0, &tempo, epoch, 965));
+    assert(ov_rack_take_error() == 2);
+    std::puts("PASS bundle tempo: atomic conflicts, MIDI clock, invalid values and tempo-only changes");
+}
+
 static void checkStructuralBundle()
 {
     auto scene = std::make_unique<ov_scene_config>();
@@ -1811,5 +1857,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkAtomicSounds(); checkAtomicMixer(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicBundle(); checkBundleProgramChange(); checkStructuralBundle(); checkAtomicCellHistory(); checkAtomicFullCellGrid(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkAtomicSounds(); checkAtomicMixer(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicBundle(); checkBundleProgramChange(); checkBundleTempo(); checkStructuralBundle(); checkAtomicCellHistory(); checkAtomicFullCellGrid(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }
