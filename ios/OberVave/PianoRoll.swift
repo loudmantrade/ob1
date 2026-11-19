@@ -233,6 +233,11 @@ struct PianoRollView: View {
                 lastTap = nil
             } else if let hit = active.hit {
                 if editor?.selection.contains(hit.id) != true { editor?.selection = [hit.id] }
+                if let note = editor?.pattern.notes.first(where: { $0.id == hit.id }),
+                   ov_seq_audition(UInt32(pattern.slot), UInt32(note.pitch), UInt32(note.velocity),
+                                   ov_seq_scene_epoch()) == 0 {
+                    model.errorMessage = "Could not queue the note preview."
+                }
                 lastTap = (hit.id, ProcessInfo.processInfo.systemUptime)
             } else {
                 editor?.selection = []; lastTap = nil

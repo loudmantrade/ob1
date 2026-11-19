@@ -421,7 +421,7 @@ void forgetPedals(uint32_t slot)
     for (auto& pedal : pedalOwners) pedal.destinations &= ~(1u << slot);
 }
 
-enum class Kind { MIDI, StopAll, SeqClip, SeqEdit, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
+enum class Kind { MIDI, Audition, StopAll, SeqClip, SeqEdit, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
     SeqFinish, SourceClose, Parameter, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
 struct Command {
     Kind kind = Kind::MIDI;
@@ -429,6 +429,7 @@ struct Command {
     bool scheduled = false;
     bool padAcknowledgement = false;
     music::Source source {};
+    uint64_t epoch = 0;
     Retired* object = nullptr;
     ov_instrument_config config {};
 };
@@ -436,6 +437,9 @@ std::array<Command, queueSize> commands, scheduled;
 std::atomic<uint32_t> writeIndex {0}, readIndex {0};
 std::mutex producerMutex;
 uint32_t scheduledCount = 0;
+struct AuditionNote { music::Event on {}; music::Frame off = 0; bool used = false; };
+std::array<AuditionNote, 64> auditions {};
+music::NoteID nextAuditionNote = 1;
 
 bool enqueue(const Command& command)
 {
@@ -500,6 +504,7 @@ void setProgram(uint32_t slot, uint32_t index)
 }
 void stopAll()
 {
+    auditions = {};
     finishRecording();
     clickFrames = 0;
     transportActive = false; transportBeat.store(0);
@@ -1016,9 +1021,31 @@ void apply(const Command& c)
         else routeEvent(event);
         return;
     }
+    if (c.kind == Kind::Audition) {
+        if (c.epoch != sceneEpoch.load() || c.slot >= capacity || !scene->slots[c.slot]) {
+            error.store(2); return;
+        }
+        auto* available = static_cast<AuditionNote*>(nullptr);
+        for (auto& audition : auditions) if (!audition.used) { available = &audition; break; }
+        if (!available || nextAuditionNote == UINT64_MAX) { error.store(1); return; }
+        auto& inst = *scene->slots[c.slot];
+        music::Event event {};
+        event.kind = music::Kind::NoteOn;
+        event.channel = uint8_t(inst.config.channel - 1);
+        event.data1 = uint8_t(c.a); event.data2 = uint8_t(c.b);
+        event.source = {music::SourceKind::Pattern, capacity + c.slot + 1};
+        event.routing = {music::Target::Instruments, uint16_t(1u << c.slot), music::Stage::Output};
+        event.note = nextAuditionNote++;
+        event.time = {processedFrames};
+        inst.engine->boundary(event.time);
+        if (deliver(inst, event)) *available = {event, processedFrames + FS / 6, true};
+        return;
+    }
     if (c.slot >= capacity) return;
     auto& pointer = scene->slots[c.slot];
     if (c.kind == Kind::Add || c.kind == Kind::Remove) {
+        for (auto& audition : auditions)
+            if (audition.used && audition.on.routing.instruments == (1u << c.slot)) audition.used = false;
         finishRecordingSlot(c.slot);
         stopSequencer(c.slot);
         for (auto& clip : clips[c.slot]) retire(clip.release());
@@ -1106,6 +1133,16 @@ void renderBlock()
     clock.frame += CTL;
     processedFrames += CTL;
     drain();
+    for (auto& audition : auditions) if (audition.used && audition.off <= processedFrames) {
+        auto event = audition.on;
+        event.kind = music::Kind::NoteOff; event.data2 = 0; event.time = {processedFrames};
+        const auto slot = event.source.id - capacity - 1;
+        if (scene->slots[slot]) {
+            scene->slots[slot]->engine->boundary(event.time);
+            deliver(*scene->slots[slot], event);
+        }
+        audition.used = false;
+    }
     if (clock.quarter && clock.frame - clock.last > FS) {
         clock.release();
         internalTempo.store(clock.bpm);
@@ -1454,6 +1491,17 @@ int ov_seq_replace_pattern(const ov_seq_clip* expected, const ov_seq_clip* repla
         edit.release(); return 1;
     } catch (const EngineCreationFailure&) { error.store(2); return 0; }
     catch (const std::bad_alloc&) { error.store(3); return 0; }
+}
+int ov_seq_audition(uint32_t slot, uint32_t pitch, uint32_t velocity, uint64_t epoch)
+{
+    using namespace rack;
+    if (slot >= capacity || pitch > 127 || velocity < 1 || velocity > 127) {
+        error.store(2); return 0;
+    }
+    Command command;
+    command.kind = Kind::Audition;
+    command.slot = slot; command.a = pitch; command.b = velocity; command.epoch = epoch;
+    return enqueue(command);
 }
 int ov_seq_read_edit(ov_seq_edit_result* result)
 {

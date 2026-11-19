@@ -71,6 +71,9 @@ int ov_seq_read_edit(ov_seq_edit_result* result);
    transport position; already sounding notes retain their original Note Off. */
 int ov_seq_replace_pattern(const ov_seq_clip* expected, const ov_seq_clip* replacement,
                            uint64_t epoch, uint64_t revision, uint64_t token);
+/* Brief, output-stage preview for this instrument. Audio owner schedules Note Off;
+   previews do not enter the recorder and have independent note ownership. */
+int ov_seq_audition(uint32_t slot, uint32_t pitch, uint32_t velocity, uint64_t epoch);
 uint32_t ov_seq_pad_pending(uint32_t slot, uint32_t row);
 #ifdef __cplusplus
 }

@@ -752,6 +752,48 @@ static void checkLivePatternReplacement()
     std::puts("PASS live snapshot replacement: stale revision rejected, held notes release normally, next loop uses edited notes, transport and unrelated column continue");
 }
 
+static void checkAudition()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
+    assert(ov_rack_load(scene.get())); render();
+    const auto epoch = ov_seq_scene_epoch();
+    assert(ov_seq_arm(0, 0, 0, 1, 0, 0)); render();
+    assert(ov_seq_audition(0, 60, 100, epoch));
+    assert(ov_seq_audition(0, 60, 90, epoch)); render();
+    assert(gate(0) && !gate(1));
+    assert(rack::recordings[0].recorder.waiting);
+    uint32_t count = 0;
+    for (const auto& note : rack::auditions) count += note.used;
+    assert(count == 2);
+    render(FS / 3);
+    for (const auto& note : rack::auditions) assert(!note.used);
+    assert(!gate(0) && rack::recordings[0].recorder.waiting);
+
+    ov_keyboard_note_on(60, 100, 1); render();
+    assert(gate(0) && gate(1));
+    assert(ov_seq_audition(0, 60, 100, epoch)); render();
+    render(FS / 3);
+    assert(gate(0) && gate(1));
+    ov_keyboard_note_off(60, 1); render();
+    assert(!gate(0) && !gate(1));
+
+    auto backing = std::make_unique<ov_seq_clip>(clip(0, 1));
+    backing->notes[0].duration = 960;
+    assert(ov_seq_set_clip(backing.get()) && ov_seq_launch(0, 1, 0)); render();
+    assert(gate(0));
+    assert(ov_seq_audition(0, 60, 100, epoch)); render();
+    render(FS / 3);
+    assert(gate(0) && ov_seq_active(0) == 1);
+    assert(ov_seq_audition(0, 60, 100, epoch - 1)); render();
+    assert(ov_rack_take_error() == 2);
+    assert(ov_rack_stop_all()); render();
+    auto completion = std::make_unique<ov_seq_clip>();
+    while (ov_seq_record_ready()) assert(ov_seq_read_record(completion.get()));
+    assert(!ov_rack_take_error());
+    std::puts("PASS audition: timed release, same-pitch owners, recorder isolation, stale scene and unrelated instrument");
+}
+
 static void checkGroupedRecording()
 {
     for (uint32_t output : {0u, 1u}) {
@@ -923,5 +965,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAudition(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

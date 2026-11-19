@@ -296,12 +296,16 @@ Copy/Paste retains relative timing and routing, with the most recent empty-grid
 tap as the paste anchor (initially tick zero). Paste creates new note IDs and
 rejects invalid destinations. Transpose and scale conform affect the selection,
 or all notes when no notes are selected; nearest-scale ties choose the lower
-pitch.
+pitch. Tapping a note also auditions it for approximately one sixth of a
+second on that cell's instrument. The preview uses a separate output-stage
+owner and bypasses the arpeggiator, so it plays the selected pitch without
+starting a waiting recording or ending another source's held note. Its Note
+Off is scheduled by the audio owner, not a UI timer.
 Playback quantization is a separate, non-destructive setting for the entire
 pattern, not the current selection; changing or disabling it retains the
 recorded note timings. Selected-note and end quantization are not yet exposed.
 
-The editor remains incomplete: audition is not yet exposed. Controller automation requires bounded,
+The editor remains incomplete. Controller automation requires bounded,
 versioned events with backward-compatible decoding and audio scheduling.
 Independent loop/tail markers require a versioned migration preserving old
 loop behavior, plus iteration-specific note release and real-time capacity
