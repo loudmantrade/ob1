@@ -740,6 +740,141 @@ struct SceneRestorePlan {
     }
 }
 
+extension SceneRestorePlan {
+    func enqueue(before: ApplicationDefault, after: ApplicationDefault,
+                 snapshot: ov_seq_scene_snapshot, token: UInt64) throws {
+        let generations = withUnsafeBytes(of: snapshot.generations) { Array($0.bindMemory(to: UInt64.self)) }
+        let revisions = withUnsafeBytes(of: snapshot.revisions) { Array($0.bindMemory(to: UInt64.self)) }
+        let oldColumns = Dictionary(uniqueKeysWithValues: before.sequencer.columns.map { ($0.slot, $0) })
+        let newColumns = Dictionary(uniqueKeysWithValues: after.sequencer.columns.map { ($0.slot, $0) })
+        guard let oldPatterns = before.scene.patterns, let newPatterns = after.scene.patterns else {
+            throw SceneError.invalid("A scene restore snapshot is missing patterns.")
+        }
+        let oldClips = Dictionary(uniqueKeysWithValues: oldPatterns.map { ($0.id, $0) })
+        let newClips = Dictionary(uniqueKeysWithValues: newPatterns.map { ($0.id, $0) })
+        var clips: [ov_seq_clip] = []
+        func clipIndex(_ pattern: SequencerPattern?) -> Int? {
+            guard let pattern else { return nil }
+            clips.append(pattern.coreClip())
+            return clips.count - 1
+        }
+        var cellIndices: [(Int?, Int?)] = []
+        for cell in cells { cellIndices.append((clipIndex(cell.before), clipIndex(cell.after))) }
+        var slotIndices: [[(Int?, Int?)]] = []
+        for slot in slots where slot.structural {
+            slotIndices.append((0..<8).map { row in
+                let id = slot.index * 8 + row
+                return (clipIndex(oldClips[id]), clipIndex(newClips[id]))
+            })
+        }
+        var sounds: [ov_rack_sound_change] = []
+        var mixers: [ov_rack_mixer_change] = []
+        var routes: [ov_seq_route_change] = []
+        var guards: [ov_seq_slot_guard] = []
+        for slot in slots where !slot.structural {
+            guard let old = slot.before, let new = slot.after,
+                  let oldColumn = oldColumns[slot.index], let newColumn = newColumns[slot.index] else {
+                throw SceneError.invalid("A scene restore instrument is missing.")
+            }
+            let oldConfig = old.coreConfig(), newConfig = new.coreConfig()
+            if old.programIndex != new.programIndex || old.parameters != new.parameters || old.cc != new.cc {
+                sounds.append(ov_rack_sound_change(slot: UInt32(slot.index),
+                    expected: oldConfig, replacement: newConfig))
+            }
+            if oldColumn.level != newColumn.level || oldColumn.pan != newColumn.pan ||
+                oldColumn.muted != newColumn.muted || oldColumn.solo != newColumn.solo {
+                mixers.append(ov_rack_mixer_change(slot: UInt32(slot.index),
+                    expected_level: Float(oldColumn.level), expected_pan: Float(oldColumn.pan),
+                    replacement_level: Float(newColumn.level), replacement_pan: Float(newColumn.pan),
+                    expected_mute: oldColumn.muted ? 1 : 0, replacement_mute: newColumn.muted ? 1 : 0,
+                    expected_solo: oldColumn.solo ? 1 : 0, replacement_solo: newColumn.solo ? 1 : 0))
+            }
+            var mask: UInt32 = 0
+            if old.channel != new.channel { mask |= 1 }
+            if old.lowNote != new.lowNote { mask |= 2 }
+            if old.highNote != new.highNote { mask |= 4 }
+            if old.sync != new.sync { mask |= 64 }
+            if old.grid != new.grid { mask |= 128 }
+            if mask != 0 {
+                var routeReplacement = newConfig
+                routeReplacement.program = oldConfig.program
+                routes.append(ov_seq_route_change(slot: UInt32(slot.index), mask: mask,
+                    expected: oldConfig, replacement: routeReplacement))
+            }
+            guards.append(ov_seq_slot_guard(slot: UInt32(slot.index), generation: generations[slot.index]))
+        }
+        let structuralSlots = slots.filter(\.structural)
+        var tempo = ov_seq_tempo_change(expected: snapshot.internal_tempo, replacement: UInt32(after.scene.tempo))
+        let hasAudioChanges = !sounds.isEmpty || !mixers.isEmpty || !routes.isEmpty ||
+            !cells.isEmpty || !structuralSlots.isEmpty
+        let changeTempo = before.scene.tempo != after.scene.tempo || !hasAudioChanges
+        if changeTempo {
+            guard snapshot.clock_external == 0 else {
+                throw SceneError.invalid("Stop MIDI clock before restoring the scene.")
+            }
+            guard snapshot.internal_tempo == UInt32(before.scene.tempo) else {
+                throw SceneError.invalid("Tempo changed while preparing the scene restore.")
+            }
+        }
+        let accepted = clips.withUnsafeBufferPointer { clipBuffer in
+            func pointer(_ index: Int?) -> UnsafePointer<ov_seq_clip>? {
+                index.map { clipBuffer.baseAddress!.advanced(by: $0) }
+            }
+            let cellChanges = cells.enumerated().map { index, cell in
+                ov_seq_cell_change(slot: UInt32(cell.cell.slot), row: UInt32(cell.cell.row),
+                    revision: revisions[cell.cell.id], expected: pointer(cellIndices[index].0),
+                    replacement: pointer(cellIndices[index].1))
+            }
+            let slotChanges = structuralSlots.enumerated().map { index, slot -> ov_seq_slot_change in
+                var change = ov_seq_slot_change()
+                change.slot = UInt32(slot.index)
+                change.expected_present = slot.before == nil ? 0 : 1
+                change.replacement_present = slot.after == nil ? 0 : 1
+                change.expected_solo = oldColumns[slot.index]?.solo == true ? 1 : 0
+                change.replacement_solo = newColumns[slot.index]?.solo == true ? 1 : 0
+                change.generation = generations[slot.index]
+                if let old = slot.before { change.expected = old.coreConfig() }
+                if let new = slot.after { change.replacement = new.coreConfig() }
+                withUnsafeMutableBytes(of: &change.revisions) { raw in
+                    let values = raw.bindMemory(to: UInt64.self)
+                    for row in 0..<8 { values[row] = revisions[slot.index * 8 + row] }
+                }
+                withUnsafeMutableBytes(of: &change.expected_clips) { raw in
+                    let values = raw.bindMemory(to: Optional<UnsafePointer<ov_seq_clip>>.self)
+                    for row in 0..<8 { values[row] = pointer(slotIndices[index][row].0) }
+                }
+                withUnsafeMutableBytes(of: &change.replacement_clips) { raw in
+                    let values = raw.bindMemory(to: Optional<UnsafePointer<ov_seq_clip>>.self)
+                    for row in 0..<8 { values[row] = pointer(slotIndices[index][row].1) }
+                }
+                return change
+            }
+            return sounds.withUnsafeBufferPointer { s in
+                mixers.withUnsafeBufferPointer { m in
+                    cellChanges.withUnsafeBufferPointer { c in
+                        routes.withUnsafeBufferPointer { r in
+                            guards.withUnsafeBufferPointer { g in
+                                slotChanges.withUnsafeBufferPointer { a in
+                                    withUnsafePointer(to: &tempo) { t in
+                                        ov_seq_change_full_bundle(s.baseAddress, UInt32(s.count),
+                                            m.baseAddress, UInt32(m.count), c.baseAddress, UInt32(c.count),
+                                            r.baseAddress, UInt32(r.count), g.baseAddress, UInt32(g.count),
+                                            a.baseAddress, UInt32(a.count), changeTempo ? t : nil,
+                                            snapshot.epoch, token)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        guard accepted != 0 else {
+            throw SceneError.invalid("Could not queue the scene restore transaction.")
+        }
+    }
+}
+
 struct SequencerSettingsEdit: Equatable {
     var before: SequencerDefault
     var after: SequencerDefault

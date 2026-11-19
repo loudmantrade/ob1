@@ -537,6 +537,74 @@ struct SceneChecks {
         precondition(finished(), "Scene save did not finish without a view refresh")
     }
 
+    static func checkSceneRestoreTransaction() throws {
+        let instrument = RackInstrument.oberVave(slot: 0, channel: 1)
+        let pattern = SequencerPattern(slot: 0, row: 0, name: "Before")
+        let settings = SequencerDefault(launchGrid: 2, recordMode: 0, countBars: 1, recordOutput: true,
+            columns: [.init(slot: 0, level: 0, pan: 0, muted: false, recordBeats: 4)])
+        let device = ApplicationDeviceSettings(bleMIDIBufferMilliseconds: 20, sustainInverted: false,
+            sustainStopGesture: false, arpLatencyAuto: true, arpLatencyManualMS: 0, recordMetronome: true)
+        let before = ApplicationDefault(scene: RackSceneDocument(name: "Scene", instruments: [instrument],
+            tempo: 120, masterDB: 0, masterPan: 0, keyboardMask: 1, selectedSlot: 0, patterns: [pattern]),
+            sequencer: settings, device: device)
+        var after = before
+        after.scene.tempo = 135
+        after.scene.instruments[0].programIndex = 18
+        after.scene.instruments[0].channel = 3
+        after.scene.instruments[0].levelDB = -6
+        after.scene.patterns?[0].name = "After"
+        after.sequencer.columns[0].level = -6
+        let added = RackInstrument.oberVave(slot: 1, channel: 2)
+        after.scene.instruments.append(added)
+        after.scene.patterns?.append(SequencerPattern(slot: 1, row: 1, name: "Added"))
+        after.sequencer.columns.append(.init(slot: 1, level: 0, pan: 0, muted: false, recordBeats: 4, solo: true))
+        var scene = ov_scene_config()
+        scene.tempo = 120
+        scene.slots.0.present = 1
+        scene.slots.0.config = instrument.coreConfig()
+        var clip = pattern.coreClip()
+        precondition(ov_rack_load_sequenced(&scene, &clip, 1) != 0)
+        var left = [Float](repeating: 0, count: 32), right = left
+        func render() { ov_render(&left, &right, 32) }
+        func snapshot() -> ov_seq_scene_snapshot {
+            precondition(ov_rack_snapshot_request() != 0)
+            render()
+            var value = ov_seq_scene_snapshot()
+            precondition(ov_seq_snapshot_read(&value) != 0)
+            return value
+        }
+        render()
+        let plan = try SceneRestorePlan(before: before, after: after)
+        var captured = snapshot()
+        try plan.enqueue(before: before, after: after, snapshot: captured, token: 4001)
+        ov_set_tempo(121)
+        render()
+        var result = ov_rack_parameter_result()
+        precondition(ov_rack_read_parameter_result(&result) != 0 && result.token == 4001 && result.success == 0)
+        captured = snapshot()
+        precondition(captured.scene.slots.0.config.program == UInt32(instrument.programIndex))
+        precondition(captured.scene.slots.1.present == 0)
+        ov_set_tempo(120)
+        render()
+        captured = snapshot()
+        try plan.enqueue(before: before, after: after, snapshot: captured, token: 4002)
+        render()
+        precondition(ov_rack_read_parameter_result(&result) != 0 && result.token == 4002 && result.success != 0)
+        captured = snapshot()
+        precondition(captured.scene.slots.0.config.program == 18 && captured.scene.slots.0.config.channel == 3)
+        precondition(captured.scene.slots.0.config.level_db == -6 && captured.scene.slots.1.present == 1)
+        precondition(captured.solo_mask == 2 && captured.internal_tempo == 135)
+        let reverse = try SceneRestorePlan(before: after, after: before)
+        try reverse.enqueue(before: after, after: before, snapshot: captured, token: 4003)
+        render()
+        precondition(ov_rack_read_parameter_result(&result) != 0 && result.token == 4003 && result.success != 0)
+        captured = snapshot()
+        precondition(captured.scene.slots.0.config.program == UInt32(instrument.programIndex))
+        precondition(captured.scene.slots.1.present == 0 && captured.internal_tempo == 120 && captured.solo_mask == 0)
+        ov_rack_collect()
+        print("PASS Swift scene restore bridge: structural slots, sound, route, mixer, cells, tempo and conflict")
+    }
+
     static func checkSaveMonitor() {
         let monitor = SceneSaveMonitor()
         var left = [Float](repeating: 0, count: 32)
@@ -1424,6 +1492,7 @@ struct SceneChecks {
         ov_init()
         checkSaveMonitor()
         checkUIRefreshDriver()
+        try checkSceneRestoreTransaction()
         var instruments = (0..<16).map { RackInstrument.oberVave(slot: $0, channel: $0 + 1) }
         instruments[0].channel = 2
         instruments[0].lowNote = 24
