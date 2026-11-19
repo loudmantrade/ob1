@@ -231,6 +231,44 @@ static void checkNoteQuantization()
     std::puts("PASS note quantization: per-note override, start/end, strength, off and original timing");
 }
 
+static void checkIndependentStarts()
+{
+    auto data = std::make_unique<PatternData>();
+    data->id = 1; data->length = 1440; data->intro = 960; data->regionsEnabled = true;
+    data->patternStart = -480; data->loopStart = -240; data->loopEnd = 480;
+    std::copy_n("Starts", 7, data->name.begin());
+    data->count = 3; data->nextNote = 4;
+    data->notes[0] = {1, -720, 20, {Target::Instruments, 1, Stage::Output}, 0, 60, 100};
+    data->notes[1] = {2, -480, 20, {Target::Instruments, 1, Stage::Output}, 0, 61, 100};
+    data->notes[2] = {3, -240, 20, {Target::Instruments, 1, Stage::Output}, 0, 62, 100};
+    Pattern pattern;
+    assert(pattern.restore(*data) == PatternError::None);
+    ClipPlayer player;
+    std::vector<Event> events;
+    auto sink = [&](const Event& e) { events.push_back(e); return true; };
+    player.queue(0, &pattern, 0, LaunchGrid::Free);
+    assert(player.pendingStart == 0 && player.pendingOrigin == 480 * tickUnit);
+    for (Tick t = 0; t <= 1000; t += 20) assert(player.process(t * tickUnit, t, 0, 0, sink));
+    uint32_t pickup = 0, loop = 0;
+    for (const auto& event : events) if (event.kind == Kind::NoteOn) {
+        assert(event.data1 != 60);
+        pickup += event.data1 == 61; loop += event.data1 == 62;
+    }
+    assert(pickup == 1 && loop == 2);
+    assert(player.stop(1001, sink));
+
+    data->intro = 0; data->patternStart = 240; data->loopStart = 480; data->loopEnd = 960;
+    data->notes[0].start = 0; data->notes[1].start = 240; data->notes[2].start = 480;
+    assert(pattern.restore(*data) == PatternError::None);
+    events.clear(); player.queue(0, &pattern, 0, LaunchGrid::Free);
+    assert(player.pendingStart == 0 && player.pendingOrigin == -240 * tickUnit);
+    assert(player.process(0, 0, 0, 0, sink));
+    assert(events.size() == 1 && events[0].data1 == 61);
+    assert(player.process(240 * tickUnit, 1, 0, 0, sink));
+    assert(events.back().data1 == 62 && events.back().kind == Kind::NoteOn);
+    std::puts("PASS independent starts: editable pre-start data, negative repeating section and positive launch");
+}
+
 static void checkRecording()
 {
     auto recorder = std::make_unique<ClipRecorder>();
@@ -442,5 +480,5 @@ static void checkRecordingClicks()
 
 int main()
 {
-    checkPosition(); checkPlayback(); checkRegionTails(); checkAutomation(); checkNoteQuantization(); checkRecording(); checkRecordModes(); checkBarCompletion(); checkRecordingClicks();
+    checkPosition(); checkPlayback(); checkRegionTails(); checkAutomation(); checkNoteQuantization(); checkIndependentStarts(); checkRecording(); checkRecordModes(); checkBarCompletion(); checkRecordingClicks();
 }

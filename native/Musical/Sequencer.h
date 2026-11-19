@@ -55,9 +55,14 @@ public:
         queued_ = next;
         pendingRow = nextRow;
         queuedIntro_ = playIntro;
-        const auto intro = playIntro && next && next->data().introEnabled ? next->data().intro * tickUnit : 0;
-        pendingOrigin = groupOrigin >= 0 ? groupOrigin : boundary(now + intro, grid);
-        pendingStart = pendingOrigin - intro;
+        const auto& data = next ? &next->data() : nullptr;
+        auto start = data && data->regionsEnabled ? data->patternStart :
+            (data ? -data->intro : 0);
+        if (start < 0 && (!playIntro || !data->introEnabled)) start = 0;
+        const auto offset = start * tickUnit;
+        pendingOrigin = groupOrigin >= 0 ? groupOrigin :
+            boundary(now + std::max(INT64_C(0), -offset), grid) - std::max(INT64_C(0), offset);
+        pendingStart = pendingOrigin + offset;
     }
     bool stopping() const { return pendingRow >= 0 && !queued_ && row >= 0; }
     void replaceSnapshot(const Pattern* oldPattern, const Pattern* replacement)
@@ -115,10 +120,12 @@ public:
         const auto period = loopEnd - loopStart;
         for (uint32_t i = 0; i < data.count; ++i) {
             const auto& note = data.notes[i];
-            if (note.start < 0 && (!data.introEnabled || !playIntro_)) continue;
+            if (data.regionsEnabled && note.start < data.patternStart) continue;
+            const bool pickup = data.regionsEnabled ? note.start < data.loopStart : note.start < 0;
+            if (pickup && note.start < 0 && (!data.introEnabled || !playIntro_)) continue;
             PatternTiming timing;
             if (clip->timingAt(i, timing) != PatternError::None) return false;
-            if (data.regionsEnabled && (note.start * tickUnit >= loopEnd ||
+            if (data.regionsEnabled && (timing.start < data.patternStart || note.start * tickUnit >= loopEnd ||
                 timing.start * tickUnit >= loopEnd)) continue;
             int64_t onset = origin + timing.start * tickUnit;
             const bool repeating = data.loop && (data.regionsEnabled
@@ -184,7 +191,9 @@ public:
         };
         for (uint32_t i = 0; i < data.automationCount; ++i) {
             const auto& point = data.automation[i];
-            if (point.tick < 0 && (!data.introEnabled || !playIntro_)) continue;
+            if (data.regionsEnabled && point.tick < data.patternStart) continue;
+            const bool pickup = data.regionsEnabled ? point.tick < data.loopStart : point.tick < 0;
+            if (pickup && point.tick < 0 && (!data.introEnabled || !playIntro_)) continue;
             if (data.regionsEnabled && point.tick * tickUnit >= loopEnd) continue;
             auto onset = origin + point.tick * tickUnit;
             const bool repeating = data.loop && (data.regionsEnabled
@@ -253,7 +262,7 @@ public:
              RecordMode mode, uint32_t bars, uint32_t beats, bool scenePlaying, bool recordOutput)
     {
         begin(instrument, cell, settings, now, recordOutput, false);
-        data.regionsEnabled = false; data.loopStart = data.loopEnd = 0;
+        data.regionsEnabled = false; data.patternStart = data.loopStart = data.loopEnd = 0;
         cancelBeforeBody_ = true;
         freeLength = beats == 0;
         data.length = beats ? Tick(beats) * ticksPerQuarter : maxPatternTicks;

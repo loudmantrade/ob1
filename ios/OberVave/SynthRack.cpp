@@ -307,6 +307,7 @@ std::unique_ptr<SequencerClip> prepareClip(const ov_seq_clip& input)
     data->length = input.length; data->intro = input.intro;
     data->loop = input.loop; data->introEnabled = input.intro_enabled;
     data->regionsEnabled = input.regions_enabled;
+    data->patternStart = data->regionsEnabled ? -input.intro : 0;
     data->loopStart = data->regionsEnabled ? input.loop_start : 0;
     data->loopEnd = data->regionsEnabled ? input.loop_end : 0;
     data->quantization.grid = input.quantize;
@@ -822,7 +823,8 @@ bool samePattern(const music::PatternData& a, const music::PatternData& b)
 {
     if (a.id != b.id || a.name != b.name || a.length != b.length || a.intro != b.intro ||
         a.introEnabled != b.introEnabled || a.loop != b.loop || a.quantization.grid != b.quantization.grid ||
-        a.regionsEnabled != b.regionsEnabled || a.loopStart != b.loopStart || a.loopEnd != b.loopEnd ||
+        a.regionsEnabled != b.regionsEnabled || a.patternStart != b.patternStart ||
+        a.loopStart != b.loopStart || a.loopEnd != b.loopEnd ||
         a.count != b.count || a.automationCount != b.automationCount) return false;
     for (uint32_t i = 0; i < a.automationCount; ++i) {
         const auto& x = a.automation[i]; const auto& y = b.automation[i];

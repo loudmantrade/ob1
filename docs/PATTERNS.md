@@ -334,8 +334,9 @@ their tail behavior. A fresh recording replaces regions with legacy defaults.
 Marker handles have separate ruler rows, even when markers coincide. Dragging
 is enabled after explicit Regions conversion and uses the selected snap grid;
 invalid moves are rejected without changing notes. Numeric positions accept
-raw ticks or 4/4 bar:beat:tick notation. Arbitrary positive pattern starts are
-not yet supported.
+raw ticks or 4/4 bar:beat:tick notation. The portable scheduler supports
+independent negative or positive starts, but the current scene format and
+editor do not yet expose them.
 Acceptance requires portable timing/ownership and scene-migration regressions,
 the existing sequencer and AU suites, a signed iPad build, and the physical
 iPad gesture/audio checklist from the implementation specification.

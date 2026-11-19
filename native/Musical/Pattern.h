@@ -58,7 +58,7 @@ struct PatternData {
     bool loop = true;
     // Legacy patterns retain their original unbounded tail behavior.
     bool regionsEnabled = false;
-    Tick loopStart = 0, loopEnd = 0;
+    Tick patternStart = 0, loopStart = 0, loopEnd = 0;
     uint32_t automationCount = 0;
     std::array<PatternAutomation, patternAutomationCapacity> automation {};
     std::array<PatternNote, patternNoteCapacity> notes {};
@@ -132,7 +132,8 @@ inline PatternError validatePattern(const PatternData& data)
     if (data.length < 1 || data.length > maxPatternTicks) return PatternError::InvalidLength;
     if (data.intro < 0 || data.intro > ticksPerQuarter * 12) return PatternError::InvalidLength;
     if (data.regionsEnabled &&
-        (data.loopStart < 0 || data.loopStart >= data.loopEnd || data.loopEnd > data.length))
+        (data.patternStart < -data.intro || data.patternStart > data.loopStart ||
+         data.loopStart >= data.loopEnd || data.loopEnd > data.length))
         return PatternError::InvalidLength;
     const auto quantization = validatePatternQuantization(data.quantization);
     if (quantization != PatternError::None) return quantization;
