@@ -322,6 +322,14 @@ struct SceneChecks {
             try regionEditor.setAutomation([invalidPoint])
             preconditionFailure("Invalid automation must be rejected")
         } catch { precondition(regionEditor.pattern == automatedPattern) }
+        try regionEditor.automationStroke([(tick: 480, value: 10), (tick: 720, value: 20)],
+                                          kind: .cc, controller: 1)
+        precondition(regionEditor.pattern.automation.count == 3)
+        precondition(regionEditor.pattern.automation.filter { $0.kind == .cc }.map(\.id) == [3, 4])
+        precondition(regionEditor.pattern.automation.contains(where: { $0.kind == .pitchBend && $0.id == 2 }))
+        regionEditor.undo()
+        try regionEditor.automationStroke([(tick: 960, value: 64)], kind: .cc, controller: 1)
+        precondition(regionEditor.pattern.automation.contains(where: { $0.id == 5 }))
         var editor = try PianoRollEditBuffer(pattern: editPattern)
         editor.selection = [1, 2, 3]
         try editor.changeDuration(by: 120)

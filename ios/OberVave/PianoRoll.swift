@@ -20,6 +20,25 @@ struct PianoRollView: View {
     @State private var scale: PianoRollEditBuffer.Scale = .major
     @State private var scaleDirection: PianoRollEditBuffer.ScaleDirection = .nearest
     @State private var showRegions = false
+    @State private var lane: Lane = .none
+    @State private var laneMode: LaneMode = .points
+    @State private var controller = 1
+    @State private var gridHeight: CGFloat = 0
+    @State private var laneGesture: AutomationGesture?
+
+    private enum Lane: String, CaseIterable { case none = "Off", cc = "CC", bend = "Pitch Bend" }
+    private enum LaneMode: String, CaseIterable { case points = "Points", draw = "Freehand" }
+    private let laneHeight: CGFloat = 125
+
+    private struct AutomationGesture {
+        let baseline: PianoRollEditBuffer
+        let pointID: UInt64?
+        var samples: [Int64: Int] = [:]
+        var last: (tick: Int64, value: Int)?
+        var moved = false
+        var held = false
+        let start: CGPoint
+    }
 
     private struct EditGesture {
         let start: CGPoint
@@ -92,8 +111,24 @@ struct PianoRollView: View {
             }
             Text("Two fingers: pan/zoom · Hold empty: create · Tap empty: paste anchor · Left: velocity · Right: length")
                 .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Picker("Lane", selection: $lane) {
+                    ForEach(Lane.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented).frame(maxWidth: 250)
+                if lane != .none {
+                    Picker("Mode", selection: $laneMode) {
+                        ForEach(LaneMode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }.pickerStyle(.segmented).frame(maxWidth: 200)
+                    if lane == .cc {
+                        Stepper("CC \(controller)", value: $controller, in: 0...127).frame(maxWidth: 150)
+                    }
+                    Text("Tap: point · Hold point: delete").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
             GeometryReader { proxy in
-                let gridSize = CGSize(width: max(0, proxy.size.width - 54), height: max(0, proxy.size.height - 26))
+                let gridSize = CGSize(width: max(0, proxy.size.width - 54),
+                                      height: max(0, proxy.size.height - 26 - (lane == .none ? 0 : laneHeight)))
                 Canvas { context, size in
                     draw(context: &context, size: size)
                 }
@@ -101,8 +136,16 @@ struct PianoRollView: View {
                     PianoRollNavigationSurface(viewport: $viewport, pattern: displayedPattern, gridSize: gridSize,
                                                onEdit: touch)
                 }
-                .onAppear { viewport.clamp(length: pattern.length, intro: pattern.intro, size: gridSize) }
+                .onAppear {
+                    gridHeight = gridSize.height
+                    viewport.clamp(length: pattern.length, intro: pattern.intro, size: gridSize)
+                }
                 .onChange(of: proxy.size) { _ in
+                    gridHeight = gridSize.height
+                    viewport.clamp(length: pattern.length, intro: pattern.intro, size: gridSize)
+                }
+                .onChange(of: lane) { _ in
+                    gridHeight = gridSize.height
                     viewport.clamp(length: pattern.length, intro: pattern.intro, size: gridSize)
                 }
             }
@@ -173,6 +216,10 @@ struct PianoRollView: View {
 
     private func touch(_ phase: PianoRollNavigationView.EditPhase, _ point: CGPoint) {
         guard !busy else { return }
+        if laneGesture != nil || (phase == .begin && lane != .none && point.y >= gridHeight) {
+            automationTouch(phase, point)
+            return
+        }
         switch phase {
         case .begin:
             guard point.x >= 0, point.y >= 0, let current = editor else { return }
@@ -257,18 +304,108 @@ struct PianoRollView: View {
         }
     }
 
+    private func automationTouch(_ phase: PianoRollNavigationView.EditPhase, _ point: CGPoint) {
+        let kind: SequencerAutomation.Kind = lane == .bend ? .pitchBend : .cc
+        let cc = kind == .cc ? controller : 0
+        let maxValue = kind == .cc ? 127 : 16383
+        func coordinates(_ position: CGPoint, pattern: SequencerPattern) -> (tick: Int64, value: Int) {
+            let tick = min(pattern.length - 1, max(-pattern.intro, snapped(viewport.tick(at: Double(position.x)))))
+            let fraction = min(1, max(0, 1 - Double(position.y - gridHeight) / Double(laneHeight)))
+            return (tick, Int((fraction * Double(maxValue)).rounded()))
+        }
+        switch phase {
+        case .begin:
+            guard point.x >= 0, let current = editor else { return }
+            let hit = current.pattern.automation.filter { $0.kind == kind && $0.controller == cc }.min {
+                abs(viewport.x(forTick: Double($0.tick)) - Double(point.x)) <
+                abs(viewport.x(forTick: Double($1.tick)) - Double(point.x))
+            }
+            let pointID = hit.flatMap {
+                abs(viewport.x(forTick: Double($0.tick)) - Double(point.x)) <= 12 ? $0.id : nil
+            }
+            var active = AutomationGesture(baseline: current, pointID: pointID, start: point)
+            if laneMode == .draw {
+                let sample = coordinates(point, pattern: current.pattern)
+                active.samples[sample.tick] = sample.value
+                active.last = sample
+            }
+            laneGesture = active
+        case .hold:
+            if laneGesture?.moved == false { laneGesture?.held = true }
+        case .move, .end:
+            guard var active = laneGesture else { return }
+            if hypot(point.x - active.start.x, point.y - active.start.y) >= 8 { active.moved = true }
+            if phase == .end && active.held && !active.moved, let id = active.pointID {
+                laneGesture = nil
+                command { buffer in try buffer.setAutomation(buffer.pattern.automation.filter { $0.id != id }) }
+                return
+            }
+            if phase == .end && laneMode == .points && !active.moved && active.pointID != nil {
+                laneGesture = nil
+                return
+            }
+            if phase == .move && !active.moved { laneGesture = active; return }
+            let sample = coordinates(point, pattern: active.baseline.pattern)
+            if laneMode == .draw, let previous = active.last, previous.tick != sample.tick {
+                let step = max(Int64(1), snap == 0 ? 120 : snap)
+                let distance = abs(sample.tick - previous.tick)
+                let count = min(Int64(257), distance / step)
+                if count > 256 {
+                    model.errorMessage = "The stroke exceeds the 256-point automation capacity."
+                    editor = active.baseline; laneGesture = nil; return
+                }
+                if count > 0 {
+                    for index in 1...count {
+                        let fraction = Double(index * step) / Double(distance)
+                        let tick = previous.tick + (sample.tick > previous.tick ? index * step : -index * step)
+                        let value = Int((Double(previous.value) + fraction * Double(sample.value - previous.value)).rounded())
+                        active.samples[tick] = value
+                    }
+                }
+            }
+            active.samples[sample.tick] = sample.value
+            active.last = sample
+            var candidate = active.baseline
+            do {
+                if laneMode == .points, let id = active.pointID {
+                    var points = candidate.pattern.automation
+                    guard let index = points.firstIndex(where: { $0.id == id }) else {
+                        throw SceneError.invalid("The automation point no longer exists.")
+                    }
+                    points[index].tick = sample.tick; points[index].value = sample.value
+                    try candidate.setAutomation(points)
+                } else {
+                    let samples = active.samples.map { (tick: $0.key, value: $0.value) }.sorted { $0.tick < $1.tick }
+                    try candidate.automationStroke(samples, kind: kind, controller: cc)
+                }
+                editor = candidate; laneGesture = active
+                if phase == .end {
+                    laneGesture = nil
+                    publish(candidate, replacing: active.baseline)
+                }
+            } catch {
+                editor = active.baseline; laneGesture = nil
+                model.errorMessage = error.localizedDescription
+            }
+        case .cancel:
+            if let active = laneGesture { editor = active.baseline }
+            laneGesture = nil
+        }
+    }
+
     private func draw(context: inout GraphicsContext, size: CGSize) {
         let left: CGFloat = 54, top: CGFloat = 26
-        let grid = CGRect(x: left, y: top, width: max(0, size.width - left), height: max(0, size.height - top))
+        let grid = CGRect(x: left, y: top, width: max(0, size.width - left),
+                          height: max(0, size.height - top - (lane == .none ? 0 : laneHeight)))
         context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.black.opacity(0.9)))
         for pitch in 0...127 {
             let y = top + viewport.y(forPitch: Double(pitch))
             let row = CGRect(x: 0, y: y, width: size.width, height: viewport.pitchHeight)
-            guard row.maxY >= top && row.minY <= size.height else { continue }
+            guard row.maxY >= top && row.minY <= grid.maxY else { continue }
             let black = KeyboardZoneLayout.isBlack(pitch)
             context.fill(Path(row.intersection(CGRect(x: 0, y: top, width: size.width, height: grid.height))),
                          with: .color(black ? .white.opacity(0.04) : .white.opacity(0.09)))
-            context.fill(Path(CGRect(x: 0, y: max(top, y), width: left - 1, height: max(0, min(size.height, y + viewport.pitchHeight) - max(top, y)))),
+            context.fill(Path(CGRect(x: 0, y: max(top, y), width: left - 1, height: max(0, min(grid.maxY, y + viewport.pitchHeight) - max(top, y)))),
                          with: .color(black ? .gray.opacity(0.5) : .white.opacity(0.7)))
             if pitch % 12 == 0 && y >= top {
                 context.draw(Text("C\(pitch / 12 - 1)").font(.caption2).foregroundColor(.black),
@@ -288,7 +425,7 @@ struct PianoRollView: View {
         if first <= last {
             for beat in first...last {
                 let x = left + viewport.x(forTick: Double(beat) * 960)
-                var line = Path(); line.move(to: CGPoint(x: x, y: top)); line.addLine(to: CGPoint(x: x, y: size.height))
+                var line = Path(); line.move(to: CGPoint(x: x, y: top)); line.addLine(to: CGPoint(x: x, y: grid.maxY))
                 context.stroke(line, with: .color(.white.opacity(beat % 4 == 0 ? 0.4 : 0.15)), lineWidth: 1)
                 if beat % 4 == 0 {
                     context.draw(Text("\(beat / 4 + 1)").font(.caption2).foregroundColor(.white),
@@ -314,7 +451,7 @@ struct PianoRollView: View {
         for (label, tick, color) in markers {
             let x = left + viewport.x(forTick: Double(tick))
             if x >= left && x <= size.width {
-                var line = Path(); line.move(to: CGPoint(x: x, y: top)); line.addLine(to: CGPoint(x: x, y: size.height))
+                var line = Path(); line.move(to: CGPoint(x: x, y: top)); line.addLine(to: CGPoint(x: x, y: grid.maxY))
                 context.stroke(line, with: .color(color.opacity(0.8)), lineWidth: 1)
                 context.draw(Text(label).font(.system(size: 8, weight: .bold)).foregroundColor(color),
                              at: CGPoint(x: x + 12, y: 20))
@@ -324,6 +461,29 @@ struct PianoRollView: View {
             let rect = selectionRect.offsetBy(dx: left, dy: top).intersection(grid)
             context.fill(Path(rect), with: .color(.orange.opacity(0.25)))
             context.stroke(Path(rect), with: .color(.orange), lineWidth: 1)
+        }
+        if lane != .none {
+            let rect = CGRect(x: left, y: grid.maxY, width: grid.width, height: laneHeight)
+            context.fill(Path(rect), with: .color(.gray.opacity(0.18)))
+            let kind: SequencerAutomation.Kind = lane == .bend ? .pitchBend : .cc
+            let cc = kind == .cc ? controller : 0
+            let maxValue = kind == .cc ? 127.0 : 16383.0
+            if lane == .bend {
+                let center = grid.maxY + laneHeight * (1 - 8192 / maxValue)
+                var line = Path(); line.move(to: CGPoint(x: left, y: center))
+                line.addLine(to: CGPoint(x: size.width, y: center))
+                context.stroke(line, with: .color(.white.opacity(0.35)), lineWidth: 1)
+            }
+            let points = current.automation.filter { $0.kind == kind && $0.controller == cc }
+            for point in points {
+                let x = left + viewport.x(forTick: Double(point.tick))
+                guard x >= left && x <= size.width else { continue }
+                let y = grid.maxY + laneHeight * (1 - Double(point.value) / maxValue)
+                var line = Path(); line.move(to: CGPoint(x: x, y: grid.maxY + laneHeight))
+                line.addLine(to: CGPoint(x: x, y: y))
+                context.stroke(line, with: .color(.cyan.opacity(0.55)), lineWidth: 1)
+                context.fill(Path(ellipseIn: CGRect(x: x - 4, y: y - 4, width: 8, height: 8)), with: .color(.cyan))
+            }
         }
         if Int(ov_seq_active(UInt32(pattern.slot))) == pattern.row {
             let tick = Double(ov_seq_position(UInt32(pattern.slot))) * Double(current.length) / 65535

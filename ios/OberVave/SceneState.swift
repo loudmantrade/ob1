@@ -596,12 +596,14 @@ struct PianoRollEditBuffer {
     private var undoStack: [SequencerPattern] = []
     private var redoStack: [SequencerPattern] = []
     private var nextNoteID: UInt64
+    private var nextAutomationID: UInt64
     private static let historyLimit = 32
 
     init(pattern: SequencerPattern) throws {
         try pattern.validate()
         self.pattern = pattern
         nextNoteID = (pattern.notes.map(\.id).max() ?? 0) + 1
+        nextAutomationID = (pattern.automation.map(\.id).max() ?? 0) + 1
     }
 
     var canUndo: Bool { !undoStack.isEmpty }
@@ -725,6 +727,27 @@ struct PianoRollEditBuffer {
         candidate.version = 4
         candidate.automation = points.sorted { $0.tick == $1.tick ? $0.id < $1.id : $0.tick < $1.tick }
         try commit(candidate)
+        nextAutomationID = max(nextAutomationID, (points.map(\.id).max() ?? 0) + 1)
+    }
+
+    mutating func automationStroke(_ values: [(tick: Int64, value: Int)],
+                                   kind: SequencerAutomation.Kind, controller: Int) throws {
+        guard let first = values.map(\.tick).min(), let last = values.map(\.tick).max(),
+              !values.isEmpty else { throw SceneError.invalid("An automation stroke must contain a point.") }
+        var points = pattern.automation.filter {
+            !($0.kind == kind && $0.controller == controller && (first...last).contains($0.tick))
+        }
+        guard values.count <= 256 - points.count, UInt64(values.count) <= UInt64.max - nextAutomationID else {
+            throw SceneError.invalid("The pattern cannot hold more than 256 automation points.")
+        }
+        var next = nextAutomationID
+        for value in values {
+            points.append(SequencerAutomation(id: next, tick: value.tick, kind: kind,
+                                               controller: controller, value: value.value))
+            next += 1
+        }
+        try setAutomation(points)
+        nextAutomationID = next
     }
 
     mutating func conform(root: Int, scale: Scale, direction: ScaleDirection) throws {

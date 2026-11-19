@@ -309,8 +309,12 @@ Pattern schema version 4 supports up to 256 ordered step controller points,
 including MIDI CC and 14-bit channel pitch bend. It retains legacy or version 3
 region behavior explicitly and rejects unsupported automation types. Events
 are routed to the pattern's instrument on the audio clock, with deterministic
-ordering for equal ticks. Scene and immutable-snapshot round trips are covered;
-the automation lane UI is not yet available. Re-recording retains automation;
+ordering for equal ticks. Scene and immutable-snapshot round trips are covered.
+The lower CC / Pitch Bend lane shares the timeline: tap to add a point, drag
+an existing point, hold it to delete, or use Freehand to draw a bounded stroke.
+CC defaults to modulation (CC1); the stepper selects any CC. Pitch bend is
+displayed with its 8192 center line. Automation uses step interpolation.
+Re-recording retains automation;
 if the new take cannot contain its points, publication fails instead of
 silently discarding them.
 The Regions command enables version 3 for the edited pattern, with numeric tick
