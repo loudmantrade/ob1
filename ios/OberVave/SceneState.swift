@@ -392,6 +392,85 @@ struct PatternCell: Hashable {
     var id: Int { slot * 8 + row }
 }
 
+struct PianoRollViewport: Equatable {
+    static let minimumBeatWidth = 24.0
+    static let maximumBeatWidth = 480.0
+    static let minimumPitchHeight = 8.0
+    static let maximumPitchHeight = 64.0
+    var beatWidth = 96.0
+    var pitchHeight = 20.0
+    var leftTick = 0.0
+    var topPitch = 84.0
+
+    func tick(at x: Double) -> Double { leftTick + x * 960 / beatWidth }
+    func pitch(at y: Double) -> Double { topPitch - y / pitchHeight }
+    func x(forTick tick: Double) -> Double { (tick - leftTick) * beatWidth / 960 }
+    func y(forPitch pitch: Double) -> Double { (topPitch - pitch) * pitchHeight }
+}
+
+struct PianoRollNavigation {
+    private struct Axis {
+        var separation: Double
+        var scale: Double
+        var sign: Double
+    }
+    private static let deadZone = 12.0
+    private var horizontal: Axis
+    private var vertical: Axis
+    private let anchorTick: Double
+    private let anchorPitch: Double
+
+    init(viewport: PianoRollViewport, first: CoreGraphics.CGPoint, second: CoreGraphics.CGPoint) {
+        let dx = Double(second.x - first.x), dy = Double(second.y - first.y)
+        horizontal = Axis(separation: abs(dx), scale: viewport.beatWidth, sign: dx.sign == .minus ? -1 : 1)
+        vertical = Axis(separation: abs(dy), scale: viewport.pitchHeight, sign: dy.sign == .minus ? -1 : 1)
+        anchorTick = viewport.tick(at: Double(first.x + second.x) / 2)
+        anchorPitch = viewport.pitch(at: Double(first.y + second.y) / 2)
+    }
+
+    private static func scale(_ axis: inout Axis, delta: Double, current: Double,
+                              minimum: Double, maximum: Double) -> Double {
+        let distance = abs(delta)
+        let sign = delta.sign == .minus ? -1.0 : 1.0
+        if distance < deadZone {
+            axis.separation = 0
+            axis.scale = current
+            return current
+        }
+        if axis.separation < deadZone || axis.sign != sign {
+            axis = Axis(separation: distance, scale: current, sign: sign)
+            return current
+        }
+        return min(maximum, max(minimum, axis.scale * distance / axis.separation))
+    }
+
+    mutating func update(viewport: inout PianoRollViewport, first: CoreGraphics.CGPoint,
+                         second: CoreGraphics.CGPoint) {
+        viewport.beatWidth = Self.scale(&horizontal, delta: Double(second.x - first.x), current: viewport.beatWidth,
+                                        minimum: PianoRollViewport.minimumBeatWidth, maximum: PianoRollViewport.maximumBeatWidth)
+        viewport.pitchHeight = Self.scale(&vertical, delta: Double(second.y - first.y), current: viewport.pitchHeight,
+                                          minimum: PianoRollViewport.minimumPitchHeight, maximum: PianoRollViewport.maximumPitchHeight)
+        let midX = Double(first.x + second.x) / 2
+        let midY = Double(first.y + second.y) / 2
+        viewport.leftTick = anchorTick - midX * 960 / viewport.beatWidth
+        viewport.topPitch = anchorPitch + midY / viewport.pitchHeight
+    }
+}
+
+struct PianoRollTouchArbitration {
+    enum Mode: Equatable { case idle, editing, navigating, awaitingRelease }
+    private(set) var mode: Mode = .idle
+    mutating func begin() { if mode == .idle { mode = .editing } }
+    mutating func secondFinger() -> Bool {
+        guard mode == .editing else { return false }
+        mode = .navigating
+        return true
+    }
+    mutating func fingerLifted() { if mode == .navigating { mode = .awaitingRelease } }
+    mutating func allReleased() { mode = .idle }
+    mutating func cancel() { mode = .idle }
+}
+
 enum SequencerRecordingSelection {
     static func keyboardMask(slots: Set<Int>, instruments: [RackInstrument]) -> UInt32 {
         instruments.filter { slots.contains($0.slot) }.reduce(UInt32(0)) {

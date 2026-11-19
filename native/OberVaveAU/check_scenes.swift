@@ -200,6 +200,35 @@ struct SceneChecks {
 
     static func main() throws {
         checkCircularLayout()
+        var viewport = PianoRollViewport()
+        let first = CoreGraphics.CGPoint(x: 100, y: 120)
+        let second = CoreGraphics.CGPoint(x: 200, y: 220)
+        let anchorTick = viewport.tick(at: 150), anchorPitch = viewport.pitch(at: 170)
+        var navigation = PianoRollNavigation(viewport: viewport, first: first, second: second)
+        navigation.update(viewport: &viewport, first: first, second: CoreGraphics.CGPoint(x: 300, y: 220))
+        precondition(viewport.beatWidth == 192 && viewport.pitchHeight == 20)
+        precondition(abs(viewport.tick(at: 200) - anchorTick) < 0.000001)
+        precondition(abs(viewport.pitch(at: 170) - anchorPitch) < 0.000001)
+        navigation.update(viewport: &viewport, first: first, second: CoreGraphics.CGPoint(x: 300, y: 320))
+        precondition(viewport.beatWidth == 192 && viewport.pitchHeight == 40)
+        precondition(abs(viewport.pitch(at: 220) - anchorPitch) < 0.000001)
+        navigation.update(viewport: &viewport, first: first, second: CoreGraphics.CGPoint(x: 102, y: 320))
+        let crossedScale = viewport.beatWidth
+        navigation.update(viewport: &viewport, first: first, second: CoreGraphics.CGPoint(x: 70, y: 320))
+        precondition(viewport.beatWidth == crossedScale && viewport.beatWidth.isFinite)
+        navigation.update(viewport: &viewport, first: first, second: CoreGraphics.CGPoint(x: -10000, y: -10000))
+        precondition(viewport.beatWidth <= PianoRollViewport.maximumBeatWidth &&
+                     viewport.pitchHeight <= PianoRollViewport.maximumPitchHeight)
+        var arbitration = PianoRollTouchArbitration()
+        arbitration.begin()
+        precondition(arbitration.mode == .editing && arbitration.secondFinger())
+        arbitration.fingerLifted(); arbitration.begin()
+        precondition(arbitration.mode == .awaitingRelease)
+        arbitration.allReleased(); arbitration.begin()
+        precondition(arbitration.mode == .editing)
+        arbitration.cancel()
+        precondition(arbitration.mode == .idle)
+        print("PASS piano roll navigation foundation: independent axes, moving midpoint anchor, dead zone/crossing, bounded zoom and touch arbitration")
         var testedCells = Set<PatternCell>()
         for offset in [CoreGraphics.CGPoint.zero, CoreGraphics.CGPoint(x: -118 * 8, y: 0),
                        CoreGraphics.CGPoint(x: 0, y: -240), CoreGraphics.CGPoint(x: -118 * 8, y: -240)] {
