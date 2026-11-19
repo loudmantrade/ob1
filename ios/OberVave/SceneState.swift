@@ -471,6 +471,118 @@ struct PianoRollTouchArbitration {
     mutating func cancel() { mode = .idle }
 }
 
+struct PianoRollEditBuffer {
+    private(set) var pattern: SequencerPattern
+    var selection: Set<UInt64> = []
+    private var undoStack: [SequencerPattern] = []
+    private var redoStack: [SequencerPattern] = []
+    private var nextNoteID: UInt64
+    private static let historyLimit = 32
+
+    init(pattern: SequencerPattern) throws {
+        try pattern.validate()
+        self.pattern = pattern
+        nextNoteID = (pattern.notes.map(\.id).max() ?? 0) + 1
+    }
+
+    var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
+
+    private mutating func commit(_ candidate: SequencerPattern) throws {
+        try candidate.validate()
+        guard candidate != pattern else { return }
+        undoStack.append(pattern)
+        if undoStack.count > Self.historyLimit { undoStack.removeFirst() }
+        redoStack.removeAll()
+        pattern = candidate
+        selection.formIntersection(Set(pattern.notes.map(\.id)))
+    }
+
+    mutating func undo() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(pattern)
+        pattern = previous
+        selection.formIntersection(Set(pattern.notes.map(\.id)))
+    }
+
+    mutating func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(pattern)
+        pattern = next
+        selection.formIntersection(Set(pattern.notes.map(\.id)))
+    }
+
+    private func selectedIndices() throws -> [Int] {
+        let indices = pattern.notes.indices.filter { selection.contains(pattern.notes[$0].id) }
+        guard !indices.isEmpty else { throw SceneError.invalid("Select at least one note.") }
+        return indices
+    }
+
+    mutating func move(ticks: Int64, semitones: Int, copying: Bool = false) throws {
+        let indices = try selectedIndices()
+        let notes = indices.map { pattern.notes[$0] }
+        let minTick = notes.map { -pattern.intro - $0.start }.max()!
+        let maxTick = notes.map { pattern.length - 1 - $0.start }.min()!
+        let minPitch = notes.map { -$0.pitch }.max()!
+        let maxPitch = notes.map { 127 - $0.pitch }.min()!
+        let dt = min(maxTick, max(minTick, ticks))
+        let dp = min(maxPitch, max(minPitch, semitones))
+        var candidate = pattern
+        if copying {
+            guard candidate.notes.count + notes.count <= 1024 else {
+                throw SceneError.invalid("The pattern cannot hold more than 1024 notes.")
+            }
+            guard nextNoteID <= UInt64.max - UInt64(notes.count) else {
+                throw SceneError.invalid("No note IDs remain available.")
+            }
+            var nextID = nextNoteID
+            var newSelection: Set<UInt64> = []
+            for var note in notes {
+                note.id = nextID; note.start += dt; note.pitch += dp
+                nextID += 1
+                candidate.notes.append(note)
+                newSelection.insert(note.id)
+            }
+            try commit(candidate)
+            nextNoteID = nextID
+            selection = newSelection
+        } else {
+            for index in indices {
+                candidate.notes[index].start += dt
+                candidate.notes[index].pitch += dp
+            }
+            try commit(candidate)
+        }
+    }
+
+    mutating func changeDuration(by delta: Int64) throws {
+        let indices = try selectedIndices()
+        let minimum = indices.map { 1 - pattern.notes[$0].duration }.max()!
+        let maximum = indices.map { SequencerPattern.maxTicks - pattern.notes[$0].duration }.min()!
+        let applied = min(maximum, max(minimum, delta))
+        var candidate = pattern
+        for index in indices { candidate.notes[index].duration += applied }
+        try commit(candidate)
+    }
+
+    mutating func changeVelocity(by delta: Int) throws {
+        let indices = try selectedIndices()
+        let applied = min(127, max(-127, delta))
+        var candidate = pattern
+        for index in indices {
+            candidate.notes[index].velocity = min(127, max(1, candidate.notes[index].velocity + applied))
+        }
+        try commit(candidate)
+    }
+
+    mutating func deleteSelection() throws {
+        _ = try selectedIndices()
+        var candidate = pattern
+        candidate.notes.removeAll { selection.contains($0.id) }
+        try commit(candidate)
+    }
+}
+
 enum SequencerRecordingSelection {
     static func keyboardMask(slots: Set<Int>, instruments: [RackInstrument]) -> UInt32 {
         instruments.filter { slots.contains($0.slot) }.reduce(UInt32(0)) {

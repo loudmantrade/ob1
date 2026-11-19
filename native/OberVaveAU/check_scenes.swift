@@ -229,6 +229,48 @@ struct SceneChecks {
         arbitration.cancel()
         precondition(arbitration.mode == .idle)
         print("PASS piano roll navigation foundation: independent axes, moving midpoint anchor, dead zone/crossing, bounded zoom and touch arbitration")
+        var editPattern = SequencerPattern(slot: 0, row: 0, name: "Edit")
+        editPattern.notes = [
+            SequencerNote(id: 1, start: 120, duration: 240, pitch: 60, velocity: 60),
+            SequencerNote(id: 2, start: 360, duration: 480, pitch: 64, velocity: 90),
+            SequencerNote(id: 3, start: 600, duration: 960, pitch: 67, velocity: 120, output: false)
+        ]
+        var editor = try PianoRollEditBuffer(pattern: editPattern)
+        editor.selection = [1, 2, 3]
+        try editor.changeDuration(by: 120)
+        precondition(editor.pattern.notes.map(\.duration) == [360, 600, 1080])
+        try editor.changeVelocity(by: 15)
+        precondition(editor.pattern.notes.map(\.velocity) == [75, 105, 127])
+        try editor.move(ticks: -9999, semitones: 9999)
+        precondition(editor.pattern.notes.map(\.start) == [0, 240, 480])
+        precondition(editor.pattern.notes.map(\.pitch) == [120, 124, 127])
+        editor.undo()
+        precondition(editor.pattern.notes.map(\.start) == [120, 360, 600] && editor.canRedo)
+        editor.redo()
+        precondition(editor.pattern.notes.map(\.pitch) == [120, 124, 127])
+        try editor.move(ticks: 120, semitones: -12, copying: true)
+        precondition(editor.pattern.notes.count == 6 && editor.selection == [4, 5, 6])
+        precondition(editor.pattern.notes[5].output == false)
+        editor.undo()
+        precondition(editor.pattern.notes.count == 3 && editor.selection.isEmpty)
+        editor.redo()
+        editor.selection = [4, 5, 6]
+        try editor.deleteSelection()
+        precondition(editor.pattern.notes.count == 3 && !editor.canRedo)
+        editor.undo()
+        precondition(editor.pattern.notes.count == 6)
+        editor.selection = [4, 5, 6]
+        try editor.move(ticks: 0, semitones: 0, copying: true)
+        precondition(editor.selection == [7, 8, 9] && !editor.canRedo)
+        editor.undo()
+        for _ in 0..<40 {
+            editor.selection = [1]
+            try editor.changeVelocity(by: 1)
+        }
+        var undoCount = 0
+        while editor.canUndo { editor.undo(); undoCount += 1 }
+        precondition(undoCount == 32)
+        print("PASS piano roll edit buffer: additive group edits, common bounds, independent IDs/routing, atomic undo/redo and bounded history")
         var testedCells = Set<PatternCell>()
         for offset in [CoreGraphics.CGPoint.zero, CoreGraphics.CGPoint(x: -118 * 8, y: 0),
                        CoreGraphics.CGPoint(x: 0, y: -240), CoreGraphics.CGPoint(x: -118 * 8, y: -240)] {

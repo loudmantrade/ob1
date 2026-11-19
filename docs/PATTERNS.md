@@ -280,6 +280,25 @@ same-cell/off-grid drops are no-ops.
 
 ## Verification
 
+### Piano Roll implementation in progress
+
+The existing double-tap action still opens a placeholder; the Piano Roll is not
+yet available. The tested control-side foundation consists of independent
+time/pitch viewport transforms, pinch anchoring and touch-state arbitration,
+plus bounded group note edits and undo/redo. None of these helpers publishes
+audio changes or modifies the scene format.
+
+The remaining implementation must add revision-checked immutable publication
+that safely handles active patterns, then connect a coordinated touch editor
+and source-owned audition to it. Controller automation requires bounded,
+versioned events with backward-compatible decoding and audio scheduling.
+Independent loop/tail markers require a versioned migration preserving old
+loop behavior, plus iteration-specific note release and real-time capacity
+tests; the existing v2 `length`/`intro` model cannot represent those semantics.
+Acceptance requires portable timing/ownership and scene-migration regressions,
+the existing sequencer and AU suites, a signed iPad build, and the physical
+iPad gesture/audio checklist from the implementation specification.
+
 The shared count-in/recording/playback metronome uses the existing 25 ms synthesized
 click on the audio owner. Click boundaries and accents use the same quarter index
 as the header. Its atomic
