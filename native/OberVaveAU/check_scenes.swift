@@ -343,6 +343,29 @@ struct SceneChecks {
         precondition(copiedHistory.pattern.slot == 2 && copiedHistory.pattern.row == 3 &&
                      copiedHistory.pattern.notes.count == 5)
         precondition(pasted.pattern.slot == editPattern.slot && pasted.pattern.row == editPattern.row)
+        let historyCell = PatternCell(slot: pasted.pattern.slot, row: pasted.pattern.row)
+        let filled = SequencerCellSnapshot(cell: historyCell, pattern: pasted.pattern, pianoHistory: pasted)
+        let empty = SequencerCellSnapshot(cell: historyCell, pattern: nil, pianoHistory: nil)
+        let deletedEntry = SequencerHistoryEntry(before: [filled], after: [empty])
+        var sequenceHistory = SequencerHistory()
+        sequenceHistory.record(deletedEntry)
+        precondition(sequenceHistory.undoStack.count == 1 && sequenceHistory.redoStack.isEmpty)
+        let pendingUndo = sequenceHistory.next(undo: true)!
+        precondition(sequenceHistory.undoStack.count == 1 && sequenceHistory.redoStack.isEmpty)
+        sequenceHistory.acknowledge(pendingUndo, undo: true)
+        precondition(sequenceHistory.undoStack.isEmpty && sequenceHistory.redoStack.count == 1)
+        var restoredHistory = sequenceHistory.next(undo: false)!.before[0].pianoHistory!
+        restoredHistory.undo()
+        precondition(restoredHistory.pattern == editPattern && pasted.pattern.notes.count == 5)
+        sequenceHistory.acknowledge(deletedEntry, undo: false)
+        sequenceHistory.acknowledge(deletedEntry, undo: true)
+        sequenceHistory.record(deletedEntry)
+        precondition(sequenceHistory.redoStack.isEmpty && sequenceHistory.undoStack.count == 1)
+        sequenceHistory.record(SequencerHistoryEntry(before: [empty], after: [empty]))
+        precondition(sequenceHistory.undoStack.count == 1)
+        for _ in 0..<40 { sequenceHistory.record(deletedEntry) }
+        precondition(sequenceHistory.undoStack.count == 32)
+        print("PASS sequencer history: acknowledged undo/redo, restored piano history, branching and bounded storage")
         let beforeInvalidPaste = pasted.pattern
         do {
             try pasted.paste(copiedNotes, at: editPattern.length - 1)

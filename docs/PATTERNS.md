@@ -305,8 +305,14 @@ Within the current scene, the Piano Roll history remains available after
 closing and reopening the editor. Moving a pattern transfers its history;
 copying it creates an independent copy of that history. Re-recording or
 replacing a pattern through the numeric pattern editor clears its history.
+The sequencer has a separate, per-scene history for recording, numeric edits,
+MOVE, COPY and DELETE, limited to 32 actions. Its Undo and Redo buttons wait
+for an audio acknowledgement before changing history. Restoring a deleted or
+replaced pattern also restores its Piano Roll history; a later Piano Roll edit
+that changes an affected pattern causes sequencer Undo/Redo to reject the
+operation rather than overwrite that edit. Revert the Piano Roll change first.
 When switching scenes during the session, their unsaved state, Piano Roll
-histories and viewports can be restored from Scenes in this session, including
+histories, sequencer history and viewports can be restored from Scenes in this session, including
 untitled and imported scenes. These session states are not saved to disk.
 Switching waits for an audio-owned snapshot before replacing the scene; if the
 audio engine is stopped or recording is active, switching is rejected rather

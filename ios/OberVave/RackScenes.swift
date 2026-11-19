@@ -134,9 +134,13 @@ extension OberVaveModel {
                     do {
                         try pattern.validate()
                         if instruments.contains(where: { $0.slot == pattern.slot }) {
+                            let cell = PatternCell(slot: pattern.slot, row: pattern.row)
+                            let before = sequencerSnapshot(cell)
                             pianoRollHistories.removeValue(forKey: pattern.id)
                             patterns.removeAll { $0.id == pattern.id }
                             patterns.append(pattern)
+                            sequencerHistory.record(SequencerHistoryEntry(before: [before],
+                                                                          after: [sequencerSnapshot(cell)]))
                         }
                     } catch { errorMessage = error.localizedDescription }
                 }
@@ -175,8 +179,36 @@ extension OberVaveModel {
                     }
                     patterns = transfer.acknowledged(in: patterns,
                         sourceUnchanged: sourceUnchanged, destinationUnchanged: destinationUnchanged)
+                    if sourceUnchanged && destinationUnchanged {
+                        sequencerHistory.record(SequencerHistoryEntry(before: pending.before,
+                            after: pending.before.map { sequencerSnapshot($0.cell) }))
+                    } else {
+                        errorMessage = "The pattern edit was superseded before its history could be saved."
+                    }
                 } else {
                     errorMessage = "The pattern edit was rejected because a cell, scene or recording changed. No patterns were modified."
+                }
+            } else if let pending = pendingSequencerHistory, pending.token == editResult.token {
+                defer { pendingSequencerHistory = nil }
+                let expected = pending.undo ? pending.entry.after : pending.entry.before
+                let target = pending.undo ? pending.entry.before : pending.entry.after
+                let revisions = [editResult.source_revision, editResult.target_revision]
+                let unchanged = expected.enumerated().allSatisfy { index, snapshot in
+                    ov_seq_cell_revision(UInt32(snapshot.cell.slot), UInt32(snapshot.cell.row)) == revisions[index]
+                }
+                if editResult.success != 0 && pending.epoch == ov_seq_scene_epoch() && unchanged {
+                    for snapshot in target {
+                        patterns.removeAll { $0.id == snapshot.cell.id }
+                        if let pattern = snapshot.pattern { patterns.append(pattern) }
+                        pianoRollHistories[snapshot.cell.id] = snapshot.pianoHistory
+                    }
+                    if pending.recordingNewEntry {
+                        sequencerHistory.record(pending.entry)
+                    } else {
+                        sequencerHistory.acknowledge(pending.entry, undo: pending.undo)
+                    }
+                } else {
+                    errorMessage = "The sequencer history operation was rejected or superseded because a cell, scene or recording changed."
                 }
             } else if let pending = pendingPianoPublication, pending.token == editResult.token {
                 defer { pendingPianoPublication = nil }
@@ -328,7 +360,7 @@ extension OberVaveModel {
     }
 
     func removeInstrument(_ slot: Int) {
-        guard pendingPatternTransfer == nil, pendingPianoPublication == nil else { errorMessage = "Wait for the pending pattern edit."; return }
+        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil else { errorMessage = "Wait for the pending pattern edit."; return }
         guard recordingPattern == nil else { errorMessage = "Finish recording before removing an instrument."; return }
         guard pendingSceneName == nil, ov_rack_remove(UInt32(slot)) != 0 else { return }
         instruments.removeAll { $0.slot == slot }
@@ -373,7 +405,7 @@ extension OberVaveModel {
 
     func saveScene(name: String, asNew: Bool = false) {
         syncRackState()
-        guard pendingPatternTransfer == nil, pendingPianoPublication == nil else { errorMessage = "Wait for the pending pattern edit."; return }
+        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil else { errorMessage = "Wait for the pending pattern edit."; return }
         guard recordingPattern == nil else {
             errorMessage = "Finish pattern recording before saving the scene."; return
         }
@@ -455,7 +487,8 @@ extension OberVaveModel {
             masterDB: masterLevelDB, masterPan: masterPan, keyboardMask: keyboardChannelMask,
             selectedSlot: instruments.isEmpty ? nil : selectedSlot, patterns: patterns)
         return SceneSessionState(document: document, pianoRollHistories: pianoRollHistories,
-                                 pianoRollViewports: pianoRollViewports, fileURL: sceneFileURL)
+                                 pianoRollViewports: pianoRollViewports, fileURL: sceneFileURL,
+                                 sequencerHistory: sequencerHistory)
     }
 
     func restoreSessionScene(_ key: String) {
@@ -466,7 +499,7 @@ extension OberVaveModel {
     private func switchScene(to next: SceneSessionState, key: String) {
         do {
             syncSequencerState()
-            guard pendingPatternTransfer == nil, pendingPianoPublication == nil, recordingPattern == nil,
+            guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil, recordingPattern == nil,
                   ov_seq_record_state() == 0, pendingSceneName == nil, !sceneSwitchPending else {
                 throw SceneError.invalid("Finish recording and pending pattern edits before loading a scene.")
             }
@@ -483,7 +516,8 @@ extension OberVaveModel {
                 do {
                     self.syncSequencerState()
                     guard self.recordingPattern == nil, ov_seq_record_state() == 0,
-                          self.pendingPatternTransfer == nil, self.pendingPianoPublication == nil else {
+                          self.pendingPatternTransfer == nil, self.pendingPianoPublication == nil,
+                          self.pendingSequencerHistory == nil else {
                         throw SceneError.invalid("The scene changed while switching. Finish recording and try again.")
                     }
                     var previous = self.currentSceneSession()
@@ -502,6 +536,7 @@ extension OberVaveModel {
                     self.sceneSessionKey = key
                     self.pianoRollHistories = next.pianoRollHistories
                     self.pianoRollViewports = next.pianoRollViewports
+                    self.sequencerHistory = next.sequencerHistory
                     self.sceneFileURL = next.fileURL
                 } catch { self.errorMessage = "Could not switch scene: \(error.localizedDescription)" }
                 return true
@@ -514,7 +549,7 @@ extension OberVaveModel {
 
     private func applyScene(_ document: RackSceneDocument) throws {
         try document.validate()
-        guard pendingPatternTransfer == nil, pendingPianoPublication == nil else { throw SceneError.invalid("Wait for the pending pattern edit.") }
+        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil else { throw SceneError.invalid("Wait for the pending pattern edit.") }
         guard recordingPattern == nil else { throw SceneError.invalid("Finish recording before loading a scene.") }
         var c = ov_scene_config()
         c.tempo = UInt32(document.tempo)
@@ -535,6 +570,7 @@ extension OberVaveModel {
         sequencerInteractionEpoch &+= 1
         pianoRollViewports.removeAll()
         pianoRollHistories.removeAll()
+        sequencerHistory = SequencerHistory()
         instruments = document.instruments
         patterns = document.patterns ?? []
         soloSlots = []
@@ -563,9 +599,72 @@ extension OberVaveModel {
         patterns.first { $0.slot == slot && $0.row == row }
     }
 
+    private func sequencerSnapshot(_ cell: PatternCell) -> SequencerCellSnapshot {
+        let current = pattern(slot: cell.slot, row: cell.row)
+        return SequencerCellSnapshot(cell: cell, pattern: current,
+            pianoHistory: pianoRollHistories[cell.id].flatMap { $0.pattern == current ? $0 : nil })
+    }
+
+    func applySequencerHistory(undo: Bool) {
+        guard var entry = sequencerHistory.next(undo: undo) else { return }
+        let expected = undo ? entry.after : entry.before
+        let live = expected.map { sequencerSnapshot($0.cell) }
+        guard zip(expected, live).allSatisfy({ $0.pattern == $1.pattern }) else {
+            errorMessage = "The pattern has changed in Piano Roll or another operation. Restore it before using sequencer history."
+            return
+        }
+        if undo { entry.after = live } else { entry.before = live }
+        submitSequencerHistory(entry, undo: undo, recordingNewEntry: false)
+    }
+
+    private func submitSequencerHistory(_ entry: SequencerHistoryEntry, undo: Bool, recordingNewEntry: Bool) {
+        guard pendingSceneName == nil, !sceneSwitchPending, pendingPatternTransfer == nil,
+              pendingPianoPublication == nil, pendingSequencerHistory == nil, ov_seq_record_state() == 0 else {
+            errorMessage = "Finish recording and pending edits before changing sequencer history."
+            return
+        }
+        let expected = undo ? entry.after : entry.before
+        let replacement = undo ? entry.before : entry.after
+        guard expected.count == replacement.count, (1...2).contains(expected.count),
+              zip(expected, replacement).allSatisfy({ $0.cell == $1.cell }),
+              expected.allSatisfy({ ov_seq_pad_pending(UInt32($0.cell.slot), UInt32($0.cell.row)) == 0 }) else {
+            errorMessage = "The affected pattern cells are busy or invalid."
+            return
+        }
+        var clips: [ov_seq_clip] = []
+        var indices: [(Int?, Int?)] = []
+        for (old, new) in zip(expected, replacement) {
+            let oldIndex: Int?
+            if let pattern = old.pattern { oldIndex = clips.count; clips.append(pattern.coreClip()) } else { oldIndex = nil }
+            let newIndex: Int?
+            if let pattern = new.pattern { newIndex = clips.count; clips.append(pattern.coreClip()) } else { newIndex = nil }
+            indices.append((oldIndex, newIndex))
+        }
+        let epoch = ov_seq_scene_epoch()
+        patternTransferToken &+= 1
+        let accepted = clips.withUnsafeBufferPointer { buffer in
+            let changes = expected.enumerated().map { index, snapshot in
+                ov_seq_cell_change(slot: UInt32(snapshot.cell.slot), row: UInt32(snapshot.cell.row),
+                    revision: ov_seq_cell_revision(UInt32(snapshot.cell.slot), UInt32(snapshot.cell.row)),
+                    expected: indices[index].0.map { buffer.baseAddress!.advanced(by: $0) },
+                    replacement: indices[index].1.map { buffer.baseAddress!.advanced(by: $0) })
+            }
+            return changes.withUnsafeBufferPointer {
+                ov_seq_change_cells($0.baseAddress, UInt32($0.count), epoch, patternTransferToken)
+            }
+        }
+        guard accepted != 0 else {
+            errorMessage = "Could not queue the sequencer history operation."
+            return
+        }
+        pendingSequencerHistory = PendingSequencerHistory(token: patternTransferToken, epoch: epoch,
+            entry: entry, undo: undo, recordingNewEntry: recordingNewEntry)
+    }
+
     @discardableResult
     func storePattern(_ pattern: SequencerPattern) -> Bool {
-        guard pendingSceneName == nil, pendingPatternTransfer == nil, pendingPianoPublication == nil else {
+        guard pendingSceneName == nil, pendingPatternTransfer == nil, pendingPianoPublication == nil,
+              pendingSequencerHistory == nil else {
             errorMessage = "Wait for the pending scene or pattern operation."; return false
         }
         guard ov_seq_record_state() == 0 else {
@@ -576,21 +675,21 @@ extension OberVaveModel {
             guard ov_seq_pad_pending(UInt32(pattern.slot), UInt32(pattern.row)) == 0 else {
                 throw SceneError.invalid("Wait for the pending pad action before editing.")
             }
-            var clip = pattern.coreClip()
-            guard ov_seq_set_clip(&clip) != 0 else { throw SceneError.invalid("Could not publish pattern to the audio engine.") }
-            if self.pattern(slot: pattern.slot, row: pattern.row) != pattern {
-                pianoRollHistories.removeValue(forKey: pattern.id)
-            }
-            patterns.removeAll { $0.id == pattern.id }
-            patterns.append(pattern)
-            return true
+            let cell = PatternCell(slot: pattern.slot, row: pattern.row)
+            let before = sequencerSnapshot(cell)
+            if before.pattern == pattern { return true }
+            let after = SequencerCellSnapshot(cell: cell, pattern: pattern, pianoHistory: nil)
+            submitSequencerHistory(SequencerHistoryEntry(before: [before], after: [after]),
+                                   undo: false, recordingNewEntry: true)
+            return pendingSequencerHistory != nil
         } catch { errorMessage = error.localizedDescription; return false }
     }
 
     @discardableResult
     func publishPianoPattern(expected: SequencerPattern, candidate: PianoRollEditBuffer,
                              epoch: UInt64, revision: UInt64) -> Bool {
-        guard pendingSceneName == nil, pendingPatternTransfer == nil, pendingPianoPublication == nil else {
+        guard pendingSceneName == nil, pendingPatternTransfer == nil, pendingPianoPublication == nil,
+              pendingSequencerHistory == nil else {
             errorMessage = "Wait for the pending scene or pattern operation."; return false
         }
         do {
@@ -621,7 +720,7 @@ extension OberVaveModel {
 
     private func submitPatternTransfer(_ transfer: PatternTransfer) {
         syncRackState()
-        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSceneName == nil,
+        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil, pendingSceneName == nil,
               instruments.contains(where: { $0.slot == transfer.destination.slot }),
               recordingPhases[transfer.source.id] == nil && recordingPhases[transfer.destination.id] == nil else {
             errorMessage = "The source or destination is busy recording or editing."; return
@@ -635,7 +734,11 @@ extension OberVaveModel {
                               transfer.epoch, transfer.sourceRevision, transfer.targetRevision, patternTransferToken) != 0 else {
                 throw SceneError.invalid("Could not queue pattern transfer.")
             }
-            pendingPatternTransfer = PendingPatternTransfer(token: patternTransferToken, transfer: transfer)
+            let sourceCell = PatternCell(slot: transfer.source.slot, row: transfer.source.row)
+            let cells = transfer.deleting || transfer.copying ? [transfer.deleting ? sourceCell : transfer.destination]
+                : [sourceCell, transfer.destination]
+            pendingPatternTransfer = PendingPatternTransfer(token: patternTransferToken, transfer: transfer,
+                before: cells.map { sequencerSnapshot($0) })
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -676,6 +779,9 @@ extension OberVaveModel {
     }
     func recordPattern(slot: Int, row: Int) {
         syncRackState()
+        guard pendingSequencerHistory == nil, pendingPatternTransfer == nil, pendingPianoPublication == nil else {
+            errorMessage = "Wait for the pending pattern edit."; return
+        }
         guard ov_seq_record_state_for_slot(UInt32(slot)) == 0 else {
             errorMessage = "This instrument is already recording."; return
         }
@@ -691,6 +797,9 @@ extension OberVaveModel {
         if ov_seq_finish_record() == 0 { errorMessage = "Could not finish recording.";  }
     }
     func tapPattern(slot: Int, row: Int) {
+        guard pendingSequencerHistory == nil, pendingPatternTransfer == nil, pendingPianoPublication == nil else {
+            errorMessage = "Wait for the pending pattern edit."; return
+        }
         guard let instrument = instruments.first(where: { $0.slot == slot }) else {
             errorMessage = "The recording instrument is unavailable."; return
         }
@@ -922,6 +1031,11 @@ struct SequencerView: View {
     @State private var meters = [Double](repeating: 0, count: 16)
     private var width: CGFloat { max(1, model.keyboardChannelWidth) }
     private var padHeight: CGFloat { width }
+    private var historyBusy: Bool {
+        model.pendingSequencerHistory != nil || model.pendingPatternTransfer != nil ||
+            model.pendingPianoPublication != nil || model.pendingSceneName != nil ||
+            model.sceneSwitchPending || !model.recordingPhases.isEmpty
+    }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -930,6 +1044,14 @@ struct SequencerView: View {
                     Text("FREE").tag(0); Text("BEAT").tag(1); Text("BAR").tag(2)
                 }
                 .pickerStyle(.segmented).frame(maxWidth: 290)
+                Button { model.applySequencerHistory(undo: true) } label: {
+                    Label("Undo", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(model.sequencerHistory.undoStack.isEmpty || historyBusy)
+                Button { model.applySequencerHistory(undo: false) } label: {
+                    Label("Redo", systemImage: "arrow.uturn.forward")
+                }
+                .disabled(model.sequencerHistory.redoStack.isEmpty || historyBusy)
                 Spacer()
                 if !model.recordingPhases.isEmpty {
                     Button {
@@ -939,7 +1061,7 @@ struct SequencerView: View {
                               systemImage: "record.circle.fill").foregroundStyle(.red)
                     }.buttonStyle(.bordered)
                 }
-                Text(model.pendingPatternTransfer == nil ? "DRAG CENTER: MOVE · HOLD: COPY · EDGES: SCROLL" : "APPLYING EDIT · WAITING FOR AUDIO")
+                Text(model.pendingPatternTransfer == nil && model.pendingSequencerHistory == nil ? "DRAG CENTER: MOVE · HOLD: COPY · EDGES: SCROLL" : "APPLYING EDIT · WAITING FOR AUDIO")
                     .font(.caption2.monospaced()).foregroundStyle(.secondary)
             }
             ScrollView(.horizontal) {
@@ -1188,7 +1310,8 @@ struct SequencerView: View {
             copyHint = cell.id
         case .beginDrag(let copying):
             guard var source = heldSource, source.source.id == cell.id,
-                  model.recordingPhases[cell.id] == nil, model.pendingPatternTransfer == nil else {
+                  model.recordingPhases[cell.id] == nil, model.pendingPatternTransfer == nil,
+                  model.pendingSequencerHistory == nil else {
                 model.errorMessage = "The pattern is not available for editing."; cancelGesture(); return
             }
             source.copying = copying

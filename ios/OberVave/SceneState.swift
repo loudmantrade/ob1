@@ -221,6 +221,7 @@ struct SceneSessionState {
     var pianoRollHistories: [Int: PianoRollEditBuffer]
     var pianoRollViewports: [Int: PianoRollViewport]
     var fileURL: URL?
+    var sequencerHistory = SequencerHistory()
 }
 
 enum SequencerRecordMode: Int, CaseIterable {
@@ -1071,6 +1072,55 @@ struct PatternTransfer {
 struct PendingPatternTransfer {
     var token: UInt64
     var transfer: PatternTransfer
+    var before: [SequencerCellSnapshot]
+}
+
+struct SequencerCellSnapshot {
+    var cell: PatternCell
+    var pattern: SequencerPattern?
+    var pianoHistory: PianoRollEditBuffer?
+}
+
+struct SequencerHistoryEntry {
+    var before: [SequencerCellSnapshot]
+    var after: [SequencerCellSnapshot]
+}
+
+struct SequencerHistory {
+    private(set) var undoStack: [SequencerHistoryEntry] = []
+    private(set) var redoStack: [SequencerHistoryEntry] = []
+    private static let limit = 32
+
+    mutating func record(_ entry: SequencerHistoryEntry) {
+        guard zip(entry.before, entry.after).contains(where: { $0.pattern != $1.pattern }) else { return }
+        undoStack.append(entry)
+        if undoStack.count > Self.limit { undoStack.removeFirst() }
+        redoStack.removeAll()
+    }
+
+    func next(undo: Bool) -> SequencerHistoryEntry? {
+        undo ? undoStack.last : redoStack.last
+    }
+
+    mutating func acknowledge(_ entry: SequencerHistoryEntry, undo: Bool) {
+        if undo {
+            guard !undoStack.isEmpty else { return }
+            undoStack.removeLast()
+            redoStack.append(entry)
+        } else {
+            guard !redoStack.isEmpty else { return }
+            redoStack.removeLast()
+            undoStack.append(entry)
+        }
+    }
+}
+
+struct PendingSequencerHistory {
+    var token: UInt64
+    var epoch: UInt64
+    var entry: SequencerHistoryEntry
+    var undo: Bool
+    var recordingNewEntry: Bool
 }
 
 struct PendingPianoPublication {
