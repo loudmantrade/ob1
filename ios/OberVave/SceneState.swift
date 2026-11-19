@@ -570,6 +570,12 @@ struct PianoRollTouchArbitration {
     mutating func cancel() { mode = .idle }
 }
 
+enum PianoRollTapSequence {
+    static func isPrefix(note: UInt64, lastNote: UInt64?, elapsed: TimeInterval) -> Bool {
+        lastNote == note && elapsed >= 0 && elapsed < 0.4
+    }
+}
+
 enum PianoRollNoteHit {
     enum Zone: Equatable { case velocity, body, duration }
     static func zone(x: Double, width: Double) -> Zone {

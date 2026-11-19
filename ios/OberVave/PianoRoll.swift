@@ -68,6 +68,7 @@ struct PianoRollView: View {
         let baseline: PianoRollEditBuffer
         let hit: (id: UInt64, zone: PianoRollNoteHit.Zone)?
         let copy: Bool
+        let deleteAfterHold: Bool
         var moved = false
         var held = false
     }
@@ -306,9 +307,12 @@ struct PianoRollView: View {
         case .begin:
             guard point.x >= 0, point.y >= 0, let current = editor else { return }
             let hit = PianoRollNoteHit.hit(point: point, notes: current.pattern.notes, viewport: viewport)
-            let copy = hit?.zone == .body && hit.map { current.selection.contains($0.id) &&
-                lastTap?.id == $0.id && ProcessInfo.processInfo.systemUptime - (lastTap?.time ?? 0) < 0.4 } == true
-            gesture = EditGesture(start: point, baseline: current, hit: hit, copy: copy)
+            let prefix = hit.map {
+                PianoRollTapSequence.isPrefix(note: $0.id, lastNote: lastTap?.id,
+                    elapsed: ProcessInfo.processInfo.systemUptime - (lastTap?.time ?? 0))
+            } == true
+            let copy = hit?.zone == .body && hit.map { current.selection.contains($0.id) } == true && prefix
+            gesture = EditGesture(start: point, baseline: current, hit: hit, copy: copy, deleteAfterHold: prefix)
         case .hold:
             guard var active = gesture, !active.moved else { return }
             active.held = true; gesture = active
@@ -353,8 +357,7 @@ struct PianoRollView: View {
             }
             editor = active.baseline
             if active.held {
-                if let hit = active.hit, lastTap?.id == hit.id,
-                   ProcessInfo.processInfo.systemUptime - (lastTap?.time ?? 0) < 1.0 {
+                if let hit = active.hit, active.deleteAfterHold {
                     command { buffer in
                         if !buffer.selection.contains(hit.id) { buffer.selection = [hit.id] }
                         try buffer.deleteSelection()
