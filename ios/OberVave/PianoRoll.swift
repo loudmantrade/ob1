@@ -19,6 +19,7 @@ struct PianoRollView: View {
     @State private var scaleRoot = 0
     @State private var scale: PianoRollEditBuffer.Scale = .major
     @State private var scaleDirection: PianoRollEditBuffer.ScaleDirection = .nearest
+    @State private var showRegions = false
 
     private struct EditGesture {
         let start: CGPoint
@@ -53,6 +54,7 @@ struct PianoRollView: View {
                 Button("Paste") { command { try $0.paste(clipboard, at: pasteAnchor) } }
                     .disabled(clipboard.isEmpty || busy)
                 Button("Delete") { command { try $0.deleteSelection() } }.disabled(editor?.selection.isEmpty != false || busy)
+                Button("Regions") { showRegions = true }.disabled(busy)
                 Menu("Music") {
                     Button("Transpose +1") { command { try $0.transpose(by: 1) } }
                     Button("Transpose -1") { command { try $0.transpose(by: -1) } }
@@ -106,6 +108,12 @@ struct PianoRollView: View {
             }
         }
         .padding()
+        .sheet(isPresented: $showRegions) {
+            PianoRollRegionsSheet(pattern: displayedPattern) { start, loopStart, loopEnd, tailEnd, loop in
+                command { try $0.regions(patternStart: start, loopStart: loopStart, loopEnd: loopEnd,
+                                         tailEnd: tailEnd, loop: loop) }
+            }
+        }
         .onAppear {
             do { editor = try PianoRollEditBuffer(pattern: pattern) }
             catch { model.errorMessage = error.localizedDescription; close() }
@@ -267,6 +275,14 @@ struct PianoRollView: View {
                              at: CGPoint(x: 22, y: y + viewport.pitchHeight / 2))
             }
         }
+        let current = displayedPattern
+        if current.version == 3 {
+            let tailX = max(left, left + viewport.x(forTick: Double(current.loopEnd)))
+            if tailX < size.width {
+                context.fill(Path(CGRect(x: tailX, y: top, width: size.width - tailX, height: grid.height)),
+                             with: .color(.orange.opacity(0.10)))
+            }
+        }
         let first = Int64(floor(viewport.tick(at: 0) / 960))
         let last = Int64(ceil(viewport.tick(at: Double(grid.width)) / 960))
         if first <= last {
@@ -289,18 +305,97 @@ struct PianoRollView: View {
             context.fill(Path(roundedRect: rect.intersection(grid), cornerRadius: 3),
                          with: .color(editor?.selection.contains(note.id) == true ? .orange : .cyan))
         }
+        let markers: [(String, Int64, Color)] = [
+            ("START", -current.intro, .green),
+            ("LOOP", current.version == 3 ? current.loopStart : 0, .cyan),
+            ("END", current.version == 3 ? current.loopEnd : current.length, .orange),
+            ("TAIL", current.length, .red)
+        ]
+        for (label, tick, color) in markers {
+            let x = left + viewport.x(forTick: Double(tick))
+            if x >= left && x <= size.width {
+                var line = Path(); line.move(to: CGPoint(x: x, y: top)); line.addLine(to: CGPoint(x: x, y: size.height))
+                context.stroke(line, with: .color(color.opacity(0.8)), lineWidth: 1)
+                context.draw(Text(label).font(.system(size: 8, weight: .bold)).foregroundColor(color),
+                             at: CGPoint(x: x + 12, y: 20))
+            }
+        }
         if let selectionRect {
             let rect = selectionRect.offsetBy(dx: left, dy: top).intersection(grid)
             context.fill(Path(rect), with: .color(.orange.opacity(0.25)))
             context.stroke(Path(rect), with: .color(.orange), lineWidth: 1)
         }
         if Int(ov_seq_active(UInt32(pattern.slot))) == pattern.row {
-            let tick = Double(ov_seq_position(UInt32(pattern.slot))) * Double(pattern.length) / 65535
+            let tick = Double(ov_seq_position(UInt32(pattern.slot))) * Double(current.length) / 65535
             let x = left + viewport.x(forTick: tick)
             if x >= left && x <= size.width {
                 var line = Path(); line.move(to: CGPoint(x: x, y: top)); line.addLine(to: CGPoint(x: x, y: size.height))
                 context.stroke(line, with: .color(.yellow), lineWidth: 2)
             }
+        }
+    }
+}
+
+struct PianoRollRegionsSheet: View {
+    let apply: (Int64, Int64, Int64, Int64, Bool) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var start: String
+    @State private var loopStart: String
+    @State private var loopEnd: String
+    @State private var tailEnd: String
+    @State private var loop: Bool
+    @State private var message: String?
+
+    init(pattern: SequencerPattern, apply: @escaping (Int64, Int64, Int64, Int64, Bool) -> Void) {
+        self.apply = apply
+        _start = State(initialValue: String(-pattern.intro))
+        _loopStart = State(initialValue: String(pattern.version == 3 ? pattern.loopStart : 0))
+        _loopEnd = State(initialValue: String(pattern.version == 3 ? pattern.loopEnd : pattern.length))
+        _tailEnd = State(initialValue: String(pattern.length))
+        _loop = State(initialValue: pattern.loop)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Positions in ticks (960 per beat)") {
+                    field("Pattern start", $start)
+                    field("Loop start", $loopStart)
+                    field("Loop end", $loopEnd)
+                    field("Tail end", $tailEnd)
+                    Toggle("Loop", isOn: $loop)
+                }
+                Section {
+                    Text("Notes in the tail remain editable but do not start. Previously triggered notes end no later than Tail End. Applying regions changes legacy tail behavior.")
+                        .font(.footnote)
+                    if let message { Text(message).foregroundStyle(.red) }
+                }
+            }
+            .navigationTitle("Pattern regions")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Apply") {
+                        guard let start = Int64(start), let loopStart = Int64(loopStart),
+                              let loopEnd = Int64(loopEnd), let tailEnd = Int64(tailEnd),
+                              (-11520...0).contains(start), loopStart >= 0, loopStart < loopEnd,
+                              loopEnd <= tailEnd, tailEnd <= SequencerPattern.maxTicks else {
+                            message = "Require -11520 ≤ start ≤ 0 ≤ loop start < loop end ≤ tail end."
+                            return
+                        }
+                        apply(start, loopStart, loopEnd, tailEnd, loop)
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private func field(_ title: String, _ value: Binding<String>) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            TextField(title, text: value).keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing)
         }
     }
 }

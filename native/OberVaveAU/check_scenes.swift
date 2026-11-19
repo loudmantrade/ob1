@@ -279,6 +279,21 @@ struct SceneChecks {
         precondition(quantizedEditor.pattern.quantize == 240 && quantizedEditor.pattern.notes == editPattern.notes)
         quantizedEditor.undo()
         precondition(quantizedEditor.pattern == editPattern)
+        var regionEditor = try PianoRollEditBuffer(pattern: editPattern)
+        try regionEditor.regions(patternStart: 0, loopStart: 240, loopEnd: 960, tailEnd: 3840, loop: true)
+        let regionPattern = regionEditor.pattern
+        let regionJSON = try JSONEncoder().encode(regionPattern)
+        let decodedRegion = try JSONDecoder().decode(SequencerPattern.self, from: regionJSON)
+        precondition(decodedRegion == regionPattern)
+        precondition(SequencerPattern(core: regionPattern.coreClip()) == regionPattern)
+        regionEditor.undo()
+        precondition(regionEditor.pattern == editPattern)
+        regionEditor.redo()
+        precondition(regionEditor.pattern == regionPattern)
+        do {
+            try regionEditor.regions(patternStart: 0, loopStart: 0, loopEnd: 240, tailEnd: 240, loop: true)
+            preconditionFailure("Shortening cannot delete notes")
+        } catch { precondition(regionEditor.pattern == regionPattern) }
         var editor = try PianoRollEditBuffer(pattern: editPattern)
         editor.selection = [1, 2, 3]
         try editor.changeDuration(by: 120)

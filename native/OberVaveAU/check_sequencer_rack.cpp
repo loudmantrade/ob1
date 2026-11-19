@@ -752,6 +752,43 @@ static void checkLivePatternReplacement()
     std::puts("PASS live snapshot replacement: stale revision rejected, held notes release normally, next loop uses edited notes, transport and unrelated column continue");
 }
 
+static void checkRegionClip()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()};
+    auto region = std::make_unique<ov_seq_clip>(clip(0, 0));
+    region->regions_enabled = 1; region->length = 1440;
+    region->loop_start = 240; region->loop_end = 960;
+    region->notes[0].start = 720; region->notes[0].duration = 2000;
+    region->count = 2; region->notes[1] = {2, 1000, 100, 67, 100, 1};
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(region.get())); assert(ov_seq_launch(0, 0, 0)); render();
+    const auto origin = rack::players[0].origin;
+    while (rack::musicalPosition.value < origin + 1450 * music::tickUnit) render();
+    assert(ov_seq_active(0) == 0);
+    uint32_t active = 0;
+    for (const auto& note : rack::players[0].active) if (note.used) {
+        ++active; assert(note.on.data1 == 60);
+    }
+    assert(active == 1);
+    const auto expected = double(730) * 65535 / 1440;
+    assert(std::abs(double(ov_seq_position(0)) - expected) < 200);
+    auto changed = std::make_unique<ov_seq_clip>(*region);
+    changed->loop_end = 1200;
+    const auto epoch = ov_seq_scene_epoch(), revision = ov_seq_cell_revision(0, 0);
+    assert(ov_seq_replace_pattern(region.get(), changed.get(), epoch, revision, 601)); render();
+    ov_seq_edit_result result {};
+    assert(ov_seq_read_edit(&result) && result.success);
+    assert(rack::clips[0][0]->pattern.data().loopEnd == 1200);
+    assert(ov_seq_arm(0, 0, 2, 1, 4, 1)); render();
+    assert(!rack::recordings[0].recorder.data.regionsEnabled);
+    assert(ov_rack_stop_all()); render();
+    auto completion = std::make_unique<ov_seq_clip>();
+    while (ov_seq_record_ready()) assert(ov_seq_read_record(completion.get()));
+    assert(!ov_rack_take_error());
+    std::puts("PASS region clip: audio-owned looping, tail exclusion, cursor, revision-safe edits and recording reset");
+}
+
 static void checkAudition()
 {
     auto scene = std::make_unique<ov_scene_config>();
@@ -965,5 +1002,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAudition(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkRegionClip(); checkAudition(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

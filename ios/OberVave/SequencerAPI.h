@@ -14,6 +14,8 @@ typedef struct {
 typedef struct {
     uint32_t slot, row, count, loop, intro_enabled, quantize;
     int64_t length, intro;
+    uint32_t regions_enabled;
+    int64_t loop_start, loop_end;
     char name[97];
     ov_seq_note notes[OV_SEQ_NOTES];
 } ov_seq_clip;

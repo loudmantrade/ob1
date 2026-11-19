@@ -248,11 +248,14 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
     var introEnabled = true
     var loop = true
     var quantize = 0
+    var loopStart: Int64 = 0
+    var loopEnd: Int64 = 0
     var notes: [SequencerNote] = []
 
     func validate() throws {
-        guard version == 2, (0..<16).contains(slot), (0..<8).contains(row),
+        guard (version == 2 || version == 3), (0..<16).contains(slot), (0..<8).contains(row),
               (1...Self.maxTicks).contains(length), (0...11520).contains(intro),
+              (version != 3 || (loopStart >= 0 && loopStart < loopEnd && loopEnd <= length)),
               (0...3840).contains(quantize), !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               name.utf8.count <= 96, !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
               notes.count <= 1024, Set(notes.map(\.id)).count == notes.count,
@@ -267,6 +270,8 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
         clip.slot = UInt32(slot); clip.row = UInt32(row); clip.length = length; clip.intro = intro
         clip.count = UInt32(notes.count); clip.loop = loop ? 1 : 0
         clip.intro_enabled = introEnabled ? 1 : 0; clip.quantize = UInt32(quantize)
+        clip.regions_enabled = version == 3 ? 1 : 0
+        if version == 3 { clip.loop_start = loopStart; clip.loop_end = loopEnd }
         withUnsafeMutableBytes(of: &clip.name) { raw in
             raw.initializeMemory(as: UInt8.self, repeating: 0)
             raw.copyBytes(from: Array(name.utf8) + [0])
@@ -285,7 +290,7 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let incomingVersion = try c.decode(Int.self, forKey: .version)
-        guard incomingVersion == 1 || incomingVersion == 2 else {
+        guard incomingVersion == 1 || incomingVersion == 2 || incomingVersion == 3 else {
             throw SceneError.invalid("This pattern version is not supported.")
         }
         slot = try c.decode(Int.self, forKey: .slot)
@@ -297,6 +302,11 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
         loop = try c.decode(Bool.self, forKey: .loop)
         quantize = try c.decode(Int.self, forKey: .quantize)
         notes = try c.decode([SequencerNote].self, forKey: .notes)
+        if incomingVersion == 3 {
+            version = 3
+            loopStart = try c.decode(Int64.self, forKey: .loopStart)
+            loopEnd = try c.decode(Int64.self, forKey: .loopEnd)
+        }
         if incomingVersion == 1 && (length > 245760 || notes.contains { $0.duration > 245760 } || intro > 3840) {
             throw SceneError.invalid("Invalid version 1 pattern timing.")
         }
@@ -309,6 +319,9 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
         }
         length = clip.length; intro = clip.intro; introEnabled = clip.intro_enabled != 0
         loop = clip.loop != 0; quantize = Int(clip.quantize)
+        if clip.regions_enabled != 0 {
+            version = 3; loopStart = clip.loop_start; loopEnd = clip.loop_end
+        }
         notes = withUnsafeBytes(of: clip.notes) { raw in
             raw.bindMemory(to: ov_seq_note.self).prefix(Int(clip.count)).map {
                 SequencerNote(id: $0.id, start: $0.start, duration: $0.duration,
@@ -645,6 +658,22 @@ struct PianoRollEditBuffer {
         guard (0...3840).contains(grid) else { throw SceneError.invalid("Invalid quantization grid.") }
         var candidate = pattern
         candidate.quantize = grid
+        try commit(candidate)
+    }
+
+    mutating func regions(patternStart: Int64, loopStart: Int64, loopEnd: Int64,
+                          tailEnd: Int64, loop: Bool) throws {
+        guard (-11520...0).contains(patternStart), loopStart >= 0,
+              loopStart < loopEnd, loopEnd <= tailEnd, tailEnd <= SequencerPattern.maxTicks else {
+            throw SceneError.invalid("Require pattern start ≤ 0 ≤ loop start < loop end ≤ tail end.")
+        }
+        var candidate = pattern
+        candidate.version = 3
+        candidate.intro = -patternStart
+        candidate.loopStart = loopStart
+        candidate.loopEnd = loopEnd
+        candidate.length = tailEnd
+        candidate.loop = loop
         try commit(candidate)
     }
 

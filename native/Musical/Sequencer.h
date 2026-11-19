@@ -193,6 +193,7 @@ public:
              RecordMode mode, uint32_t bars, uint32_t beats, bool scenePlaying, bool recordOutput)
     {
         begin(instrument, cell, settings, now, recordOutput, false);
+        data.regionsEnabled = false; data.loopStart = data.loopEnd = 0;
         cancelBeforeBody_ = true;
         freeLength = beats == 0;
         data.length = beats ? Tick(beats) * ticksPerQuarter : maxPatternTicks;

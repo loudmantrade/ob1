@@ -298,12 +298,16 @@ std::unique_ptr<SequencerClip> prepareClip(const ov_seq_clip& input)
 {
     if (input.slot >= capacity || input.row >= music::sequencerRows ||
         input.count > music::patternNoteCapacity || input.loop > 1 || input.intro_enabled > 1 ||
+        input.regions_enabled > 1 ||
         !std::memchr(input.name, 0, sizeof(input.name))) throw EngineCreationFailure {};
     auto clip = std::make_unique<SequencerClip>();
     auto data = std::make_unique<music::PatternData>();
     data->id = input.slot * music::sequencerRows + input.row + 1;
     data->length = input.length; data->intro = input.intro;
     data->loop = input.loop; data->introEnabled = input.intro_enabled;
+    data->regionsEnabled = input.regions_enabled;
+    data->loopStart = data->regionsEnabled ? input.loop_start : 0;
+    data->loopEnd = data->regionsEnabled ? input.loop_end : 0;
     data->quantization.grid = input.quantize;
     std::copy(std::begin(input.name), std::end(input.name), data->name.begin());
     data->count = input.count;
@@ -530,6 +534,8 @@ void encodeClip(uint32_t slot, uint32_t row, const music::PatternData& data, ov_
     output.slot = slot; output.row = row; output.count = data.count;
     output.length = data.length; output.intro = data.intro;
     output.loop = data.loop; output.intro_enabled = data.introEnabled;
+    output.regions_enabled = data.regionsEnabled;
+    output.loop_start = data.loopStart; output.loop_end = data.loopEnd;
     output.quantize = uint32_t(data.quantization.grid);
     std::copy(data.name.begin(), data.name.end(), output.name);
     for (uint32_t i = 0; i < data.count; ++i) {
@@ -792,6 +798,7 @@ bool samePattern(const music::PatternData& a, const music::PatternData& b)
 {
     if (a.id != b.id || a.name != b.name || a.length != b.length || a.intro != b.intro ||
         a.introEnabled != b.introEnabled || a.loop != b.loop || a.quantization.grid != b.quantization.grid ||
+        a.regionsEnabled != b.regionsEnabled || a.loopStart != b.loopStart || a.loopEnd != b.loopEnd ||
         a.count != b.count) return false;
     for (uint32_t i = 0; i < a.count; ++i) {
         const auto& x = a.notes[i]; const auto& y = b.notes[i];
@@ -1187,9 +1194,20 @@ void renderBlock()
         stoppingRows[slot].store(players[slot].stopping());
         const auto* clip = players[slot].clip;
         const auto position = musicalPosition.value - players[slot].origin;
-        playPositions[slot].store(clip && position >= 0 ?
-            uint32_t(double(position % (clip->data().length * music::tickUnit)) * 65535 /
-                double(clip->data().length * music::tickUnit)) : 0);
+        auto cursor = position;
+        if (clip && cursor >= 0) {
+            const auto& data = clip->data();
+            const auto length = data.length * music::tickUnit;
+            if (data.loop) {
+                if (data.regionsEnabled) {
+                    const auto end = data.loopEnd * music::tickUnit;
+                    const auto start = data.loopStart * music::tickUnit;
+                    if (cursor >= end) cursor = start + (cursor - start) % (end - start);
+                } else cursor %= length;
+            }
+            cursor = std::min(cursor, length);
+            playPositions[slot].store(uint32_t(double(cursor) * 65535 / double(length)));
+        } else playPositions[slot].store(0);
     }
     const music::ClipRecorder* activeRecording = nullptr;
     for (const auto& recording : recordings)

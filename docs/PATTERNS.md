@@ -307,11 +307,17 @@ recorded note timings. Selected-note and end quantization are not yet exposed.
 
 The editor remains incomplete. Controller automation requires bounded,
 versioned events with backward-compatible decoding and audio scheduling.
-The portable player now supports an opt-in region mode with a distinct loop
-start/end and tail endpoint; it tracks releases per iteration and suppresses
-note starts in the tail. Existing clips stay in legacy mode, preserving their
-unbounded releases. This mode is not yet connected to scene serialization or
-the editor; the v2 `length`/`intro` format cannot represent it.
+The Regions command enables version 3 for the edited pattern, with numeric tick
+positions for pattern start, loop start/end and tail end, and LOOP/ONE-SHOT.
+The editor displays these markers and shades the non-triggering tail. Each
+iteration has independently owned note releases, capped at its tail end.
+Notes stored after loop end remain in the pattern and are not triggered.
+Shortening rejects out-of-range note starts rather than deleting them.
+Version 1/2 clips remain in legacy mode with their original unbounded release
+behavior until the user applies Regions; that explicit conversion can change
+their tail behavior. A fresh recording replaces regions with legacy defaults.
+Marker dragging, bar/beat/tick entry and arbitrary positive pattern starts
+are not yet supported.
 Acceptance requires portable timing/ownership and scene-migration regressions,
 the existing sequencer and AU suites, a signed iPad build, and the physical
 iPad gesture/audio checklist from the implementation specification.
