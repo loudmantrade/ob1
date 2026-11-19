@@ -368,6 +368,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var pendingPatternTransfer: PendingPatternTransfer?
     @Published var pendingPianoPublication: PendingPianoPublication?
     @Published var pendingSequencerHistory: PendingSequencerHistory?
+    @Published var pendingSequencerSettings: PendingSequencerSettings?
     @Published var sequencerHistory = SequencerHistory()
     @Published var sequencerHistoryJump: HistoryJump?
     @Published var sceneParameterHistory = SceneParameterHistory()
@@ -382,6 +383,9 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     var pianoRollViewports: [Int: PianoRollViewport] = [:]
     var pianoRollHistories: [Int: PianoRollEditBuffer] = [:]
     var patternDefaults = PatternDefaultLibrary()
+    var sequencerDefaults: [String: SequencerDefault] = [:]
+    private var sequencerDefaultsAvailable = true
+    private let sequencerDefaultsKey = "io.github.joakimeriksson.obervave.sequencer-defaults"
     private var patternDefaultsAvailable = true
     var sceneSessionKey = UUID().uuidString
     @Published var sceneSessions: [String: SceneSessionState] = [:]
@@ -524,6 +528,19 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             return cc == 255 ? -1 : cc
         }
         super.init()
+        if let data = UserDefaults.standard.data(forKey: sequencerDefaultsKey) {
+            do {
+                let saved = try JSONDecoder().decode([String: SequencerDefault].self, from: data)
+                guard saved.keys.allSatisfy({ !$0.isEmpty }) else {
+                    throw SceneError.invalid("Invalid sequencer default scene key.")
+                }
+                for value in saved.values { try value.validate() }
+                sequencerDefaults = saved
+            } catch {
+                sequencerDefaultsAvailable = false
+                errorMessage = "Could not load sequencer defaults: \(error.localizedDescription)"
+            }
+        }
         if let data = UserDefaults.standard.data(forKey: presetDefaultsKey) {
             do {
                 let saved = try JSONDecoder().decode([String: StoredPreset].self, from: data)
@@ -1153,6 +1170,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             errorMessage = "Pattern defaults could not be loaded and will not be overwritten."
             return false
         }
+
         do {
             try updated.validate()
             let data = try JSONEncoder().encode(updated)
@@ -1161,6 +1179,23 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             return true
         } catch {
             errorMessage = "Could not save pattern defaults: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    @discardableResult
+    func persistSequencerDefaults(_ updated: [String: SequencerDefault]) -> Bool {
+        guard sequencerDefaultsAvailable else {
+            errorMessage = "Sequencer defaults could not be loaded and will not be overwritten."
+            return false
+        }
+        do {
+            for value in updated.values { try value.validate() }
+            UserDefaults.standard.set(try JSONEncoder().encode(updated), forKey: sequencerDefaultsKey)
+            sequencerDefaults = updated
+            return true
+        } catch {
+            errorMessage = "Could not save sequencer defaults: \(error.localizedDescription)"
             return false
         }
     }
@@ -1837,7 +1872,8 @@ struct ContentView: View {
             .padding(.bottom, 6)
         }
         }
-        .disabled(model.sceneSwitchPending || model.pendingSceneParameterHistory != nil)
+        .disabled(model.sceneSwitchPending || model.pendingSceneParameterHistory != nil ||
+                  model.pendingSequencerSettings != nil)
         .padding(.top, 10)
         .background(Color(red: 0.055, green: 0.075, blue: 0.11).ignoresSafeArea())
         .preferredColorScheme(.dark)

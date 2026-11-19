@@ -344,7 +344,18 @@ atomically; conflicts are rejected
 without changing any parameter or restarting playback. If the external MIDI
 event queue overflows, the parameter history is cleared and an error is shown
 rather than preserving an incomplete history. This parameter history does not
-yet cover presets, instrument management, all scene settings or mixer operations.
+yet cover preset selection, instrument management, all scene settings or mixer operations.
+
+The sequencer's DEFAULT button saves its launch and recording options, column
+mixer levels, pan, mute, solo and recording lengths when held and confirmed. Tap it
+to restore those settings as one sequencer-history step. Pattern contents have
+their own defaults and are not changed by this action. The mixer is checked
+and restored atomically without stopping playback; if an instrument or mixer
+setting changed meanwhile, the operation is rejected. Defaults are local to
+the device and keyed by scene. The first scene save establishes a sequencer
+default if none exists; for an older scene, its saved mixer and recording
+lengths form the baseline, while launch and recording options start from the
+current options.
 
 On the synth screen, tap DEFAULT to restore the current preset's default sound
 and MIDI assignments; hold it and confirm to update that default from an

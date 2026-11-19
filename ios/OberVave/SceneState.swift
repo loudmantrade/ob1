@@ -382,6 +382,54 @@ enum SequencerRecordMode: Int, CaseIterable {
     }
 }
 
+struct SequencerDefault: Codable, Equatable {
+    struct Column: Codable, Equatable {
+        var slot: Int
+        var level: Double
+        var pan: Double
+        var muted: Bool
+        var recordBeats: Int
+        var solo = false
+
+        init(slot: Int, level: Double, pan: Double, muted: Bool, recordBeats: Int, solo: Bool = false) {
+            self.slot = slot; self.level = level; self.pan = pan; self.muted = muted
+            self.recordBeats = recordBeats; self.solo = solo
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            slot = try c.decode(Int.self, forKey: .slot)
+            level = try c.decode(Double.self, forKey: .level)
+            pan = try c.decode(Double.self, forKey: .pan)
+            muted = try c.decode(Bool.self, forKey: .muted)
+            recordBeats = try c.decode(Int.self, forKey: .recordBeats)
+            solo = try c.decodeIfPresent(Bool.self, forKey: .solo) ?? false
+        }
+    }
+
+    var launchGrid: Int
+    var recordMode: Int
+    var countBars: Int
+    var recordOutput: Bool
+    var columns: [Column]
+
+    func validate() throws {
+        guard (0...2).contains(launchGrid), SequencerRecordMode(rawValue: recordMode) != nil,
+              (1...4).contains(countBars), columns.count <= 16,
+              Set(columns.map(\.slot)).count == columns.count,
+              columns.allSatisfy({ (0..<16).contains($0.slot) && $0.level.isFinite &&
+                  (-48...0).contains($0.level) && $0.pan.isFinite && (-1...1).contains($0.pan) &&
+                  (0...256).contains($0.recordBeats) }) else {
+            throw SceneError.invalid("Invalid sequencer default settings.")
+        }
+    }
+}
+
+struct SequencerSettingsEdit: Equatable {
+    var before: SequencerDefault
+    var after: SequencerDefault
+}
+
 struct NoteQuantization: Codable, Equatable {
     var grid: Int
     var strength: Int
@@ -1399,6 +1447,7 @@ struct SequencerHistoryEntry {
     var after: [SequencerCellSnapshot]
     var title = "Pattern edit"
     var changesPatternDefaults = false
+    var settings: SequencerSettingsEdit? = nil
 }
 
 struct HistoryJump {
@@ -1412,7 +1461,8 @@ struct SequencerHistory {
     private static let limit = 32
 
     mutating func record(_ entry: SequencerHistoryEntry) {
-        guard zip(entry.before, entry.after).contains(where: { $0.pattern != $1.pattern }) else { return }
+        guard entry.settings.map({ $0.before != $0.after }) == true ||
+                zip(entry.before, entry.after).contains(where: { $0.pattern != $1.pattern }) else { return }
         undoStack.append(entry)
         if undoStack.count > Self.limit { undoStack.removeFirst() }
         redoStack.removeAll()
@@ -1441,6 +1491,15 @@ struct PendingSequencerHistory {
     var entry: SequencerHistoryEntry
     var undo: Bool
     var recordingNewEntry: Bool
+}
+
+struct PendingSequencerSettings {
+    var token: UInt64
+    var epoch: UInt64
+    var entry: SequencerHistoryEntry
+    var target: SequencerDefault
+    var undo: Bool
+    var recording: Bool
 }
 
 struct PendingPianoPublication {

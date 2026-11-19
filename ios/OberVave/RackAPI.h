@@ -76,6 +76,15 @@ int ov_rack_change_route(uint32_t slot, uint32_t mask,
    The acknowledgement uses the parameter-result queue. */
 int ov_rack_change_sound(uint32_t slot, const ov_instrument_config *expected,
                          const ov_instrument_config *replacement, uint64_t epoch, uint64_t token);
+/* Atomically check and replace the mixer fields of distinct instruments. */
+typedef struct {
+    uint32_t slot;
+    float expected_level, expected_pan, replacement_level, replacement_pan;
+    uint32_t expected_mute, replacement_mute;
+    uint32_t expected_solo, replacement_solo;
+} ov_rack_mixer_change;
+int ov_rack_change_mixer(const ov_rack_mixer_change *changes, uint32_t count,
+                         uint64_t epoch, uint64_t token);
 /* Post-instrument level/pan/mute stereo peak, normalized to 0...65535; read clears it. */
 uint32_t ov_rack_take_level(uint32_t slot);
 uint32_t ov_rack_stop_generation(void);

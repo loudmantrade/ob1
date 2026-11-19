@@ -254,6 +254,41 @@ static void checkAtomicSound()
     assert(ov_rack_take_error() == 2);
     std::puts("PASS atomic sound: isolated parameters and CCs, conflicts, epoch and playback continuity");
 }
+static void checkAtomicMixer()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120;
+    scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
+    auto backing = std::make_unique<ov_seq_clip>(clip(1, 0));
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(backing.get()) && ov_seq_launch(1, 0, 0)); render();
+    const auto epoch = ov_seq_scene_epoch();
+    ov_rack_mixer_change changes[] {
+        {0, -6, 0, -6, .25f, 0, 1, 0, 1},
+        {1, -6, 0, -12, -.5f, 0, 0, 0, 0}
+    };
+    ov_rack_parameter_result result {};
+    assert(ov_rack_change_mixer(changes, 2, epoch, 101)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.success && result.token == 101);
+    assert(rack::scene->slots[0]->config.level_db == -6);
+    assert(rack::scene->slots[0]->config.muted == 1 && rack::soloMask == 1);
+    assert(rack::scene->slots[1]->config.pan == -.5f && ov_seq_active(1) == 0);
+    changes[0] = {0, -6, .25f, -3, 0, 1, 0, 1, 0};
+    changes[1].expected_level = -11;
+    assert(ov_rack_change_mixer(changes, 2, epoch, 102)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    assert(rack::scene->slots[0]->config.level_db == -6);
+    changes[1].expected_level = -12;
+    changes[1].expected_pan = -.5f;
+    assert(ov_rack_change_mixer(changes, 2, epoch - 1, 103)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    changes[1].slot = 0;
+    assert(!ov_rack_change_mixer(changes, 2, epoch, 104));
+    assert(ov_rack_take_error() == 2);
+    assert(ov_seq_active(1) == 0);
+    std::puts("PASS atomic mixer: multi-slot restore, conflict and epoch rejection, playback continuity");
+}
+
 static void checkRack()
 {
     auto scene = std::make_unique<ov_scene_config>();
@@ -1341,5 +1376,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicCellHistory(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkAtomicMixer(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicCellHistory(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

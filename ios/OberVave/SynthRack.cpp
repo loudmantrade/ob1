@@ -325,6 +325,11 @@ struct SoundChangeRequest final : Retired {
     uint32_t slot = 0;
     uint64_t epoch = 0, token = 0;
 };
+struct MixerChangeRequest final : Retired {
+    std::array<ov_rack_mixer_change, capacity> changes {};
+    uint32_t count = 0;
+    uint64_t epoch = 0, token = 0;
+};
 constexpr uint32_t parameterResultCapacity = 16;
 std::array<ov_rack_parameter_result, parameterResultCapacity> parameterResults {};
 std::atomic<uint32_t> parameterRead {0}, parameterWrite {0}, parameterOutstanding {0};
@@ -481,7 +486,7 @@ void forgetPedals(uint32_t slot)
 }
 
 enum class Kind { MIDI, Audition, StopAll, SeqClip, SeqEdit, SeqChangeCells, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
-    SeqFinish, SourceClose, Parameter, ParameterChange, RouteChange, SoundChange, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
+    SeqFinish, SourceClose, Parameter, ParameterChange, RouteChange, SoundChange, MixerChange, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
 struct Command {
     Kind kind = Kind::MIDI;
     uint32_t slot = 0, a = 0, b = 0, c = 0, due = 0;
@@ -916,6 +921,32 @@ bool samePattern(const music::PatternData& a, const music::PatternData& b)
 void apply(const Command& c)
 {
     if (c.padAcknowledgement) padCommands[c.slot][c.a].fetch_sub(1);
+    if (c.kind == Kind::MixerChange) {
+        auto* request = static_cast<MixerChangeRequest*>(c.object);
+        bool valid = request->epoch == sceneEpoch.load();
+        for (uint32_t i = 0; i < request->count && valid; ++i) {
+            const auto& change = request->changes[i];
+            const auto& inst = scene->slots[change.slot];
+            valid = inst && inst->config.level_db == change.expected_level &&
+                inst->config.pan == change.expected_pan && inst->config.muted == change.expected_mute &&
+                ((soloMask >> change.slot) & 1u) == change.expected_solo;
+        }
+        if (valid) for (uint32_t i = 0; i < request->count; ++i) {
+            const auto& change = request->changes[i];
+            auto& config = scene->slots[change.slot]->config;
+            config.level_db = change.replacement_level;
+            config.pan = change.replacement_pan;
+            config.muted = change.replacement_mute;
+            if (change.replacement_solo) soloMask |= uint16_t(1u << change.slot);
+            else soloMask &= uint16_t(~(1u << change.slot));
+            publish(change.slot);
+        }
+        const auto write = parameterWrite.load(std::memory_order_relaxed);
+        parameterResults[write % parameterResultCapacity] = {request->token, valid ? 1u : 0u};
+        parameterWrite.store(write + 1, std::memory_order_release);
+        retire(request);
+        return;
+    }
     if (c.kind == Kind::SoundChange) {
         auto* request = static_cast<SoundChangeRequest*>(c.object);
         auto& pointer = scene->slots[request->slot];
@@ -2020,6 +2051,35 @@ int ov_rack_change_sound(uint32_t slot, const ov_instrument_config* expected,
             parameterOutstanding.fetch_sub(1); error.store(4); return 0;
         }
         Command command; command.kind = Kind::SoundChange; command.object = request.get();
+        if (!enqueue(command)) { parameterOutstanding.fetch_sub(1); return 0; }
+        request.release(); return 1;
+    } catch (const std::bad_alloc&) { error.store(3); return 0; }
+}
+int ov_rack_change_mixer(const ov_rack_mixer_change* changes, uint32_t count,
+                         uint64_t epoch, uint64_t token)
+{
+    using namespace rack;
+    if (!changes || !count || count > capacity) { error.store(2); return 0; }
+    try {
+        auto request = std::make_unique<MixerChangeRequest>();
+        uint32_t seen = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& c = changes[i];
+            if (c.slot >= capacity || (seen & (1u << c.slot)) ||
+                !std::isfinite(c.expected_level) || c.expected_level < -48 || c.expected_level > 0 ||
+                !std::isfinite(c.replacement_level) || c.replacement_level < -48 || c.replacement_level > 0 ||
+                !std::isfinite(c.expected_pan) || std::abs(c.expected_pan) > 1 ||
+                !std::isfinite(c.replacement_pan) || std::abs(c.replacement_pan) > 1 ||
+                c.expected_mute > 1 || c.replacement_mute > 1 ||
+                c.expected_solo > 1 || c.replacement_solo > 1) { error.store(2); return 0; }
+            seen |= 1u << c.slot;
+            request->changes[i] = c;
+        }
+        request->count = count; request->epoch = epoch; request->token = token;
+        if (parameterOutstanding.fetch_add(1) >= parameterResultCapacity) {
+            parameterOutstanding.fetch_sub(1); error.store(4); return 0;
+        }
+        Command command; command.kind = Kind::MixerChange; command.object = request.get();
         if (!enqueue(command)) { parameterOutstanding.fetch_sub(1); return 0; }
         request.release(); return 1;
     } catch (const std::bad_alloc&) { error.store(3); return 0; }

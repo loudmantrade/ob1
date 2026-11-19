@@ -143,12 +143,16 @@ extension OberVaveModel {
     }
 
     private func advanceSequencerHistoryJump() {
-        guard let jump = sequencerHistoryJump, jump.remaining > 0 else {
-            sequencerHistoryJump = nil
-            return
+        while let jump = sequencerHistoryJump, jump.remaining > 0 {
+            let count = jump.undo ? sequencerHistory.undoStack.count : sequencerHistory.redoStack.count
+            guard count > 0 else { sequencerHistoryJump = nil; return }
+            applySequencerHistory(undo: jump.undo)
+            if pendingSequencerHistory != nil || pendingSequencerSettings != nil { return }
+            let after = jump.undo ? sequencerHistory.undoStack.count : sequencerHistory.redoStack.count
+            guard after == count - 1 else { sequencerHistoryJump = nil; return }
+            sequencerHistoryJump?.remaining -= 1
         }
-        applySequencerHistory(undo: jump.undo)
-        if pendingSequencerHistory == nil { sequencerHistoryJump = nil }
+        sequencerHistoryJump = nil
     }
 
     func syncExternalParameterHistory(finish: Bool = false) {
@@ -311,6 +315,25 @@ extension OberVaveModel {
     func syncSequencerState() {
         var parameterResult = ov_rack_parameter_result()
         while ov_rack_read_parameter_result(&parameterResult) != 0 {
+            if let pending = pendingSequencerSettings, pending.token == parameterResult.token {
+                pendingSequencerSettings = nil
+                if parameterResult.success != 0 && pending.epoch == ov_seq_scene_epoch() {
+                    applySequencerSettingsLocally(pending.target)
+                    if pending.recording {
+                        sequencerHistory.record(pending.entry)
+                    } else {
+                        sequencerHistory.acknowledge(pending.entry, undo: pending.undo)
+                        if sequencerHistoryJump != nil {
+                            sequencerHistoryJump?.remaining -= 1
+                            advanceSequencerHistoryJump()
+                        }
+                    }
+                } else {
+                    sequencerHistoryJump = nil
+                    errorMessage = "The sequencer settings changed; the default was not applied."
+                }
+                continue
+            }
             if let pending = pendingSceneParameterHistory, pending.token == parameterResult.token {
                 pendingSceneParameterHistory = nil
                 if parameterResult.success != 0 && pending.epoch == ov_seq_scene_epoch() {
@@ -724,6 +747,16 @@ extension OberVaveModel {
             guard persistPatternDefaults(updated) else {
                 throw SceneError.invalid("Could not save the scene's pattern defaults.")
             }
+            var sequenceDefaults = sequencerDefaults
+            if newKey != sceneSessionKey {
+                sequenceDefaults[newKey] = sequenceDefaults[sceneSessionKey]
+            }
+            if sequenceDefaults[newKey] == nil {
+                sequenceDefaults[newKey] = currentSequencerSettings()
+            }
+            guard persistSequencerDefaults(sequenceDefaults) else {
+                throw SceneError.invalid("Could not save the scene's sequencer default.")
+            }
             try encoder.encode(document).write(to: url, options: .atomic)
             if pendingSceneURL == nil, sceneFileURL != nil {
                 var previous = currentSceneSession()
@@ -755,6 +788,18 @@ extension OberVaveModel {
                 guard persistPatternDefaults(updated) else {
                     throw SceneError.invalid("Could not load the scene's pattern defaults.")
                 }
+                if sequencerDefaults[key] == nil {
+                    var baseline = currentSequencerSettings()
+                    baseline.columns = document.instruments.sorted { $0.slot < $1.slot }.map {
+                        SequencerDefault.Column(slot: $0.slot, level: Double(Float($0.levelDB)),
+                            pan: Double(Float($0.pan)), muted: $0.muted, recordBeats: $0.recordBeats)
+                    }
+                    var defaults = sequencerDefaults
+                    defaults[key] = baseline
+                    guard persistSequencerDefaults(defaults) else {
+                        throw SceneError.invalid("Could not load the scene's sequencer default.")
+                    }
+                }
             }
             let folder = try scenesFolder()
             let fileURL = url.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL ? url : nil
@@ -782,6 +827,7 @@ extension OberVaveModel {
             syncSequencerState()
             syncExternalParameterHistory(finish: true)
             guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
+                  pendingSequencerSettings == nil,
                   pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty, activeSceneValueEdits.isEmpty, recordingPattern == nil,
                   ov_seq_record_state() == 0, pendingSceneName == nil, !sceneSwitchPending else {
                 throw SceneError.invalid("Finish recording and pending pattern edits before loading a scene.")
@@ -801,7 +847,8 @@ extension OberVaveModel {
                     self.syncExternalParameterHistory(finish: true)
                     guard self.recordingPattern == nil, ov_seq_record_state() == 0,
                           self.pendingPatternTransfer == nil, self.pendingPianoPublication == nil,
-                          self.pendingSequencerHistory == nil, self.pendingSceneParameterHistory == nil,
+                          self.pendingSequencerHistory == nil, self.pendingSequencerSettings == nil,
+                          self.pendingSceneParameterHistory == nil,
                           self.activeParameterEdits.isEmpty, self.activeSceneValueEdits.isEmpty else {
                         throw SceneError.invalid("The scene changed while switching. Finish recording and try again.")
                     }
@@ -836,6 +883,7 @@ extension OberVaveModel {
     private func applyScene(_ document: RackSceneDocument) throws {
         try document.validate()
         guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
+              pendingSequencerSettings == nil,
               pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty, activeSceneValueEdits.isEmpty else { throw SceneError.invalid("Wait for the pending edit.") }
         guard recordingPattern == nil else { throw SceneError.invalid("Finish recording before loading a scene.") }
         var c = ov_scene_config()
@@ -898,6 +946,11 @@ extension OberVaveModel {
 
     func applySequencerHistory(undo: Bool) {
         guard var entry = sequencerHistory.next(undo: undo) else { return }
+        if let edit = entry.settings {
+            submitSequencerSettings(entry: entry, expected: undo ? edit.after : edit.before,
+                                    target: undo ? edit.before : edit.after, undo: undo, recording: false)
+            return
+        }
         let expected = undo ? entry.after : entry.before
         let live = expected.map { sequencerSnapshot($0.cell) }
         guard zip(expected, live).allSatisfy({
@@ -910,6 +963,89 @@ extension OberVaveModel {
         submitSequencerHistory(entry, undo: undo, recordingNewEntry: false)
     }
 
+    func currentSequencerSettings() -> SequencerDefault {
+            SequencerDefault(launchGrid: launchGrid, recordMode: recordMode.rawValue,
+                countBars: recordCountBars, recordOutput: recordOutput,
+                columns: instruments.sorted { $0.slot < $1.slot }.map {
+                    SequencerDefault.Column(slot: $0.slot, level: Double(Float($0.levelDB)),
+                        pan: Double(Float($0.pan)), muted: $0.muted, recordBeats: $0.recordBeats,
+                        solo: soloSlots.contains($0.slot))
+                })
+        }
+
+        func saveSequencerDefault() {
+            guard !sceneSwitchPending, pendingSceneName == nil, pendingSequencerHistory == nil,
+                  pendingSequencerSettings == nil, pendingPatternTransfer == nil,
+                  pendingPianoPublication == nil, ov_seq_record_state() == 0 else {
+                errorMessage = "Finish recording and pending edits before saving the sequencer default."
+                return
+            }
+            let value = currentSequencerSettings()
+            var defaults = sequencerDefaults
+            defaults[sceneSessionKey] = value
+            if persistSequencerDefaults(defaults) { sceneStatus = "Saved sequencer default" }
+        }
+
+        func restoreSequencerDefault() {
+            guard let value = sequencerDefaults[sceneSessionKey] else {
+                errorMessage = "This scene has no saved sequencer default. Hold DEFAULT to save one."
+                return
+            }
+            let before = currentSequencerSettings()
+            let entry = SequencerHistoryEntry(before: [], after: [], title: "Restore sequencer default",
+                settings: SequencerSettingsEdit(before: before, after: value))
+            submitSequencerSettings(entry: entry, expected: before, target: value, undo: false, recording: true)
+        }
+
+        private func submitSequencerSettings(entry: SequencerHistoryEntry, expected: SequencerDefault,
+                                             target: SequencerDefault, undo: Bool, recording: Bool) {
+            guard pendingSceneName == nil, !sceneSwitchPending, pendingPatternTransfer == nil,
+                  pendingPianoPublication == nil, pendingSequencerHistory == nil,
+                  pendingSequencerSettings == nil, pendingSceneParameterHistory == nil,
+                  ov_seq_record_state() == 0, currentSequencerSettings() == expected,
+                  expected.columns.map(\.slot) == target.columns.map(\.slot) else {
+                errorMessage = "Finish pending edits and ensure the sequencer instruments have not changed."
+                return
+            }
+            do { try target.validate() }
+            catch { errorMessage = error.localizedDescription; return }
+            guard expected != target else { return }
+            let changes = zip(expected.columns, target.columns).map { old, new in
+                ov_rack_mixer_change(slot: UInt32(old.slot), expected_level: Float(old.level),
+                    expected_pan: Float(old.pan), replacement_level: Float(new.level), replacement_pan: Float(new.pan),
+                    expected_mute: old.muted ? 1 : 0, replacement_mute: new.muted ? 1 : 0,
+                    expected_solo: old.solo ? 1 : 0, replacement_solo: new.solo ? 1 : 0)
+            }
+            if changes.isEmpty {
+                applySequencerSettingsLocally(target)
+                if recording { sequencerHistory.record(entry) }
+                else { sequencerHistory.acknowledge(entry, undo: undo) }
+                return
+            }
+            sceneParameterToken &+= 1
+            let epoch = ov_seq_scene_epoch()
+            let accepted = changes.withUnsafeBufferPointer {
+                ov_rack_change_mixer($0.baseAddress, UInt32($0.count), epoch, sceneParameterToken)
+            }
+            guard accepted != 0 else { errorMessage = "Could not queue sequencer settings."; return }
+            pendingSequencerSettings = PendingSequencerSettings(token: sceneParameterToken, epoch: epoch,
+                entry: entry, target: target, undo: undo, recording: recording)
+        }
+
+        private func applySequencerSettingsLocally(_ settings: SequencerDefault) {
+            launchGrid = settings.launchGrid
+            if let mode = SequencerRecordMode(rawValue: settings.recordMode) { recordMode = mode }
+            recordCountBars = settings.countBars
+            recordOutput = settings.recordOutput
+            for column in settings.columns {
+                guard let index = instruments.firstIndex(where: { $0.slot == column.slot }) else { continue }
+                instruments[index].levelDB = column.level
+                instruments[index].pan = column.pan
+                instruments[index].muted = column.muted
+                instruments[index].recordBeats = column.recordBeats
+                if column.solo { soloSlots.insert(column.slot) } else { soloSlots.remove(column.slot) }
+            }
+        }
     private func submitSequencerHistory(_ entry: SequencerHistoryEntry, undo: Bool, recordingNewEntry: Bool) {
         guard pendingSceneName == nil, !sceneSwitchPending, pendingPatternTransfer == nil,
               pendingPianoPublication == nil, pendingSequencerHistory == nil, ov_seq_record_state() == 0 else {
@@ -1327,10 +1463,12 @@ struct SequencerView: View {
     @State private var horizontalViewport = CGRect.zero
     @State private var rootFrame = CGRect.zero
     @State private var meters = [Double](repeating: 0, count: 16)
+    @State private var confirmsDefault = false
     private var width: CGFloat { max(1, model.keyboardChannelWidth) }
     private var padHeight: CGFloat { width }
     private var historyBusy: Bool {
-        model.pendingSequencerHistory != nil || model.sequencerHistoryJump != nil || model.pendingPatternTransfer != nil ||
+        model.pendingSequencerHistory != nil || model.pendingSequencerSettings != nil ||
+            model.sequencerHistoryJump != nil || model.pendingPatternTransfer != nil ||
             model.pendingPianoPublication != nil || model.pendingSceneName != nil ||
             model.sceneSwitchPending || !model.recordingPhases.isEmpty
     }
@@ -1363,6 +1501,11 @@ struct SequencerView: View {
                 }
                 .disabled(model.sequencerHistory.redoStack.isEmpty || historyBusy)
                 .contextMenu { sequencerHistoryMenu(undo: false) }
+                PatternDefaultButton(enabled: !historyBusy, subject: "Sequencer") { save in
+                    if save { confirmsDefault = true }
+                    else { model.restoreSequencerDefault() }
+                }
+                .frame(width: 76, height: 36)
                 Spacer()
                 if !model.recordingPhases.isEmpty {
                     Button {
@@ -1453,6 +1596,10 @@ struct SequencerView: View {
             cancelGesture(); replacement = nil; deleting = nil; pianoRoll = nil; afterMenu = nil; menuPattern = nil
         }
         .onDisappear { cancelGesture() }
+        .confirmationDialog("Save the current sequencer settings as the default?", isPresented: $confirmsDefault) {
+            Button("Update Sequencer Default") { model.saveSequencerDefault() }
+            Button("Cancel", role: .cancel) {}
+        }
         .sheet(item: $editing) { pattern in
             SequencerPatternEditor(pattern: pattern) { model.storePattern($0, expected: pattern) }
         }

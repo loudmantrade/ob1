@@ -73,6 +73,36 @@ struct SceneChecks {
         print("PASS pattern defaults: scene isolation, independent copy, move, deletion, validation and serialization")
     }
 
+    static func checkSequencerDefaults() throws {
+        let column = SequencerDefault.Column(slot: 0, level: -6, pan: 0.25, muted: false, recordBeats: 16)
+        let baseline = SequencerDefault(launchGrid: 2, recordMode: 0, countBars: 1,
+                                        recordOutput: true, columns: [column])
+        try baseline.validate()
+        let decoded = try JSONDecoder().decode(SequencerDefault.self, from: JSONEncoder().encode(baseline))
+        precondition(decoded == baseline)
+        let legacy = Data(#"{"slot":0,"level":-6,"pan":0.25,"muted":false,"recordBeats":16}"#.utf8)
+        let legacyColumn = try JSONDecoder().decode(SequencerDefault.Column.self, from: legacy)
+        precondition(legacyColumn == column)
+        var after = baseline
+        after.columns[0].muted = true
+        after.launchGrid = 1
+        var history = SequencerHistory()
+        let entry = SequencerHistoryEntry(before: [], after: [], title: "Restore sequencer default",
+            settings: SequencerSettingsEdit(before: baseline, after: after))
+        history.record(entry)
+        precondition(history.undoStack.count == 1)
+        history.acknowledge(entry, undo: true)
+        precondition(history.redoStack.count == 1)
+        history.acknowledge(entry, undo: false)
+        precondition(history.undoStack.count == 1)
+        after.columns.append(column)
+        do {
+            try after.validate()
+            fatalError("Duplicate mixer column accepted")
+        } catch { }
+        print("PASS sequencer defaults: validation, serialization and independent undo/redo")
+    }
+
     static func checkDefaultGesture() {
         var gesture = DefaultButtonGesture()
         precondition(gesture.down(at: 0).isEmpty)
@@ -307,6 +337,7 @@ struct SceneChecks {
     }
 
     static func main() throws {
+        try checkSequencerDefaults()
         try checkPatternDefaults()
         checkDefaultGesture()
         checkCircularLayout()
