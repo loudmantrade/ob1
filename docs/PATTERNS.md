@@ -264,7 +264,7 @@ Parameters/MIDI still use the existing bounded command stream without GUI locks.
 One portable gesture state machine resolves all pad touch actions. Populated
 single taps wait 240 ms; 450 ms is hold, 8 pt is the drag threshold. Direct
 central drag MOVEs; tap+drag or hold+drag COPY; tap+stationary hold requests
-DELETE on release; double tap opens the deferred Piano Roll placeholder without
+DELETE on release; double tap opens the Piano Roll without
 musical actions. Plain hold opens accessible Pattern actions on release.
 Empty/recording short taps dispatch immediately. MIDI timing remains on audio;
 the touch timer only resolves user intent. Drag starts within 23 pt of the
@@ -282,16 +282,18 @@ same-cell/off-grid drops are no-ops.
 
 ### Piano Roll implementation in progress
 
-The existing double-tap action still opens a placeholder; the Piano Roll is not
-yet available. The tested control-side foundation consists of independent
-time/pitch viewport transforms, pinch anchoring and touch-state arbitration,
-plus bounded group note edits and undo/redo. A revision-checked same-cell
-replacement API now swaps immutable snapshots without restarting active or
-queued playback. Already-sounding notes retain their original release times;
-future onsets use the new data. The editor does not yet invoke this API.
+Double-tapping a populated cell opens a Piano Roll showing the notes, keyboard,
+timeline and playback position. Two fingers pan and independently zoom the
+axes. A stationary hold on empty space creates a note; drag empty space to
+select a rectangle. Drag a note body to move the selection, its left edge to
+change velocity, or its right edge to change duration. Tapping a note selects
+it; tap then drag copies the selection, and tap then hold deletes it.
+Undo and Redo operate on whole gestures. Audio publication is revision-checked
+and does not restart active or queued playback. Already-sounding notes retain
+their original release times; future onsets use the new data.
 
-The remaining implementation must connect a coordinated touch editor and
-source-owned audition to the publication API. Controller automation requires bounded,
+The editor remains incomplete: audition, explicit clipboard and musical
+operations are not yet exposed. Controller automation requires bounded,
 versioned events with backward-compatible decoding and audio scheduling.
 Independent loop/tail markers require a versioned migration preserving old
 loop behavior, plus iteration-specific note release and real-time capacity

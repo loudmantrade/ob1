@@ -480,6 +480,36 @@ struct PianoRollTouchArbitration {
     mutating func cancel() { mode = .idle }
 }
 
+enum PianoRollNoteHit {
+    enum Zone: Equatable { case velocity, body, duration }
+    static func zone(x: Double, width: Double) -> Zone {
+        let edge = min(12, max(0, width) / 3)
+        if x < edge { return .velocity }
+        if x >= width - edge { return .duration }
+        return .body
+    }
+
+    static func rectangle(_ note: SequencerNote, viewport: PianoRollViewport) -> CoreGraphics.CGRect {
+        CoreGraphics.CGRect(x: viewport.x(forTick: Double(note.start)),
+            y: viewport.y(forPitch: Double(note.pitch)),
+            width: max(2, Double(note.duration) * viewport.beatWidth / 960),
+            height: viewport.pitchHeight)
+    }
+
+    static func hit(point: CoreGraphics.CGPoint, notes: [SequencerNote], viewport: PianoRollViewport)
+        -> (id: UInt64, zone: Zone)? {
+        for note in notes.reversed() {
+            let rect = rectangle(note, viewport: viewport)
+            let target = rect.insetBy(dx: -max(0, (18 - rect.width) / 2), dy: 0)
+            if target.contains(point) {
+                let relative = min(rect.width, max(0, point.x - rect.minX))
+                return (note.id, zone(x: relative, width: rect.width))
+            }
+        }
+        return nil
+    }
+}
+
 struct PianoRollEditBuffer {
     enum Scale: CaseIterable {
         case chromatic, major, naturalMinor, harmonicMinor, melodicMinor

@@ -242,6 +242,18 @@ struct SceneChecks {
             SequencerNote(id: 2, start: 360, duration: 480, pitch: 64, velocity: 90),
             SequencerNote(id: 3, start: 600, duration: 960, pitch: 67, velocity: 120, output: false)
         ]
+        let hitViewport = PianoRollViewport()
+        let noteRect = PianoRollNoteHit.rectangle(editPattern.notes[1], viewport: hitViewport)
+        let y = noteRect.midY
+        precondition(PianoRollNoteHit.hit(point: .init(x: noteRect.minX + 1, y: y),
+            notes: editPattern.notes, viewport: hitViewport)?.zone == .velocity)
+        precondition(PianoRollNoteHit.hit(point: .init(x: noteRect.midX, y: y),
+            notes: editPattern.notes, viewport: hitViewport)?.zone == .body)
+        precondition(PianoRollNoteHit.hit(point: .init(x: noteRect.maxX - 1, y: y),
+            notes: editPattern.notes, viewport: hitViewport)?.zone == .duration)
+        precondition(PianoRollNoteHit.zone(x: 0, width: 2) == .velocity &&
+                     PianoRollNoteHit.zone(x: 1, width: 2) == .body &&
+                     PianoRollNoteHit.zone(x: 2, width: 2) == .duration)
         var editor = try PianoRollEditBuffer(pattern: editPattern)
         editor.selection = [1, 2, 3]
         try editor.changeDuration(by: 120)
