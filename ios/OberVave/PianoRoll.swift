@@ -890,7 +890,7 @@ final class PatternDefaultControl: UIButton {
         accessibilityLabel = "\(subject) default"
         accessibilityHint = extendedAction == nil
             ? "Tap to restore, or hold to save a new default."
-            : "Tap to restore, hold to save, or double tap to restore all instruments."
+            : "Tap to restore, hold to save, double tap to restore instruments, or triple tap to restore the scene."
         var actions = [
             UIAccessibilityCustomAction(name: "Save \(subject.lowercased()) default", target: self,
                                         selector: #selector(saveAccessibility))
@@ -898,6 +898,8 @@ final class PatternDefaultControl: UIButton {
         if extendedAction != nil {
             actions.append(UIAccessibilityCustomAction(name: "Restore all instrument defaults", target: self,
                                                        selector: #selector(restoreAllAccessibility)))
+            actions.append(UIAccessibilityCustomAction(name: "Restore scene default", target: self,
+                                                       selector: #selector(restoreSceneAccessibility)))
             actions.append(UIAccessibilityCustomAction(name: "Save all individual defaults", target: self,
                                                        selector: #selector(saveAllAccessibility)))
             if subject == "Preset" {
@@ -920,6 +922,13 @@ final class PatternDefaultControl: UIButton {
         guard isEnabled, let extendedAction else { return false }
         cancelSequence()
         extendedAction(.restoreInstruments)
+        return true
+    }
+
+    @objc private func restoreSceneAccessibility() -> Bool {
+        guard isEnabled, let extendedAction else { return false }
+        cancelSequence()
+        extendedAction(.restoreScene)
         return true
     }
 
