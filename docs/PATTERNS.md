@@ -351,12 +351,15 @@ rather than preserving an incomplete history. This parameter history does not
 yet cover preset selection, instrument management or all scene settings.
 
 The sequencer's DEFAULT button saves its launch and recording options, column
-mixer levels, pan, mute, solo and recording lengths when held and confirmed. Tap it
+mixer levels, pan, mute, solo, recording lengths and pattern layout when held and confirmed.
+It preserves existing individual pattern defaults and seeds missing ones from
+the current patterns. Tap it
 to restore those settings as one sequencer-history step. Pattern contents have
 their own defaults and are not changed by this action. The mixer is checked
 and restored atomically without stopping playback; if an instrument or mixer
 setting changed meanwhile, the operation is rejected. Defaults are local to
-the device and keyed by scene. The first scene save establishes a sequencer
+the device and keyed by scene. The saved pattern layout is not restored by the
+short tap yet. The first scene save establishes a sequencer
 default if none exists; for an older scene, its saved mixer and recording
 lengths form the baseline, while launch and recording options start from the
 current options.

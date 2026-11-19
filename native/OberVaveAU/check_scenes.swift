@@ -64,6 +64,15 @@ struct SceneChecks {
         precondition(target.document.patterns == [pattern])
         precondition(target.document.instruments[0].levelDB == 0)
         precondition(target.sequencer.launchGrid == 2)
+        var savedLayout = again
+        var laterPattern = pattern
+        laterPattern.name = "Current edit"
+        var newPattern = laterPattern
+        newPattern.row = 2
+        try savedLayout.patterns.seedMissing([laterPattern, newPattern], scene: "one")
+        try savedLayout.setPatternLayout([laterPattern, newPattern], scene: "one")
+        let savedPatterns = try savedLayout.defaultPatterns(scene: "one", instruments: [instrument])
+        precondition(savedPatterns == [pattern, newPattern])
         var invalid = again
         invalid.sequencers[""] = invalid.sequencers["one"]
         do {

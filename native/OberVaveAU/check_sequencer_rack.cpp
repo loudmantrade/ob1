@@ -1226,10 +1226,14 @@ static void checkAtomicBundle()
     sound.replacement.parameters[rack::P_CUTOFF] = 17;
     ov_rack_mixer_change mixer {0, -6, 0, -12, .5f, 0, 1, 0, 1};
     ov_seq_cell_change cell {0, 0, revision, oldClip.get(), newClip.get()};
+    ov_seq_route_change route {0, 1 | 64 | 128, sound.expected, sound.expected};
+    route.replacement.channel = 2; route.replacement.sync = 0; route.replacement.grid = 3;
     ov_rack_parameter_result result {};
     auto unchanged = [&] {
         assert(rack::scene->slots[0]->config.parameters[rack::P_CUTOFF] == sound.expected.parameters[rack::P_CUTOFF]);
         assert(rack::scene->slots[0]->config.level_db == -6 && rack::soloMask == 0);
+        assert(rack::scene->slots[0]->config.channel == 1 && rack::scene->slots[0]->config.sync == 1 &&
+               rack::scene->slots[0]->config.grid == 0);
         assert(rack::clips[0][0]->pattern.data().notes[0].pitch == 60);
         assert(ov_seq_cell_revision(0, 0) == revision);
     };
@@ -1248,6 +1252,27 @@ static void checkAtomicBundle()
     sound.expected = rack::scene->slots[0]->config; unchanged();
     assert(ov_seq_change_bundle(&sound, 1, &mixer, 1, &cell, 1, epoch - 1, 803)); render();
     assert(ov_rack_read_parameter_result(&result) && !result.success); unchanged();
+    route.expected.channel = 3;
+    assert(ov_seq_change_bundle_with_routes(&sound, 1, &mixer, 1, &cell, 1, &route, 1, epoch, 811)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success); unchanged();
+    route.expected.channel = 1;
+    route.expected.grid = 1;
+    assert(ov_seq_change_bundle_with_routes(&sound, 1, &mixer, 1, &cell, 1, &route, 1, epoch, 812)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success); unchanged();
+    route.expected.grid = 0;
+    route.expected.program = (route.expected.program + 1) % 768;
+    route.replacement.program = route.expected.program;
+    assert(ov_seq_change_bundle_with_routes(&sound, 1, &mixer, 1, &cell, 1, &route, 1, epoch, 815)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success); unchanged();
+    route.expected.program = sound.expected.program;
+    route.replacement.program = sound.expected.program;
+    route.mask |= 8;
+    assert(!ov_seq_change_bundle_with_routes(&sound, 1, &mixer, 1, &cell, 1, &route, 1, epoch, 813));
+    assert(ov_rack_take_error() == 2);
+    route.mask &= ~8u;
+    ov_seq_route_change duplicateRoutes[2] {route, route};
+    assert(!ov_seq_change_bundle_with_routes(nullptr, 0, nullptr, 0, nullptr, 0, duplicateRoutes, 2, epoch, 814));
+    assert(ov_rack_take_error() == 2);
     oldClip->notes[0].pitch = 61;
     assert(ov_seq_change_bundle(&sound, 1, &mixer, 1, &cell, 1, epoch, 808)); render();
     assert(ov_rack_read_parameter_result(&result) && !result.success); unchanged();
@@ -1258,12 +1283,15 @@ static void checkAtomicBundle()
     assert(ov_seq_finish_record()); render();
     auto completion = std::make_unique<ov_seq_clip>();
     while (ov_seq_record_ready()) assert(ov_seq_read_record(completion.get()));
-    assert(ov_seq_change_bundle(&sound, 1, &mixer, 1, &cell, 1, epoch, 805));
+    assert(ov_seq_change_bundle_with_routes(&sound, 1, &mixer, 1, &cell, 1, &route, 1, epoch, 805));
     newClip->notes[0].pitch = 73;
     render();
     assert(ov_rack_read_parameter_result(&result) && result.token == 805 && result.success);
     assert(rack::scene->slots[0]->config.parameters[rack::P_CUTOFF] == 17);
     assert(rack::scene->slots[0]->config.level_db == -12 && rack::soloMask == 1);
+    assert(rack::scene->slots[0]->config.channel == 2 && rack::scene->slots[0]->config.sync == 0 &&
+           rack::scene->slots[0]->config.grid == 3);
+    assert(!engine(0).dsp.ctl_arp_sync && engine(0).dsp.ctl_arp_sync_grid == 3);
     assert(rack::clips[0][0]->pattern.data().notes[0].pitch == 72);
     assert(ov_seq_cell_revision(0, 0) == revision + 1);
     assert(ov_seq_active(0) == 0 && ov_seq_active(1) == 0 && rack::players[0].origin == origin);
@@ -1289,7 +1317,229 @@ static void checkAtomicBundle()
         assert(ov_rack_read_parameter_result(&result) && result.token == 820 + i && result.success);
     assert(ov_rack_stop_all()); render();
     assert(!ov_rack_take_error());
-    std::puts("PASS bundle: atomic sound, mixer and cells; conflicts, recording and playback");
+    ov_seq_route_change partial {0, 2, rack::scene->slots[0]->config, rack::scene->slots[0]->config};
+    partial.replacement.low_note = 100;
+    assert(ov_seq_change_bundle_with_routes(nullptr, 0, nullptr, 0, nullptr, 0, &partial, 1, epoch, 850)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.success);
+    partial.expected.low_note = 100;
+    partial.mask = 4;
+    partial.replacement.low_note = 0;
+    partial.replacement.high_note = 90;
+    assert(ov_seq_change_bundle_with_routes(nullptr, 0, nullptr, 0, nullptr, 0, &partial, 1, epoch, 851)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    assert(rack::scene->slots[0]->config.low_note == 100 && rack::scene->slots[0]->config.high_note == 127);
+    assert(!ov_rack_take_error());
+    std::puts("PASS bundle: atomic sound, mixer, routes and cells; conflicts, recording and playback");
+}
+
+static void checkBundleProgramChange()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
+    auto oldClip = std::make_unique<ov_seq_clip>(clip(0, 0));
+    auto newClip = std::make_unique<ov_seq_clip>(*oldClip);
+    auto backing = std::make_unique<ov_seq_clip>(clip(1, 0));
+    newClip->notes[0].pitch = 72;
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(oldClip.get()) && ov_seq_set_clip(backing.get()));
+    assert(ov_seq_launch(0, 0, 0) && ov_seq_launch(1, 0, 0)); render();
+    assert(ov_seq_active(0) == 0 && ov_seq_active(1) == 0 && gate(0) && gate(1));
+    const auto epoch = ov_seq_scene_epoch();
+    assert(ov_seq_audition(0, 64, 100, epoch) && ov_seq_audition(1, 65, 100, epoch)); render();
+    auto activeAuditions = [](uint32_t slot) {
+        uint32_t count = 0;
+        for (const auto& audition : rack::auditions)
+            if (audition.used && audition.on.routing.instruments == (1u << slot)) ++count;
+        return count;
+    };
+    assert(activeAuditions(0) == 1 && activeAuditions(1) == 1);
+    const auto revision = ov_seq_cell_revision(0, 0);
+    ov_rack_sound_change sound {0, rack::scene->slots[0]->config, rack::scene->slots[0]->config};
+    sound.replacement.program = 130;
+    sound.replacement.parameters[rack::P_CUTOFF] = 17;
+    sound.replacement.cc[rack::P_CUTOFF] = 74;
+    ov_rack_mixer_change mixer {0, -6, 0, -12, .5f, 0, 1, 0, 1};
+    ov_seq_cell_change cell {0, 0, revision, oldClip.get(), newClip.get()};
+    ov_seq_route_change route {0, 1, sound.expected, sound.expected};
+    route.replacement.channel = 2;
+    ov_seq_slot_guard guard {0, 0};
+    assert(ov_rack_slot_generation(0, &guard.generation));
+    rack::slotGenerations[0].fetch_add(1);
+    uint64_t inProgress = 123;
+    assert(!ov_rack_slot_generation(0, &inProgress) && inProgress == 123);
+    rack::slotGenerations[0].fetch_sub(1);
+    ov_rack_parameter_result result {};
+    assert(!ov_rack_change_sounds(&sound, 1, epoch, 900));
+    assert(ov_rack_take_error() == 2);
+    assert(!ov_seq_change_bundle_with_routes(&sound, 1, &mixer, 1, &cell, 1, &route, 1, epoch, 901));
+    assert(ov_rack_take_error() == 2);
+    ++cell.revision;
+    assert(!ov_seq_change_bundle_with_programs(&sound, 1, &mixer, 1, &cell, 1, &route, 1, nullptr, 0, epoch, 904));
+    assert(ov_rack_take_error() == 2);
+    assert(ov_seq_change_bundle_with_programs(&sound, 1, &mixer, 1, &cell, 1, &route, 1, &guard, 1, epoch, 902));
+    render();
+    assert(ov_rack_read_parameter_result(&result) && result.token == 902 && !result.success);
+    assert(rack::scene->slots[0]->config.program == sound.expected.program &&
+           rack::scene->slots[0]->config.channel == 1 && rack::scene->slots[0]->config.level_db == -6);
+    assert(ov_seq_active(0) == 0 && ov_seq_active(1) == 0 && gate(0) && gate(1));
+    assert(activeAuditions(0) == 1 && activeAuditions(1) == 1);
+    assert(ov_seq_cell_revision(0, 0) == revision && rack::clips[0][0]->pattern.data().notes[0].pitch == 60);
+    cell.revision = revision;
+    assert(ov_seq_change_bundle_with_programs(&sound, 1, &mixer, 1, &cell, 1, &route, 1, &guard, 1, epoch, 903));
+    render();
+    assert(ov_rack_read_parameter_result(&result) && result.token == 903 && result.success);
+    const auto& current = rack::scene->slots[0]->config;
+    assert(current.program == 130 && current.parameters[rack::P_CUTOFF] == 17 &&
+           current.cc[rack::P_CUTOFF] == 74 && current.channel == 2 && current.level_db == -12);
+    assert(rack::clips[0][0]->pattern.data().notes[0].pitch == 72 && ov_seq_cell_revision(0, 0) == revision + 1);
+    assert(ov_seq_active(0) == -1 && !gate(0) && ov_seq_active(1) == 0 && gate(1));
+    assert(activeAuditions(0) == 0 && activeAuditions(1) == 1);
+    auto replacement = current;
+    ov_rack_sound_change stale {0, replacement, replacement};
+    stale.replacement.parameters[rack::P_CUTOFF] = 27;
+    assert(ov_rack_remove(0));
+    assert(ov_rack_add(0, &replacement));
+    assert(ov_seq_change_bundle_with_programs(&stale, 1, nullptr, 0, nullptr, 0, nullptr, 0,
+                                               &guard, 1, epoch, 905));
+    render();
+    assert(ov_rack_read_parameter_result(&result) && result.token == 905 && !result.success);
+    assert(rack::scene->slots[0]->config.parameters[rack::P_CUTOFF] == 17);
+    uint64_t generation = 0;
+    assert(ov_rack_slot_generation(0, &generation) && generation == guard.generation + 4);
+    guard.generation = generation;
+    assert(ov_seq_change_bundle_with_programs(&stale, 1, nullptr, 0, nullptr, 0, nullptr, 0,
+                                               &guard, 1, epoch, 906)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.token == 906 && result.success);
+    assert(rack::scene->slots[0]->config.parameters[rack::P_CUTOFF] == 27);
+    ov_seq_slot_guard duplicates[] {guard, guard};
+    assert(!ov_seq_change_bundle_with_programs(&stale, 1, nullptr, 0, nullptr, 0, nullptr, 0,
+                                                duplicates, 2, epoch, 907));
+    assert(ov_rack_take_error() == 2);
+    assert(!ov_rack_slot_generation(16, &generation));
+    assert(ov_rack_take_error() == 2);
+    assert(ov_rack_stop_all()); render();
+    assert(!ov_rack_take_error());
+    std::puts("PASS bundle program change: checked sound, mixer, route and clip with isolated playback stop");
+}
+
+static void checkStructuralBundle()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
+    auto old = std::make_unique<ov_seq_clip>(clip(0, 0));
+    auto added = std::make_unique<ov_seq_clip>(clip(2, 1));
+    auto backing = std::make_unique<ov_seq_clip>(clip(1, 0));
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(old.get()) && ov_seq_set_clip(backing.get()));
+    assert(ov_seq_launch(0, 0, 0) && ov_seq_launch(1, 0, 0)); render();
+    const auto epoch = ov_seq_scene_epoch();
+    ov_seq_slot_change changes[2] {};
+    changes[0].slot = 0; changes[0].expected_present = 1;
+    changes[0].expected = rack::scene->slots[0]->config;
+    changes[0].expected_clips[0] = old.get();
+    changes[1].slot = 2; changes[1].replacement_present = 1;
+    changes[1].replacement = config(); changes[1].replacement.channel = 3;
+    changes[1].replacement_clips[1] = added.get(); changes[1].replacement_solo = 1;
+    for (auto& change : changes) {
+        assert(ov_rack_slot_generation(change.slot, &change.generation));
+        for (uint32_t row = 0; row < OV_SEQ_ROWS; ++row)
+            change.revisions[row] = ov_seq_cell_revision(change.slot, row);
+    }
+    ov_rack_sound_change sound {1, rack::scene->slots[1]->config, rack::scene->slots[1]->config};
+    sound.replacement.parameters[rack::P_CUTOFF] = 18;
+    ov_seq_slot_guard guard {1, 0};
+    assert(ov_rack_slot_generation(1, &guard.generation));
+    ov_rack_parameter_result result {};
+    ov_seq_slot_change duplicate[] {changes[0], changes[0]};
+    assert(!ov_seq_change_bundle_with_slots(nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0,
+                                             nullptr, 0, duplicate, 2, epoch, 955));
+    assert(ov_rack_take_error() == 2);
+    changes[1].replacement_clips[0] = added.get();
+    assert(!ov_seq_change_bundle_with_slots(nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0,
+                                             nullptr, 0, changes, 2, epoch, 956));
+    assert(ov_rack_take_error() == 2);
+    changes[1].replacement_clips[0] = nullptr;
+    ++changes[0].generation;
+    assert(ov_seq_change_bundle_with_slots(&sound, 1, nullptr, 0, nullptr, 0, nullptr, 0,
+                                            &guard, 1, changes, 2, epoch, 957)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    assert(rack::scene->slots[0] && !rack::scene->slots[2] && ov_seq_active(1) == 0);
+    --changes[0].generation;
+    ++changes[1].revisions[7];
+    assert(ov_seq_change_bundle_with_slots(&sound, 1, nullptr, 0, nullptr, 0, nullptr, 0,
+                                            &guard, 1, changes, 2, epoch, 950)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.token == 950 && !result.success);
+    assert(rack::scene->slots[0] && !rack::scene->slots[2] && rack::clips[0][0]);
+    assert(rack::scene->slots[1]->config.parameters[rack::P_CUTOFF] == sound.expected.parameters[rack::P_CUTOFF]);
+    assert(ov_seq_active(0) == 0 && ov_seq_active(1) == 0);
+    --changes[1].revisions[7];
+    sound.slot = 0; guard.slot = 0; guard.generation = changes[0].generation;
+    assert(!ov_seq_change_bundle_with_slots(&sound, 1, nullptr, 0, nullptr, 0, nullptr, 0,
+                                             &guard, 1, changes, 2, epoch, 951));
+    assert(ov_rack_take_error() == 2);
+    sound.slot = 1; guard.slot = 1; assert(ov_rack_slot_generation(1, &guard.generation));
+    assert(ov_seq_change_bundle_with_slots(&sound, 1, nullptr, 0, nullptr, 0, nullptr, 0,
+                                            &guard, 1, changes, 2, epoch, 952)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.token == 952 && result.success);
+    assert(!rack::scene->slots[0] && rack::scene->slots[2] && !rack::clips[0][0] && rack::clips[2][1]);
+    assert(rack::soloMask == 4 && rack::scene->slots[1]->config.parameters[rack::P_CUTOFF] == 18);
+    assert(ov_seq_active(0) == -1 && ov_seq_active(1) == 0);
+    for (const auto& change : changes) {
+        uint64_t generation = 0;
+        assert(ov_rack_slot_generation(change.slot, &generation) && generation == change.generation + 2);
+        for (uint32_t row = 0; row < OV_SEQ_ROWS; ++row)
+            assert(ov_seq_cell_revision(change.slot, row) == change.revisions[row] + 1);
+    }
+    ov_seq_slot_change reverse[2] {};
+    reverse[0].slot = 0; reverse[0].replacement_present = 1;
+    reverse[0].replacement = changes[0].expected; reverse[0].replacement_clips[0] = old.get();
+    reverse[1].slot = 2; reverse[1].expected_present = 1;
+    reverse[1].expected = changes[1].replacement; reverse[1].expected_solo = 1;
+    reverse[1].expected_clips[1] = added.get();
+    for (auto& change : reverse) {
+        assert(ov_rack_slot_generation(change.slot, &change.generation));
+        for (uint32_t row = 0; row < OV_SEQ_ROWS; ++row)
+            change.revisions[row] = ov_seq_cell_revision(change.slot, row);
+    }
+    reverse[1].expected.channel = 4;
+    assert(ov_seq_change_bundle_with_slots(nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0,
+                                            nullptr, 0, reverse, 2, epoch, 953)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    assert(!rack::scene->slots[0] && rack::scene->slots[2] && rack::clips[2][1]);
+    reverse[1].expected.channel = 3;
+    assert(ov_seq_change_bundle_with_slots(nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0,
+                                            nullptr, 0, reverse, 2, epoch, 954)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.token == 954 && result.success);
+    assert(rack::scene->slots[0] && !rack::scene->slots[2] && rack::clips[0][0] && !rack::clips[2][1]);
+    assert(rack::soloMask == 0 && ov_seq_active(1) == 0);
+    auto replacementClip = std::make_unique<ov_seq_clip>(*old);
+    replacementClip->notes[0].pitch = 80;
+    ov_seq_slot_change replace {};
+    replace.slot = 0; replace.expected_present = replace.replacement_present = 1;
+    replace.expected = rack::scene->slots[0]->config;
+    replace.replacement = replace.expected;
+    replace.replacement.program = 130;
+    replace.replacement.parameters[rack::P_CUTOFF] = 23;
+    replace.expected_clips[0] = old.get();
+    replace.replacement_clips[0] = replacementClip.get();
+    assert(ov_rack_slot_generation(0, &replace.generation));
+    for (uint32_t row = 0; row < OV_SEQ_ROWS; ++row)
+        replace.revisions[row] = ov_seq_cell_revision(0, row);
+    replace.expected.cc[rack::P_CUTOFF] = 74;
+    assert(ov_seq_change_bundle_with_slots(nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0,
+                                            nullptr, 0, &replace, 1, epoch, 958)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    assert(rack::scene->slots[0]->config.program == 0 && rack::clips[0][0]->pattern.data().notes[0].pitch == 60);
+    replace.expected.cc[rack::P_CUTOFF] = 255;
+    assert(ov_seq_change_bundle_with_slots(nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0,
+                                            nullptr, 0, &replace, 1, epoch, 959)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.success);
+    assert(rack::scene->slots[0]->config.program == 130 &&
+           rack::scene->slots[0]->config.parameters[rack::P_CUTOFF] == 23 &&
+           rack::clips[0][0]->pattern.data().notes[0].pitch == 80 && ov_seq_active(1) == 0);
+    assert(ov_rack_stop_all()); render();
+    assert(!ov_rack_take_error());
+    std::puts("PASS structural bundle: atomic add/remove, all cell revisions, conflicts and unrelated playback");
 }
 
 static void checkAtomicCellHistory()
@@ -1561,5 +1811,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkAtomicSounds(); checkAtomicMixer(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicBundle(); checkAtomicCellHistory(); checkAtomicFullCellGrid(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkAtomicSounds(); checkAtomicMixer(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicBundle(); checkBundleProgramChange(); checkStructuralBundle(); checkAtomicCellHistory(); checkAtomicFullCellGrid(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

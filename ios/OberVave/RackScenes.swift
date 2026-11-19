@@ -1117,16 +1117,25 @@ extension OberVaveModel {
         }
 
         func saveSequencerDefault() {
+            syncSequencerState()
             guard !sceneSwitchPending, pendingSceneName == nil, pendingSequencerHistory == nil,
                   pendingSequencerSettings == nil, pendingPatternTransfer == nil,
-                  pendingPianoPublication == nil, activeMixerGestures.isEmpty, ov_seq_record_state() == 0 else {
+                  pendingPianoPublication == nil, activeMixerGestures.isEmpty, ov_seq_record_state() == 0,
+                  ov_seq_record_ready() == 0, (0..<128).allSatisfy({
+                      ov_seq_pad_pending(UInt32($0 / 8), UInt32($0 % 8)) == 0
+                  }) else {
                 errorMessage = "Finish recording and pending edits before saving the sequencer default."
                 return
             }
-            let value = currentSequencerSettings()
-            var defaults = sequencerDefaults
-            defaults[sceneSessionKey] = value
-            if persistSequencerDefaults(defaults) { sceneStatus = "Saved sequencer default" }
+            do {
+                var libraries = currentDefaultLibraries()
+                try libraries.patterns.seedMissing(patterns, scene: sceneSessionKey)
+                try libraries.setPatternLayout(patterns, scene: sceneSessionKey)
+                libraries.sequencers[sceneSessionKey] = currentSequencerSettings()
+                if persistDefaultLibraries(libraries) { sceneStatus = "Saved sequencer default" }
+            } catch {
+                errorMessage = "Could not save sequencer default: \(error.localizedDescription)"
+            }
         }
 
         func restoreSequencerDefault() {
@@ -1833,7 +1842,7 @@ struct SequencerView: View {
             cancelGesture(); replacement = nil; deleting = nil; pianoRoll = nil; afterMenu = nil; menuPattern = nil
         }
         .onDisappear { cancelGesture(); model.finishMixerGestures() }
-        .confirmationDialog("Save the current sequencer settings as the default?", isPresented: $confirmsDefault) {
+        .confirmationDialog("Save the current sequencer settings and pattern layout as the default?", isPresented: $confirmsDefault) {
             Button("Update Sequencer Default") { model.saveSequencerDefault() }
             Button("Cancel", role: .cancel) {}
         }

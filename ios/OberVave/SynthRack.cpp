@@ -331,9 +331,23 @@ struct MixerChangeRequest final : Retired {
     uint64_t epoch = 0, token = 0;
 };
 struct BundleChangeRequest final : Retired {
+    struct Slot {
+        uint32_t slot = 0, expectedPresent = 0, expectedSolo = 0, replacementSolo = 0;
+        uint64_t generation = 0;
+        ov_instrument_config expected {};
+        std::unique_ptr<Instrument> replacement;
+        std::array<uint64_t, music::sequencerRows> revisions {};
+        std::array<std::unique_ptr<SequencerClip>, music::sequencerRows> expectedClips, replacementClips;
+    };
     SoundChangeRequest sounds;
     MixerChangeRequest mixer;
     CellChangeRequest cells;
+    std::array<ov_seq_route_change, capacity> routes {};
+    uint32_t routeCount = 0;
+    std::array<ov_seq_slot_guard, capacity> guards {};
+    uint32_t guardCount = 0;
+    std::array<Slot, capacity> slots {};
+    uint32_t slotCount = 0;
     uint64_t epoch = 0, token = 0;
 };
 constexpr uint32_t parameterResultCapacity = 16;
@@ -442,6 +456,7 @@ struct Snapshot {
     std::atomic<uint32_t> sequence {0};
 };
 std::array<Snapshot, capacity> snapshots;
+std::array<std::atomic<uint64_t>, capacity> slotGenerations {};
 std::array<std::array<std::atomic<uint32_t>, NPARAM>, capacity> pendingUIParameters {};
 std::atomic<uint32_t> selected {0}, audioFrame {0}, midiBuffer {20};
 std::atomic<uint32_t> tempo {120}, internalTempo {120}, externalClock {0}, error {0};
@@ -943,6 +958,15 @@ void applySounds(const SoundChangeRequest& request)
     for (uint32_t i = 0; i < request.count; ++i) {
         const auto& change = request.changes[i];
         auto& inst = *scene->slots[change.slot];
+        if (inst.config.program != change.replacement.program) {
+            for (auto& audition : auditions)
+                if (audition.used && audition.on.routing.instruments == (1u << change.slot)) audition.used = false;
+            stopSequencer(change.slot);
+            inst.engine->boundary({processedFrames});
+            inst.stop();
+            forgetPedals(change.slot);
+            inst.config.program = change.replacement.program;
+        }
         inst.engine->boundary({processedFrames});
         for (uint32_t p = 0; p < NPARAM; ++p) {
             const auto replacement = change.replacement.parameters[p];
@@ -980,6 +1004,41 @@ void applyMixer(const MixerChangeRequest& request)
         publish(change.slot);
     }
 }
+bool matchesRoute(uint32_t slot, uint32_t mask, const ov_instrument_config& old,
+                  const ov_instrument_config& next)
+{
+    const auto& pointer = scene->slots[slot];
+    if (!pointer) return false;
+    const auto& current = pointer->config;
+    const auto low = (mask & 2) ? next.low_note : current.low_note;
+    const auto high = (mask & 4) ? next.high_note : current.high_note;
+    return (!(mask & 1) || current.channel == old.channel) &&
+        (!(mask & 2) || current.low_note == old.low_note) &&
+        (!(mask & 4) || current.high_note == old.high_note) &&
+        (!(mask & 8) || current.level_db == old.level_db) &&
+        (!(mask & 16) || current.pan == old.pan) &&
+        (!(mask & 32) || current.muted == old.muted) &&
+        (!(mask & 64) || current.sync == old.sync) &&
+        (!(mask & 128) || current.grid == old.grid) && low <= high;
+}
+void applyRoute(uint32_t slot, uint32_t mask, const ov_instrument_config& next)
+{
+    auto& inst = *scene->slots[slot];
+    auto& target = inst.config;
+    if (mask & 1) target.channel = next.channel;
+    if (mask & 2) target.low_note = next.low_note;
+    if (mask & 4) target.high_note = next.high_note;
+    if (mask & 8) target.level_db = next.level_db;
+    if (mask & 16) target.pan = next.pan;
+    if (mask & 32) target.muted = next.muted;
+    if (mask & 64) target.sync = next.sync;
+    if (mask & 128) target.grid = next.grid;
+    if (mask & 192) {
+        inst.engine->boundary({processedFrames});
+        inst.engine->sync(target.sync, target.grid);
+    }
+    publish(slot);
+}
 bool matchesCells(const CellChangeRequest& request)
 {
     for (uint32_t i = 0; i < request.count; ++i) {
@@ -1011,18 +1070,87 @@ void applyCells(CellChangeRequest& request)
         clipRevisions[cell.slot][cell.row].fetch_add(1);
     }
 }
+bool matchesSlot(const BundleChangeRequest::Slot& change)
+{
+    const auto& inst = scene->slots[change.slot];
+    if (slotGenerations[change.slot].load() != change.generation ||
+        bool(inst) != bool(change.expectedPresent) ||
+        ((soloMask >> change.slot) & 1u) != change.expectedSolo) return false;
+    if (inst) {
+        const auto& c = inst->config;
+        const auto& old = change.expected;
+        if (c.engine != old.engine || c.program != old.program || c.channel != old.channel ||
+            c.low_note != old.low_note || c.high_note != old.high_note || c.sync != old.sync ||
+            c.grid != old.grid || c.level_db != old.level_db || c.pan != old.pan || c.muted != old.muted)
+            return false;
+        for (uint32_t p = 0; p < NPARAM; ++p)
+            if (c.parameters[p] != old.parameters[p] || c.cc[p] != old.cc[p]) return false;
+    }
+    for (uint32_t row = 0; row < music::sequencerRows; ++row) {
+        const auto& current = clips[change.slot][row];
+        const auto& expected = change.expectedClips[row];
+        if (clipRevisions[change.slot][row].load() != change.revisions[row] ||
+            bool(current) != bool(expected) ||
+            (current && !samePattern(current->pattern.data(), expected->pattern.data()))) return false;
+    }
+    return true;
+}
+void applySlot(BundleChangeRequest::Slot& change)
+{
+    const auto slot = change.slot;
+    slotGenerations[slot].fetch_add(1);
+    for (auto& audition : auditions)
+        if (audition.used && audition.on.routing.instruments == (1u << slot)) audition.used = false;
+    stopSequencer(slot);
+    auto& inst = scene->slots[slot];
+    if (inst) {
+        inst->engine->boundary({processedFrames});
+        inst->stop();
+    }
+    forgetPedals(slot);
+    retire(inst.release());
+    inst = std::move(change.replacement);
+    for (uint32_t row = 0; row < music::sequencerRows; ++row) {
+        retire(clips[slot][row].release());
+        clips[slot][row] = std::move(change.replacementClips[row]);
+        clipRevisions[slot][row].fetch_add(1);
+    }
+    if (change.replacementSolo) soloMask |= uint16_t(1u << slot);
+    else soloMask &= uint16_t(~(1u << slot));
+    snapshots[slot].peak.store(0);
+    publish(slot);
+    slotGenerations[slot].fetch_add(1);
+}
 void apply(const Command& c)
 {
     if (c.padAcknowledgement) padCommands[c.slot][c.a].fetch_sub(1);
     if (c.kind == Kind::BundleChange) {
         auto* request = static_cast<BundleChangeRequest*>(c.object);
         bool valid = request->epoch == sceneEpoch.load();
+        for (uint32_t i = 0; i < request->guardCount && valid; ++i) {
+            const auto& guard = request->guards[i];
+            valid = slotGenerations[guard.slot].load() == guard.generation;
+        }
         for (const auto& recording : recordings) valid = valid && !recording.recorder.running;
         valid = valid && matchesSounds(request->sounds) && matchesMixer(request->mixer) && matchesCells(request->cells);
+        for (uint32_t i = 0; i < request->routeCount && valid; ++i) {
+            const auto& route = request->routes[i];
+            const auto& inst = scene->slots[route.slot];
+            valid = inst && inst->config.engine == route.expected.engine &&
+                inst->config.program == route.expected.program &&
+                matchesRoute(route.slot, route.mask, route.expected, route.replacement);
+        }
+        for (uint32_t i = 0; i < request->slotCount && valid; ++i)
+            valid = matchesSlot(request->slots[i]);
         if (valid) {
             applySounds(request->sounds);
             applyMixer(request->mixer);
             applyCells(request->cells);
+            for (uint32_t i = 0; i < request->routeCount; ++i) {
+                const auto& route = request->routes[i];
+                applyRoute(route.slot, route.mask, route.replacement);
+            }
+            for (uint32_t i = 0; i < request->slotCount; ++i) applySlot(request->slots[i]);
         }
         const auto write = parameterWrite.load(std::memory_order_relaxed);
         parameterResults[write % parameterResultCapacity] = {request->token, valid ? 1u : 0u};
@@ -1052,33 +1180,9 @@ void apply(const Command& c)
     }
     if (c.kind == Kind::RouteChange) {
         auto* request = static_cast<RouteChangeRequest*>(c.object);
-        auto& pointer = scene->slots[request->slot];
-        bool valid = request->epoch == sceneEpoch.load() && bool(pointer);
-        if (valid) {
-            const auto& current = pointer->config;
-            const auto& old = request->expected;
-            const auto& next = request->replacement;
-            const auto mask = request->mask;
-            valid = (!(mask & 1) || current.channel == old.channel) &&
-                (!(mask & 2) || current.low_note == old.low_note) &&
-                (!(mask & 4) || current.high_note == old.high_note) &&
-                (!(mask & 8) || current.level_db == old.level_db) &&
-                (!(mask & 16) || current.pan == old.pan) &&
-                (!(mask & 32) || current.muted == old.muted);
-            const auto low = (mask & 2) ? next.low_note : current.low_note;
-            const auto high = (mask & 4) ? next.high_note : current.high_note;
-            valid = valid && low <= high;
-            if (valid) {
-                auto& target = pointer->config;
-                if (mask & 1) target.channel = next.channel;
-                if (mask & 2) target.low_note = next.low_note;
-                if (mask & 4) target.high_note = next.high_note;
-                if (mask & 8) target.level_db = next.level_db;
-                if (mask & 16) target.pan = next.pan;
-                if (mask & 32) target.muted = next.muted;
-                publish(request->slot);
-            }
-        }
+        const bool valid = request->epoch == sceneEpoch.load() &&
+            matchesRoute(request->slot, request->mask, request->expected, request->replacement);
+        if (valid) applyRoute(request->slot, request->mask, request->replacement);
         const auto write = parameterWrite.load(std::memory_order_relaxed);
         parameterResults[write % parameterResultCapacity] = {request->token, valid ? 1u : 0u};
         parameterWrite.store(write + 1, std::memory_order_release);
@@ -1319,6 +1423,7 @@ void apply(const Command& c)
         return;
     }
     if (c.kind == Kind::Scene) {
+        for (auto& generation : slotGenerations) generation.fetch_add(1);
         stopAll();
         sceneEpoch.fetch_add(1);
         for (auto& column : clips) for (auto& clip : column) retire(clip.release());
@@ -1333,6 +1438,7 @@ void apply(const Command& c)
         for (uint32_t s = 0; s < capacity; ++s) {
             snapshots[s].peak.store(0);
             publish(s);
+            slotGenerations[s].fetch_add(1);
         }
         return;
     }
@@ -1366,6 +1472,7 @@ void apply(const Command& c)
     if (c.slot >= capacity) return;
     auto& pointer = scene->slots[c.slot];
     if (c.kind == Kind::Add || c.kind == Kind::Remove) {
+        slotGenerations[c.slot].fetch_add(1);
         for (auto& audition : auditions)
             if (audition.used && audition.on.routing.instruments == (1u << c.slot)) audition.used = false;
         finishRecordingSlot(c.slot);
@@ -1382,6 +1489,7 @@ void apply(const Command& c)
         retire(pointer.release());
         if (c.kind == Kind::Add) pointer.reset(static_cast<Instrument*>(c.object));
         publish(c.slot);
+        slotGenerations[c.slot].fetch_add(1);
         return;
     }
     if (!pointer) {
@@ -1643,7 +1751,8 @@ bool send(uint32_t status, uint32_t d1, uint32_t d2, uint32_t frame, bool timed,
     c.source.id = sourceID;
     return enqueue(c);
 }
-bool prepareSounds(SoundChangeRequest& request, const ov_rack_sound_change* changes, uint32_t count)
+bool prepareSounds(SoundChangeRequest& request, const ov_rack_sound_change* changes, uint32_t count,
+                   bool allowProgramChange = false)
 {
     if (count > capacity || (count && !changes)) return false;
     uint32_t seen = 0;
@@ -1651,7 +1760,8 @@ bool prepareSounds(SoundChangeRequest& request, const ov_rack_sound_change* chan
         const auto& c = changes[i];
         if (c.slot >= capacity || (seen & (1u << c.slot)) ||
             !valid(c.expected) || !valid(c.replacement) ||
-            c.expected.engine != c.replacement.engine || c.expected.program != c.replacement.program)
+            c.expected.engine != c.replacement.engine ||
+            (!allowProgramChange && c.expected.program != c.replacement.program))
             return false;
         seen |= 1u << c.slot;
         request.changes[i] = c;
@@ -1911,13 +2021,85 @@ int ov_seq_change_bundle(const ov_rack_sound_change* sounds, uint32_t sound_coun
                          const ov_seq_cell_change* cells, uint32_t cell_count,
                          uint64_t epoch, uint64_t token)
 {
+    return ov_seq_change_bundle_with_routes(sounds, sound_count, mixer, mixer_count,
+                                            cells, cell_count, nullptr, 0, epoch, token);
+}
+static int changeBundle(const ov_rack_sound_change* sounds, uint32_t sound_count,
+                        const ov_rack_mixer_change* mixer, uint32_t mixer_count,
+                        const ov_seq_cell_change* cells, uint32_t cell_count,
+                        const ov_seq_route_change* routes, uint32_t route_count,
+                        const ov_seq_slot_guard* guards, uint32_t guard_count,
+                        const ov_seq_slot_change* slots, uint32_t slot_count,
+                        uint64_t epoch, uint64_t token, bool allowProgramChange)
+{
     using namespace rack;
-    if (!sound_count && !mixer_count && !cell_count) { error.store(2); return 0; }
+    if ((!sound_count && !mixer_count && !cell_count && !route_count && !slot_count) ||
+        route_count > capacity || (route_count && !routes) || guard_count > capacity ||
+        (guard_count && !guards) || slot_count > capacity || (slot_count && !slots)) { error.store(2); return 0; }
     try {
         auto request = std::make_unique<BundleChangeRequest>();
-        if (!prepareSounds(request->sounds, sounds, sound_count) ||
+        if (!prepareSounds(request->sounds, sounds, sound_count, allowProgramChange) ||
             !prepareMixer(request->mixer, mixer, mixer_count) ||
             !prepareCells(request->cells, cells, cell_count)) { error.store(2); return 0; }
+        uint32_t seen = 0;
+        for (uint32_t i = 0; i < route_count; ++i) {
+            const auto& route = routes[i];
+            if (route.slot >= capacity || (seen & (1u << route.slot)) || !route.mask ||
+                (route.mask & ~255u) || !valid(route.expected) || !valid(route.replacement) ||
+                route.expected.engine != route.replacement.engine ||
+                route.expected.program != route.replacement.program) {
+                error.store(2); return 0;
+            }
+            if (route.mask & 56u) for (uint32_t j = 0; j < mixer_count; ++j) {
+                if (mixer[j].slot == route.slot) { error.store(2); return 0; }
+            }
+            seen |= 1u << route.slot;
+            request->routes[i] = route;
+        }
+        request->routeCount = route_count;
+        uint32_t guardMask = 0;
+        for (uint32_t i = 0; i < guard_count; ++i) {
+            const auto& guard = guards[i];
+            if (guard.slot >= capacity || (guardMask & (1u << guard.slot))) { error.store(2); return 0; }
+            guardMask |= 1u << guard.slot;
+            request->guards[i] = guard;
+        }
+        request->guardCount = guard_count;
+        uint32_t affected = 0;
+        for (uint32_t i = 0; i < sound_count; ++i) affected |= 1u << sounds[i].slot;
+        for (uint32_t i = 0; i < mixer_count; ++i) affected |= 1u << mixer[i].slot;
+        for (uint32_t i = 0; i < cell_count; ++i) affected |= 1u << cells[i].slot;
+        for (uint32_t i = 0; i < route_count; ++i) affected |= 1u << routes[i].slot;
+        if (allowProgramChange) {
+            if ((guardMask & affected) != affected) { error.store(2); return 0; }
+        }
+        uint32_t structural = 0;
+        for (uint32_t i = 0; i < slot_count; ++i) {
+            const auto& input = slots[i];
+            if (input.slot >= capacity || (structural & (1u << input.slot)) ||
+                (affected & (1u << input.slot)) || input.expected_present > 1 || input.replacement_present > 1 ||
+                (!input.expected_present && !input.replacement_present) ||
+                input.expected_solo > input.expected_present || input.replacement_solo > input.replacement_present ||
+                (input.expected_present && !valid(input.expected)) ||
+                (input.replacement_present && !valid(input.replacement))) { error.store(2); return 0; }
+            structural |= 1u << input.slot;
+            auto& target = request->slots[i];
+            target.slot = input.slot; target.expectedPresent = input.expected_present;
+            target.expectedSolo = input.expected_solo; target.replacementSolo = input.replacement_solo;
+            target.generation = input.generation; target.expected = input.expected;
+            if (input.replacement_present) target.replacement = std::make_unique<Instrument>(input.replacement, input.slot);
+            for (uint32_t row = 0; row < music::sequencerRows; ++row) {
+                const auto* old = input.expected_clips[row];
+                const auto* next = input.replacement_clips[row];
+                if ((!input.expected_present && old) || (!input.replacement_present && next) ||
+                    (old && (old->slot != input.slot || old->row != row)) ||
+                    (next && (next->slot != input.slot || next->row != row))) { error.store(2); return 0; }
+                target.revisions[row] = input.revisions[row];
+                if (old) target.expectedClips[row] = prepareClip(*old);
+                if (next) target.replacementClips[row] = prepareClip(*next);
+            }
+        }
+        request->slotCount = slot_count;
         request->epoch = epoch; request->token = token;
         if (parameterOutstanding.fetch_add(1) >= parameterResultCapacity) {
             parameterOutstanding.fetch_sub(1); error.store(4); return 0;
@@ -1927,6 +2109,44 @@ int ov_seq_change_bundle(const ov_rack_sound_change* sounds, uint32_t sound_coun
         request.release(); return 1;
     } catch (const EngineCreationFailure&) { error.store(2); return 0; }
     catch (const std::bad_alloc&) { error.store(3); return 0; }
+}
+int ov_seq_change_bundle_with_routes(const ov_rack_sound_change* sounds, uint32_t sound_count,
+                                     const ov_rack_mixer_change* mixer, uint32_t mixer_count,
+                                     const ov_seq_cell_change* cells, uint32_t cell_count,
+                                     const ov_seq_route_change* routes, uint32_t route_count,
+                                     uint64_t epoch, uint64_t token)
+{
+    return changeBundle(sounds, sound_count, mixer, mixer_count, cells, cell_count,
+                        routes, route_count, nullptr, 0, nullptr, 0, epoch, token, false);
+}
+int ov_rack_slot_generation(uint32_t slot, uint64_t* generation)
+{
+    if (slot >= rack::capacity || !generation) { rack::error.store(2); return 0; }
+    const auto value = rack::slotGenerations[slot].load();
+    if (value & 1u) return 0;
+    *generation = value;
+    return 1;
+}
+int ov_seq_change_bundle_with_programs(const ov_rack_sound_change* sounds, uint32_t sound_count,
+                                       const ov_rack_mixer_change* mixer, uint32_t mixer_count,
+                                       const ov_seq_cell_change* cells, uint32_t cell_count,
+                                       const ov_seq_route_change* routes, uint32_t route_count,
+                                       const ov_seq_slot_guard* guards, uint32_t guard_count,
+                                       uint64_t epoch, uint64_t token)
+{
+    return changeBundle(sounds, sound_count, mixer, mixer_count, cells, cell_count,
+                        routes, route_count, guards, guard_count, nullptr, 0, epoch, token, true);
+}
+int ov_seq_change_bundle_with_slots(const ov_rack_sound_change* sounds, uint32_t sound_count,
+                                    const ov_rack_mixer_change* mixer, uint32_t mixer_count,
+                                    const ov_seq_cell_change* cells, uint32_t cell_count,
+                                    const ov_seq_route_change* routes, uint32_t route_count,
+                                    const ov_seq_slot_guard* guards, uint32_t guard_count,
+                                    const ov_seq_slot_change* slots, uint32_t slot_count,
+                                    uint64_t epoch, uint64_t token)
+{
+    return changeBundle(sounds, sound_count, mixer, mixer_count, cells, cell_count,
+                        routes, route_count, guards, guard_count, slots, slot_count, epoch, token, true);
 }
 int ov_seq_audition(uint32_t slot, uint32_t pitch, uint32_t velocity, uint64_t epoch)
 {

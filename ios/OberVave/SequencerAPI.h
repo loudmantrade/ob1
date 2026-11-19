@@ -107,6 +107,54 @@ int ov_seq_change_bundle(const ov_rack_sound_change* sounds, uint32_t sound_coun
                          const ov_rack_mixer_change* mixer, uint32_t mixer_count,
                          const ov_seq_cell_change* cells, uint32_t cell_count,
                          uint64_t epoch, uint64_t token);
+/* Route mask bits 0..5 are the ov_rack_change_route fields; bits 6 and 7
+   select ARP sync and grid. Route and mixer changes must not both address
+   level, pan or mute on the same slot. */
+typedef struct {
+    uint32_t slot, mask;
+    ov_instrument_config expected, replacement;
+} ov_seq_route_change;
+int ov_seq_change_bundle_with_routes(const ov_rack_sound_change* sounds, uint32_t sound_count,
+                                     const ov_rack_mixer_change* mixer, uint32_t mixer_count,
+                                     const ov_seq_cell_change* cells, uint32_t cell_count,
+                                     const ov_seq_route_change* routes, uint32_t route_count,
+                                     uint64_t epoch, uint64_t token);
+/* Like the route bundle, but permits each sound replacement to change its
+   program. A changed program stops notes and sequencer playback only for
+   that instrument, as normal program selection does. The supplied replacement
+   sound is applied rather than loading a factory preset. Every affected slot
+   must have one generation guard obtained from ov_rack_slot_generation;
+   removal, replacement or scene load invalidates the guard. Read generation
+   both before and after the corresponding snapshot and retry if it changes.
+   The getter returns 0 while a slot replacement is in progress. */
+typedef struct { uint32_t slot; uint64_t generation; } ov_seq_slot_guard;
+int ov_rack_slot_generation(uint32_t slot, uint64_t* generation);
+int ov_seq_change_bundle_with_programs(const ov_rack_sound_change* sounds, uint32_t sound_count,
+                                       const ov_rack_mixer_change* mixer, uint32_t mixer_count,
+                                       const ov_seq_cell_change* cells, uint32_t cell_count,
+                                       const ov_seq_route_change* routes, uint32_t route_count,
+                                       const ov_seq_slot_guard* guards, uint32_t guard_count,
+                                       uint64_t epoch, uint64_t token);
+/* Structural replacement includes every cell, including empty cells. Changes
+   are prepared off the audio thread; a conflicting slot or cell rejects the
+   entire bundle. Slots in this array must not occur in the other arrays.
+   A structural replacement stops only the affected slot and invalidates all
+   eight cell revisions and its instrument generation. */
+typedef struct {
+    uint32_t slot, expected_present, replacement_present, expected_solo, replacement_solo;
+    uint64_t generation;
+    ov_instrument_config expected, replacement;
+    uint64_t revisions[OV_SEQ_ROWS];
+    const ov_seq_clip* expected_clips[OV_SEQ_ROWS];
+    const ov_seq_clip* replacement_clips[OV_SEQ_ROWS];
+} ov_seq_slot_change;
+int ov_seq_change_bundle_with_slots(const ov_rack_sound_change* sounds, uint32_t sound_count,
+                                    const ov_rack_mixer_change* mixer, uint32_t mixer_count,
+                                    const ov_seq_cell_change* cells, uint32_t cell_count,
+                                    const ov_seq_route_change* routes, uint32_t route_count,
+                                    const ov_seq_slot_guard* guards, uint32_t guard_count,
+                                    const ov_seq_slot_change* slots, uint32_t slot_count,
+                                    uint64_t epoch, uint64_t token);
 /* Brief, output-stage preview for this instrument. Audio owner schedules Note Off;
    previews do not enter the recorder and have independent note ownership. */
 int ov_seq_audition(uint32_t slot, uint32_t pitch, uint32_t velocity, uint64_t epoch);
