@@ -623,6 +623,49 @@ struct SequencerDefault: Codable, Equatable {
     }
 }
 
+struct ApplicationDeviceSettings: Codable, Equatable {
+    var bleMIDIBufferMilliseconds: Int
+    var sustainInverted: Bool
+    var sustainStopGesture: Bool
+    var arpLatencyAuto: Bool
+    var arpLatencyManualMS: Double
+    var recordMetronome: Bool
+
+    func validate() throws {
+        guard (0...50).contains(bleMIDIBufferMilliseconds), arpLatencyManualMS.isFinite,
+              (-500...500).contains(arpLatencyManualMS) else {
+            throw SceneError.invalid("Invalid application default device settings.")
+        }
+    }
+}
+
+struct ApplicationDefault: Codable {
+    var version = 1
+    var scene: RackSceneDocument
+    var sequencer: SequencerDefault
+    var device: ApplicationDeviceSettings
+
+    func validate() throws {
+        guard version == 1, scene.patterns != nil else {
+            throw SceneError.invalid("Unsupported or incomplete application default.")
+        }
+        try scene.validate()
+        try sequencer.validate()
+        try device.validate()
+        guard Set(scene.instruments.map(\.slot)) == Set(sequencer.columns.map(\.slot)) else {
+            throw SceneError.invalid("The application default has inconsistent instruments.")
+        }
+        for instrument in scene.instruments {
+            guard let column = sequencer.columns.first(where: { $0.slot == instrument.slot }),
+                  Float(column.level) == Float(instrument.levelDB),
+                  Float(column.pan) == Float(instrument.pan), column.muted == instrument.muted,
+                  column.recordBeats == instrument.recordBeats else {
+                throw SceneError.invalid("The application default has inconsistent mixer settings.")
+            }
+        }
+    }
+}
+
 struct SequencerSettingsEdit: Equatable {
     var before: SequencerDefault
     var after: SequencerDefault

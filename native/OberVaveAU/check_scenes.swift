@@ -74,6 +74,32 @@ struct SceneChecks {
         let savedPatterns = try savedLayout.defaultPatterns(scene: "one", instruments: [instrument])
         precondition(savedPatterns == [pattern, newPattern])
         guard let settings = again.sequencers["one"] else { fatalError("Missing sequencer settings") }
+        var applicationScene = scene
+        applicationScene.patterns = [pattern]
+        let device = ApplicationDeviceSettings(bleMIDIBufferMilliseconds: 20, sustainInverted: false,
+            sustainStopGesture: true, arpLatencyAuto: true, arpLatencyManualMS: -12, recordMetronome: true)
+        let application = ApplicationDefault(scene: applicationScene, sequencer: settings, device: device)
+        try application.validate()
+        var decodedApplication = try JSONDecoder().decode(ApplicationDefault.self, from: JSONEncoder().encode(application))
+        try decodedApplication.validate()
+        precondition(decodedApplication.scene.patterns == [pattern] && decodedApplication.device == device)
+        decodedApplication.scene.patterns = nil
+        do {
+            try decodedApplication.validate()
+            fatalError("Application default accepted missing patterns")
+        } catch { }
+        decodedApplication = application
+        decodedApplication.sequencer.columns[0].muted.toggle()
+        do {
+            try decodedApplication.validate()
+            fatalError("Application default accepted inconsistent mixer")
+        } catch { }
+        decodedApplication = application
+        decodedApplication.device.arpLatencyManualMS = 501
+        do {
+            try decodedApplication.validate()
+            fatalError("Application default accepted invalid device settings")
+        } catch { }
         let priorEditor = try PianoRollEditBuffer(pattern: laterPattern)
         let currentCells = [
             SequencerCellSnapshot(cell: PatternCell(slot: 0, row: 0), pattern: laterPattern, pianoHistory: priorEditor),
