@@ -21,6 +21,8 @@ struct PianoRollView: View {
     @State private var scaleRoot = 0
     @State private var scale: PianoRollEditBuffer.Scale = .major
     @State private var scaleDirection: PianoRollEditBuffer.ScaleDirection = .nearest
+    @State private var quantizeStrength = 100
+    @State private var quantizeEnds = false
     @State private var showRegions = false
     @State private var lane: Lane = .none
     @State private var laneMode: LaneMode = .points
@@ -102,6 +104,19 @@ struct PianoRollView: View {
                         Button("1/16") { command { try $0.playbackQuantization(grid: 240) } }
                         Button("1/32") { command { try $0.playbackQuantization(grid: 120) } }
                         Button("1/8 triplet") { command { try $0.playbackQuantization(grid: 320) } }
+                    }
+                    Menu("Quantize selection / all") {
+                        Picker("Strength", selection: $quantizeStrength) {
+                            Text("25%").tag(25); Text("50%").tag(50)
+                            Text("75%").tag(75); Text("100%").tag(100)
+                        }
+                        Toggle("Quantize ends", isOn: $quantizeEnds)
+                        Button("Off") { quantize(grid: 0) }
+                        Button("1/4") { quantize(grid: 960) }
+                        Button("1/8") { quantize(grid: 480) }
+                        Button("1/16") { quantize(grid: 240) }
+                        Button("1/32") { quantize(grid: 120) }
+                        Button("1/8 triplet") { quantize(grid: 320) }
                     }
                     Picker("Root", selection: $scaleRoot) {
                         ForEach(0..<12, id: \.self) { Text(["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"][$0]).tag($0) }
@@ -223,6 +238,10 @@ struct PianoRollView: View {
             try action(&candidate)
             publish(candidate, replacing: previous)
         } catch { model.errorMessage = error.localizedDescription }
+    }
+
+    private func quantize(grid: Int) {
+        command { try $0.quantizeNotes(grid: grid, strength: quantizeStrength, ends: quantizeEnds) }
     }
 
     private func snapped(_ tick: Double) -> Int64 {

@@ -32,6 +32,8 @@ struct PatternNote {
     Tick start = 0, duration = ticksPerQuarter;
     Routing routing {Target::Instruments, 1, Stage::Input};
     uint8_t channel = 0, pitch = 60, velocity = 100;
+    bool quantizationOverride = false;
+    PatternQuantization quantization {};
 };
 
 enum class AutomationKind : uint8_t { ControlChange, PitchBend };
@@ -109,6 +111,8 @@ inline PatternError validatePatternNote(const PatternNote& note, Tick length, Ti
         note.duration > maxPatternTicks || note.pitch > 127 ||
         note.channel > 15 || !note.velocity || note.velocity > 127)
         return PatternError::InvalidNote;
+    if (note.quantizationOverride && validatePatternQuantization(note.quantization) != PatternError::None)
+        return PatternError::InvalidQuantization;
     Event event {};
     event.kind = Kind::NoteOn;
     event.channel = note.channel;
@@ -268,7 +272,7 @@ public:
     {
         if (index >= data_.count) return PatternError::NotFound;
         const auto& note = data_.notes[index];
-        const auto& q = data_.quantization;
+        const auto& q = note.quantizationOverride ? note.quantization : data_.quantization;
         if (!q.grid || !q.strength) { output = {note.start, note.duration}; return PatternError::None; }
         const auto start = std::max(-data_.intro, quantized(note.start, q, data_.length - 1));
         Tick duration = note.duration;

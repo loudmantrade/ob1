@@ -325,11 +325,15 @@ std::unique_ptr<SequencerClip> prepareClip(const ov_seq_clip& input)
     for (uint32_t i = 0; i < input.count; ++i) {
         const auto& note = input.notes[i];
         if (note.pitch > 127 || !note.velocity || note.velocity > 127 || note.output > 1 ||
+            note.quant_override > 1 || note.quant_grid > 3840 || note.quant_strength > 100 || note.quant_ends > 1 ||
             !note.id || note.id == UINT64_MAX) throw EngineCreationFailure {};
         data->notes[i] = {note.id, note.start, note.duration,
             {music::Target::Instruments, uint16_t(1u << input.slot),
              note.output ? music::Stage::Output : music::Stage::Input},
             0, uint8_t(note.pitch), uint8_t(note.velocity)};
+        data->notes[i].quantizationOverride = note.quant_override;
+        if (note.quant_override)
+            data->notes[i].quantization = {int64_t(note.quant_grid), uint8_t(note.quant_strength), bool(note.quant_ends)};
         data->nextNote = std::max(data->nextNote, note.id + 1);
     }
     std::sort(data->notes.begin(), data->notes.begin() + data->count, music::patternNoteBefore);
@@ -557,7 +561,11 @@ void encodeClip(uint32_t slot, uint32_t row, const music::PatternData& data, ov_
     for (uint32_t i = 0; i < data.count; ++i) {
         const auto& note = data.notes[i];
         output.notes[i] = {note.id, note.start, note.duration, note.pitch, note.velocity,
-            note.routing.stage == music::Stage::Output ? 1u : 0u};
+            note.routing.stage == music::Stage::Output ? 1u : 0u,
+            note.quantizationOverride ? 1u : 0u,
+            note.quantizationOverride ? uint32_t(note.quantization.grid) : 0u,
+            note.quantizationOverride ? uint32_t(note.quantization.strength) : 0u,
+            note.quantizationOverride && note.quantization.ends ? 1u : 0u};
     }
 }
 void publishRecording(uint32_t slot)
@@ -824,7 +832,10 @@ bool samePattern(const music::PatternData& a, const music::PatternData& b)
     for (uint32_t i = 0; i < a.count; ++i) {
         const auto& x = a.notes[i]; const auto& y = b.notes[i];
         if (x.id != y.id || x.start != y.start || x.duration != y.duration || x.pitch != y.pitch ||
-            x.velocity != y.velocity || x.routing.stage != y.routing.stage) return false;
+            x.velocity != y.velocity || x.routing.stage != y.routing.stage ||
+            x.quantizationOverride != y.quantizationOverride ||
+            (x.quantizationOverride && (x.quantization.grid != y.quantization.grid ||
+             x.quantization.strength != y.quantization.strength || x.quantization.ends != y.quantization.ends))) return false;
     }
     return true;
 }

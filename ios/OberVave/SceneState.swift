@@ -227,6 +227,12 @@ enum SequencerRecordMode: Int, CaseIterable {
     }
 }
 
+struct NoteQuantization: Codable, Equatable {
+    var grid: Int
+    var strength: Int
+    var ends: Bool
+}
+
 struct SequencerNote: Codable, Equatable, Identifiable {
     var id: UInt64
     var start: Int64
@@ -234,6 +240,7 @@ struct SequencerNote: Codable, Equatable, Identifiable {
     var pitch: Int
     var velocity: Int
     var output = true
+    var quantization: NoteQuantization?
 }
 
 struct SequencerAutomation: Codable, Equatable, Identifiable {
@@ -263,15 +270,15 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
     var notes: [SequencerNote] = []
     var automation: [SequencerAutomation] = []
 
-    var hasRegions: Bool { version == 3 || (version == 4 && regionsEnabled) }
+    var hasRegions: Bool { version == 3 || (version >= 4 && regionsEnabled) }
 
     func validate() throws {
-        guard (2...4).contains(version), (0..<16).contains(slot), (0..<8).contains(row),
+        guard (2...5).contains(version), (0..<16).contains(slot), (0..<8).contains(row),
               (1...Self.maxTicks).contains(length), (0...11520).contains(intro),
               (!hasRegions || (loopStart >= 0 && loopStart < loopEnd && loopEnd <= length)),
               (0...3840).contains(quantize), !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               name.utf8.count <= 96, !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
-              (version == 4 || automation.isEmpty), automation.count <= 256,
+              (version >= 4 || automation.isEmpty), automation.count <= 256,
               Set(automation.map(\.id)).count == automation.count,
               automation.allSatisfy({ $0.id > 0 && $0.id < UInt64.max && $0.tick >= -intro && $0.tick < length &&
                   (0...127).contains($0.controller) &&
@@ -279,7 +286,8 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
                    ($0.controller == 0 && (0...16383).contains($0.value))) }),
               notes.count <= 1024, Set(notes.map(\.id)).count == notes.count,
               notes.allSatisfy({ $0.id > 0 && $0.id < UInt64.max && $0.start >= -intro && $0.start < length &&
-                  (1...Self.maxTicks).contains($0.duration) && (0...127).contains($0.pitch) && (1...127).contains($0.velocity) }) else {
+                  (1...Self.maxTicks).contains($0.duration) && (0...127).contains($0.pitch) && (1...127).contains($0.velocity) &&
+                  ($0.quantization.map { version == 5 && (0...3840).contains($0.grid) && (0...100).contains($0.strength) } ?? true) }) else {
             throw SceneError.invalid("Invalid pattern name, timing, note ID, capacity or MIDI value.")
         }
     }
@@ -299,7 +307,11 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
             let buffer = raw.bindMemory(to: ov_seq_note.self)
             for (index, note) in notes.enumerated() {
                 buffer[index] = ov_seq_note(id: note.id, start: note.start, duration: note.duration,
-                    pitch: UInt32(note.pitch), velocity: UInt32(note.velocity), output: note.output ? 1 : 0)
+                    pitch: UInt32(note.pitch), velocity: UInt32(note.velocity), output: note.output ? 1 : 0,
+                    quant_override: note.quantization == nil ? 0 : 1,
+                    quant_grid: UInt32(note.quantization?.grid ?? 0),
+                    quant_strength: UInt32(note.quantization?.strength ?? 0),
+                    quant_ends: note.quantization?.ends == true ? 1 : 0)
             }
             clip.automation_count = UInt32(automation.count)
             withUnsafeMutableBytes(of: &clip.automation) { raw in
@@ -317,7 +329,7 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let incomingVersion = try c.decode(Int.self, forKey: .version)
-        guard (1...4).contains(incomingVersion) else {
+        guard (1...5).contains(incomingVersion) else {
             throw SceneError.invalid("This pattern version is not supported.")
         }
         slot = try c.decode(Int.self, forKey: .slot)
@@ -335,7 +347,7 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
             loopEnd = try c.decode(Int64.self, forKey: .loopEnd)
             regionsEnabled = incomingVersion == 3 ? true : try c.decode(Bool.self, forKey: .regionsEnabled)
         }
-        if incomingVersion == 4 {
+        if incomingVersion >= 4 {
             automation = try c.decode([SequencerAutomation].self, forKey: .automation)
         }
         if incomingVersion == 1 && (length > 245760 || notes.contains { $0.duration > 245760 } || intro > 3840) {
@@ -356,7 +368,9 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
         notes = withUnsafeBytes(of: clip.notes) { raw in
             raw.bindMemory(to: ov_seq_note.self).prefix(Int(clip.count)).map {
                 SequencerNote(id: $0.id, start: $0.start, duration: $0.duration,
-                    pitch: Int($0.pitch), velocity: Int($0.velocity), output: $0.output != 0)
+                    pitch: Int($0.pitch), velocity: Int($0.velocity), output: $0.output != 0,
+                    quantization: $0.quant_override == 0 ? nil : NoteQuantization(
+                        grid: Int($0.quant_grid), strength: Int($0.quant_strength), ends: $0.quant_ends != 0))
             }
         }
         if clip.automation_count > 0 {
@@ -369,6 +383,7 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
                 }
             }
         }
+        if notes.contains(where: { $0.quantization != nil }) { version = 5 }
     }
 }
 
@@ -746,7 +761,7 @@ struct PianoRollEditBuffer {
             throw SceneError.invalid("Require pattern start ≤ 0 ≤ loop start < loop end ≤ tail end.")
         }
         var candidate = pattern
-        candidate.version = candidate.version == 4 ? 4 : 3
+        candidate.version = candidate.version >= 4 ? candidate.version : 3
         candidate.regionsEnabled = true
         candidate.intro = -patternStart
         candidate.loopStart = loopStart
@@ -759,7 +774,7 @@ struct PianoRollEditBuffer {
     mutating func setAutomation(_ points: [SequencerAutomation]) throws {
         var candidate = pattern
         candidate.regionsEnabled = pattern.hasRegions
-        candidate.version = 4
+        candidate.version = max(4, candidate.version)
         candidate.automation = points.sorted { $0.tick == $1.tick ? $0.id < $1.id : $0.tick < $1.tick }
         try commit(candidate)
         nextAutomationID = max(nextAutomationID, (points.map(\.id).max() ?? 0) + 1)
@@ -772,6 +787,7 @@ struct PianoRollEditBuffer {
         var points = pattern.automation.filter {
             !($0.kind == kind && $0.controller == controller && (first...last).contains($0.tick))
         }
+
         guard values.count <= 256 - points.count, UInt64(values.count) <= UInt64.max - nextAutomationID else {
             throw SceneError.invalid("The pattern cannot hold more than 256 automation points.")
         }
@@ -783,6 +799,21 @@ struct PianoRollEditBuffer {
         }
         try setAutomation(points)
         nextAutomationID = next
+    }
+
+    mutating func quantizeNotes(grid: Int, strength: Int, ends: Bool) throws {
+        guard (0...3840).contains(grid), (0...100).contains(strength) else {
+            throw SceneError.invalid("Invalid note quantization.")
+        }
+        let indices = operationIndices()
+        guard !indices.isEmpty else { return }
+        var candidate = pattern
+        candidate.regionsEnabled = pattern.hasRegions
+        candidate.version = 5
+        for index in indices {
+            candidate.notes[index].quantization = NoteQuantization(grid: grid, strength: strength, ends: ends)
+        }
+        try commit(candidate)
     }
 
     mutating func conform(root: Int, scale: Scale, direction: ScaleDirection) throws {

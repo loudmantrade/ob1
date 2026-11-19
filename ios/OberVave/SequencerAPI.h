@@ -11,6 +11,7 @@ typedef struct {
     uint64_t id;
     int64_t start, duration;
     uint32_t pitch, velocity, output;
+    uint32_t quant_override, quant_grid, quant_strength, quant_ends;
 } ov_seq_note;
 typedef struct {
     uint64_t id;

@@ -205,6 +205,32 @@ static void checkAutomation()
     std::puts("PASS automation: bounded validation, CC and 14-bit bend, ordered equal ticks, loop and tail");
 }
 
+static void checkNoteQuantization()
+{
+    auto data = std::make_unique<PatternData>();
+    data->id = 1; data->length = 960; data->quantization.grid = 120;
+    std::copy_n("Quant", 6, data->name.begin());
+    data->count = 2; data->nextNote = 3;
+    data->notes[0] = {1, 100, 145, {Target::Instruments, 1, Stage::Output}, 0, 60, 100};
+    data->notes[1] = {2, 200, 145, {Target::Instruments, 1, Stage::Output}, 0, 64, 100};
+    data->notes[0].quantizationOverride = true;
+    data->notes[0].quantization = {240, 100, true};
+    Pattern pattern;
+    assert(pattern.restore(*data) == PatternError::None);
+    PatternTiming a, b;
+    assert(pattern.timingAt(0, a) == PatternError::None && a.start == 0 && a.duration == 240);
+    assert(pattern.timingAt(1, b) == PatternError::None && b.start == 240 && b.duration == 145);
+    data->notes[0].quantization = {0, 100, false};
+    assert(pattern.restore(*data) == PatternError::None);
+    assert(pattern.timingAt(0, a) == PatternError::None && a.start == 100 && a.duration == 145);
+    data->notes[0].quantization.grid = 240; data->notes[0].quantization.strength = 50;
+    assert(pattern.restore(*data) == PatternError::None);
+    assert(pattern.timingAt(0, a) == PatternError::None && a.start == 50 && a.duration == 145);
+    data->notes[0].quantization.strength = 101;
+    assert(pattern.restore(*data) == PatternError::InvalidQuantization);
+    std::puts("PASS note quantization: per-note override, start/end, strength, off and original timing");
+}
+
 static void checkRecording()
 {
     auto recorder = std::make_unique<ClipRecorder>();
@@ -416,5 +442,5 @@ static void checkRecordingClicks()
 
 int main()
 {
-    checkPosition(); checkPlayback(); checkRegionTails(); checkAutomation(); checkRecording(); checkRecordModes(); checkBarCompletion(); checkRecordingClicks();
+    checkPosition(); checkPlayback(); checkRegionTails(); checkAutomation(); checkNoteQuantization(); checkRecording(); checkRecordModes(); checkBarCompletion(); checkRecordingClicks();
 }

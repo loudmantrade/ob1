@@ -326,6 +326,22 @@ struct SceneChecks {
         precondition(regionEditor.pattern == regionPattern)
         regionEditor.redo()
         precondition(regionEditor.pattern == automatedPattern)
+        regionEditor.selection = [1]
+        try regionEditor.quantizeNotes(grid: 240, strength: 50, ends: true)
+        let perNotePattern = regionEditor.pattern
+        precondition(perNotePattern.version == 5 && perNotePattern.notes[0].start == automatedPattern.notes[0].start &&
+                     perNotePattern.notes[0].quantization == NoteQuantization(grid: 240, strength: 50, ends: true) &&
+                     perNotePattern.notes[1].quantization == nil)
+        let perNoteJSON = try JSONEncoder().encode(perNotePattern)
+        let decodedPerNote = try JSONDecoder().decode(SequencerPattern.self, from: perNoteJSON)
+        precondition(decodedPerNote == perNotePattern)
+        precondition(SequencerPattern(core: perNotePattern.coreClip()) == perNotePattern)
+        try regionEditor.quantizeNotes(grid: 120, strength: 100, ends: false)
+        precondition(regionEditor.pattern.notes[0].start == perNotePattern.notes[0].start)
+        regionEditor.undo()
+        precondition(regionEditor.pattern == perNotePattern)
+        regionEditor.undo()
+        precondition(regionEditor.pattern == automatedPattern)
         var invalidPoint = points[0]; invalidPoint.value = 128
         do {
             try regionEditor.setAutomation([invalidPoint])

@@ -757,6 +757,9 @@ static void checkAutomationClip()
     auto scene = std::make_unique<ov_scene_config>();
     scene->tempo = 120; scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
     auto source = std::make_unique<ov_seq_clip>(clip(0, 0));
+    source->notes[0].start = 100;
+    source->notes[0].quant_override = 1; source->notes[0].quant_grid = 240;
+    source->notes[0].quant_strength = 100; source->notes[0].quant_ends = 1;
     source->automation_count = 2;
     source->automation[0] = {2, 0, 1, 0, 16383};
     source->automation[1] = {1, 0, 0, 1, 93};
@@ -768,6 +771,10 @@ static void checkAutomationClip()
     rack::encodeClip(0, 0, rack::clips[0][0]->pattern.data(), *output);
     assert(output->automation_count == 2 && output->automation[0].id == 1 &&
            output->automation[1].id == 2 && output->automation[1].value == 16383);
+    assert(output->notes[0].start == 100 && output->notes[0].quant_override == 1 &&
+           output->notes[0].quant_grid == 240 && output->notes[0].quant_ends == 1);
+    music::PatternTiming timing {};
+    assert(rack::clips[0][0]->pattern.timingAt(0, timing) == music::PatternError::None && timing.start == 0);
     auto replacement = std::make_unique<ov_seq_clip>(*source);
     replacement->automation[0].value = 8192;
     const auto epoch = ov_seq_scene_epoch(), revision = ov_seq_cell_revision(0, 0);
