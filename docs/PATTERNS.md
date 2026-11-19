@@ -282,9 +282,10 @@ same-cell/off-grid drops are no-ops.
 
 ### Piano Roll implementation in progress
 
-Double-tapping a populated cell opens a Piano Roll showing the notes, keyboard,
-timeline and playback position. Two fingers pan and independently zoom the
-axes. A stationary hold on empty space creates a note; drag empty space to
+Double-tapping a populated cell opens a full-screen Piano Roll with a Close
+button, showing the notes, keyboard, timeline and playback position. Two
+fingers pan and independently zoom the axes simultaneously. The editor cannot
+be dismissed by a swipe. A stationary hold on empty space creates a note; drag empty space to
 select a rectangle. Drag a note body to move the selection, its left edge to
 change velocity, or its right edge to change duration. Tapping a note selects
 it; tap then drag copies the selection, and tap then hold deletes it.

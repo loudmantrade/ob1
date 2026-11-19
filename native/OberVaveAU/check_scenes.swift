@@ -213,7 +213,7 @@ struct SceneChecks {
         let first = CoreGraphics.CGPoint(x: 100, y: 120)
         let second = CoreGraphics.CGPoint(x: 200, y: 220)
         let anchorTick = viewport.tick(at: 150), anchorPitch = viewport.pitch(at: 170)
-        var navigation = PianoRollNavigation(viewport: viewport, first: first, second: second)
+        var navigation = PianoRollNavigation(first: first, second: second)
         navigation.update(viewport: &viewport, first: first, second: CoreGraphics.CGPoint(x: 300, y: 220))
         precondition(viewport.beatWidth == 192 && viewport.pitchHeight == 20)
         precondition(abs(viewport.tick(at: 200) - anchorTick) < 0.000001)
@@ -228,6 +228,33 @@ struct SceneChecks {
         navigation.update(viewport: &viewport, first: first, second: CoreGraphics.CGPoint(x: -10000, y: -10000))
         precondition(viewport.beatWidth <= PianoRollViewport.maximumBeatWidth &&
                      viewport.pitchHeight <= PianoRollViewport.maximumPitchHeight)
+        var simultaneous = PianoRollViewport()
+        var simultaneousNavigation = PianoRollNavigation(first: .init(x: 100, y: 120),
+                                                         second: .init(x: 200, y: 220))
+        let tickAnchor = simultaneous.tick(at: 150), pitchAnchor = simultaneous.pitch(at: 170)
+        simultaneousNavigation.update(viewport: &simultaneous, first: .init(x: 80, y: 100),
+                                      second: .init(x: 260, y: 280))
+        precondition(abs(simultaneous.beatWidth - 172.8) < 0.000001 &&
+                     abs(simultaneous.pitchHeight - 36) < 0.000001)
+        precondition(abs(simultaneous.tick(at: 170) - tickAnchor) < 0.000001 &&
+                     abs(simultaneous.pitch(at: 190) - pitchAnchor) < 0.000001)
+        var bounded = PianoRollViewport()
+        bounded.leftTick = 4790
+        var boundedNavigation = PianoRollNavigation(first: .init(x: 100, y: 100),
+                                                    second: .init(x: 200, y: 200))
+        boundedNavigation.update(viewport: &bounded, first: .init(x: 0, y: 100),
+                                 second: .init(x: 100, y: 200))
+        bounded.clamp(length: 3840, intro: 0, size: .init(width: 600, height: 400))
+        precondition(bounded.leftTick == 4800)
+        boundedNavigation.update(viewport: &bounded, first: .init(x: 10, y: 100),
+                                 second: .init(x: 110, y: 200))
+        precondition(abs(bounded.leftTick - 4700) < 0.000001)
+        var limited = PianoRollViewport()
+        var limitedNavigation = PianoRollNavigation(first: .init(x: 0, y: 0), second: .init(x: 100, y: 100))
+        limitedNavigation.update(viewport: &limited, first: .init(x: 0, y: 0), second: .init(x: 1000, y: 100))
+        precondition(limited.beatWidth == PianoRollViewport.maximumBeatWidth)
+        limitedNavigation.update(viewport: &limited, first: .init(x: 0, y: 0), second: .init(x: 900, y: 100))
+        precondition(limited.beatWidth < PianoRollViewport.maximumBeatWidth)
         var arbitration = PianoRollTouchArbitration()
         arbitration.begin()
         precondition(arbitration.mode == .editing && arbitration.secondFinger())

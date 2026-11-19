@@ -770,9 +770,11 @@ struct PianoRollNavigationSurface: UIViewRepresentable {
         view.onEdit = onEdit
         view.onNavigation = { [weak view] first, second, beginning in
             guard let view else { return }
-            if beginning { view.navigation = PianoRollNavigation(viewport: viewport, first: first, second: second) }
-            view.navigation?.update(viewport: &viewport, first: first, second: second)
-            viewport.clamp(length: pattern.length, intro: pattern.intro, size: gridSize)
+            if beginning { view.navigation = PianoRollNavigation(first: first, second: second) }
+            var next = viewport
+            view.navigation?.update(viewport: &next, first: first, second: second)
+            next.clamp(length: pattern.length, intro: pattern.intro, size: gridSize)
+            viewport = next
         }
     }
 }

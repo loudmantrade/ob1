@@ -510,21 +510,18 @@ enum PianoRollGrid {
 struct PianoRollNavigation {
     private struct Axis {
         var separation: Double
-        var scale: Double
         var sign: Double
     }
     private static let deadZone = 12.0
     private var horizontal: Axis
     private var vertical: Axis
-    private let anchorTick: Double
-    private let anchorPitch: Double
+    private var midpoint: CoreGraphics.CGPoint
 
-    init(viewport: PianoRollViewport, first: CoreGraphics.CGPoint, second: CoreGraphics.CGPoint) {
+    init(first: CoreGraphics.CGPoint, second: CoreGraphics.CGPoint) {
         let dx = Double(second.x - first.x), dy = Double(second.y - first.y)
-        horizontal = Axis(separation: abs(dx), scale: viewport.beatWidth, sign: dx.sign == .minus ? -1 : 1)
-        vertical = Axis(separation: abs(dy), scale: viewport.pitchHeight, sign: dy.sign == .minus ? -1 : 1)
-        anchorTick = viewport.tick(at: Double(first.x + second.x) / 2)
-        anchorPitch = viewport.pitch(at: Double(first.y + second.y) / 2)
+        horizontal = Axis(separation: abs(dx), sign: dx.sign == .minus ? -1 : 1)
+        vertical = Axis(separation: abs(dy), sign: dy.sign == .minus ? -1 : 1)
+        midpoint = CoreGraphics.CGPoint(x: (first.x + second.x) / 2, y: (first.y + second.y) / 2)
     }
 
     private static func scale(_ axis: inout Axis, delta: Double, current: Double,
@@ -533,18 +530,21 @@ struct PianoRollNavigation {
         let sign = delta.sign == .minus ? -1.0 : 1.0
         if distance < deadZone {
             axis.separation = 0
-            axis.scale = current
             return current
         }
         if axis.separation < deadZone || axis.sign != sign {
-            axis = Axis(separation: distance, scale: current, sign: sign)
+            axis = Axis(separation: distance, sign: sign)
             return current
         }
-        return min(maximum, max(minimum, axis.scale * distance / axis.separation))
+        let result = min(maximum, max(minimum, current * distance / axis.separation))
+        axis.separation = distance
+        return result
     }
 
     mutating func update(viewport: inout PianoRollViewport, first: CoreGraphics.CGPoint,
                          second: CoreGraphics.CGPoint) {
+        let anchorTick = viewport.tick(at: Double(midpoint.x))
+        let anchorPitch = viewport.pitch(at: Double(midpoint.y))
         viewport.beatWidth = Self.scale(&horizontal, delta: Double(second.x - first.x), current: viewport.beatWidth,
                                         minimum: PianoRollViewport.minimumBeatWidth, maximum: PianoRollViewport.maximumBeatWidth)
         viewport.pitchHeight = Self.scale(&vertical, delta: Double(second.y - first.y), current: viewport.pitchHeight,
@@ -553,6 +553,7 @@ struct PianoRollNavigation {
         let midY = Double(first.y + second.y) / 2
         viewport.leftTick = anchorTick - midX * 960 / viewport.beatWidth
         viewport.topPitch = anchorPitch + midY / viewport.pitchHeight
+        midpoint = CoreGraphics.CGPoint(x: midX, y: midY)
     }
 }
 

@@ -997,9 +997,8 @@ struct SequencerView: View {
             }
             .padding(24).presentationDetents([.medium, .large])
         }
-        .sheet(item: $pianoRoll) { pattern in
+        .fullScreenCover(item: $pianoRoll) { pattern in
             PianoRollView(model: model, pattern: pattern) { pianoRoll = nil }
-                .presentationDetents([.large])
         }
         .onReceive(Timer.publish(every: 0.04, on: .main, in: .common).autoconnect()) { _ in
             meters = (0..<16).map { slot in
