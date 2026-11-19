@@ -25,8 +25,9 @@ struct PianoRollView: View {
     @State private var controller = 1
     @State private var gridHeight: CGFloat = 0
     @State private var laneGesture: AutomationGesture?
+    @State private var velocityGesture: VelocityGesture?
 
-    private enum Lane: String, CaseIterable { case none = "Off", cc = "CC", bend = "Pitch Bend" }
+    private enum Lane: String, CaseIterable { case none = "Off", velocity = "Velocity", cc = "CC", bend = "Pitch Bend" }
     private enum LaneMode: String, CaseIterable { case points = "Points", draw = "Freehand" }
     private let laneHeight: CGFloat = 125
 
@@ -38,6 +39,10 @@ struct PianoRollView: View {
         var moved = false
         var held = false
         let start: CGPoint
+    }
+    private struct VelocityGesture {
+        let baseline: PianoRollEditBuffer
+        let note: SequencerNote
     }
 
     private struct EditGesture {
@@ -115,7 +120,7 @@ struct PianoRollView: View {
                 Picker("Lane", selection: $lane) {
                     ForEach(Lane.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }.pickerStyle(.segmented).frame(maxWidth: 250)
-                if lane != .none {
+                if lane == .cc || lane == .bend {
                     Picker("Mode", selection: $laneMode) {
                         ForEach(LaneMode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }.pickerStyle(.segmented).frame(maxWidth: 200)
@@ -216,6 +221,10 @@ struct PianoRollView: View {
 
     private func touch(_ phase: PianoRollNavigationView.EditPhase, _ point: CGPoint) {
         guard !busy else { return }
+        if velocityGesture != nil || (phase == .begin && lane == .velocity && point.y >= gridHeight) {
+            velocityTouch(phase, point)
+            return
+        }
         if laneGesture != nil || (phase == .begin && lane != .none && point.y >= gridHeight) {
             automationTouch(phase, point)
             return
@@ -301,6 +310,38 @@ struct PianoRollView: View {
         case .cancel:
             if let active = gesture { editor = active.baseline }
             gesture = nil; selectionRect = nil; lastTap = nil
+        }
+    }
+
+    private func velocityTouch(_ phase: PianoRollNavigationView.EditPhase, _ point: CGPoint) {
+        switch phase {
+        case .begin:
+            guard point.x >= 0, let current = editor,
+                  let note = current.pattern.notes.min(by: {
+                      abs(viewport.x(forTick: Double($0.start)) - Double(point.x)) <
+                      abs(viewport.x(forTick: Double($1.start)) - Double(point.x))
+                  }), abs(viewport.x(forTick: Double(note.start)) - Double(point.x)) <= 12 else { return }
+            velocityGesture = VelocityGesture(baseline: current, note: note)
+        case .move, .end:
+            guard let active = velocityGesture else { return }
+            let value = PianoRollNoteHit.velocity(y: Double(point.y - gridHeight), height: Double(laneHeight))
+            var candidate = active.baseline
+            if !candidate.selection.contains(active.note.id) { candidate.selection = [active.note.id] }
+            do {
+                try candidate.changeVelocity(by: value - active.note.velocity)
+                editor = candidate
+                if phase == .end {
+                    velocityGesture = nil
+                    publish(candidate, replacing: active.baseline)
+                }
+            } catch {
+                editor = active.baseline; velocityGesture = nil
+                model.errorMessage = error.localizedDescription
+            }
+        case .cancel:
+            if let active = velocityGesture { editor = active.baseline }
+            velocityGesture = nil
+        case .hold: break
         }
     }
 
@@ -465,6 +506,18 @@ struct PianoRollView: View {
         if lane != .none {
             let rect = CGRect(x: left, y: grid.maxY, width: grid.width, height: laneHeight)
             context.fill(Path(rect), with: .color(.gray.opacity(0.18)))
+            if lane == .velocity {
+                for note in current.notes {
+                    let x = left + viewport.x(forTick: Double(note.start))
+                    guard x >= left && x <= size.width else { continue }
+                    let y = grid.maxY + laneHeight * (1 - Double(note.velocity) / 127)
+                    var line = Path(); line.move(to: CGPoint(x: x, y: grid.maxY + laneHeight))
+                    line.addLine(to: CGPoint(x: x, y: y))
+                    let color: Color = editor?.selection.contains(note.id) == true ? .orange : .cyan
+                    context.stroke(line, with: .color(color), lineWidth: 3)
+                    context.fill(Path(ellipseIn: CGRect(x: x - 4, y: y - 4, width: 8, height: 8)), with: .color(color))
+                }
+            } else {
             let kind: SequencerAutomation.Kind = lane == .bend ? .pitchBend : .cc
             let cc = kind == .cc ? controller : 0
             let maxValue = kind == .cc ? 127.0 : 16383.0
@@ -483,6 +536,7 @@ struct PianoRollView: View {
                 line.addLine(to: CGPoint(x: x, y: y))
                 context.stroke(line, with: .color(.cyan.opacity(0.55)), lineWidth: 1)
                 context.fill(Path(ellipseIn: CGRect(x: x - 4, y: y - 4, width: 8, height: 8)), with: .color(.cyan))
+            }
             }
         }
         if Int(ov_seq_active(UInt32(pattern.slot))) == pattern.row {

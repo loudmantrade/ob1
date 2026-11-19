@@ -554,6 +554,12 @@ enum PianoRollNoteHit {
         Int(viewport.pitch(at: y).rounded(.up))
     }
 
+    static func velocity(y: Double, height: Double) -> Int {
+        guard height > 0 else { return 1 }
+        let fraction = min(1, max(0, 1 - y / height))
+        return min(127, max(1, Int((fraction * 127).rounded())))
+    }
+
     static func hit(point: CoreGraphics.CGPoint, notes: [SequencerNote], viewport: PianoRollViewport)
         -> (id: UInt64, zone: Zone)? {
         for note in notes.reversed() {

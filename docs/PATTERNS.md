@@ -314,6 +314,8 @@ The lower CC / Pitch Bend lane shares the timeline: tap to add a point, drag
 an existing point, hold it to delete, or use Freehand to draw a bounded stroke.
 CC defaults to modulation (CC1); the stepper selects any CC. Pitch bend is
 displayed with its 8192 center line. Automation uses step interpolation.
+The Velocity lane edits the note nearest the touched onset; if that note is
+selected, the same signed velocity delta applies to the selected group.
 Re-recording retains automation;
 if the new take cannot contain its points, publication fails instead of
 silently discarding them.
