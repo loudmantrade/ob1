@@ -367,6 +367,16 @@ struct SceneChecks {
         let decodedPerNote = try JSONDecoder().decode(SequencerPattern.self, from: perNoteJSON)
         precondition(decodedPerNote == perNotePattern)
         precondition(SequencerPattern(core: perNotePattern.coreClip()) == perNotePattern)
+        var combinedEditor = regionEditor
+        try combinedEditor.regions(patternStart: -480, loopStart: -240, loopEnd: 960, tailEnd: 3840, loop: true)
+        let combined = combinedEditor.pattern
+        precondition(combined.version == 6 && combined.patternStart == -480 &&
+                     combined.loopStart == -240 && combined.automation == perNotePattern.automation &&
+                     combined.notes[0].quantization == perNotePattern.notes[0].quantization)
+        precondition(SequencerPattern(core: combined.coreClip()) == combined)
+        let combinedJSON = try JSONEncoder().encode(combined)
+        let decodedCombined = try JSONDecoder().decode(SequencerPattern.self, from: combinedJSON)
+        precondition(decodedCombined == combined)
         try regionEditor.quantizeNotes(grid: 120, strength: 100, ends: false)
         precondition(regionEditor.pattern.notes[0].start == perNotePattern.notes[0].start)
         regionEditor.undo()
