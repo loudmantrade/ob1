@@ -455,7 +455,10 @@ extension OberVaveModel {
             let url = try pendingSceneURL ?? scenesFolder().appendingPathComponent("\(UUID().uuidString).obscene.json")
             try encoder.encode(document).write(to: url, options: .atomic)
             if pendingSceneURL == nil, sceneFileURL != nil {
-                sceneSessions[sceneSessionKey] = currentSceneSession()
+                var previous = currentSceneSession()
+                previous.document.instruments = saved
+                previous.document.tempo = Int(captured.tempo)
+                sceneSessions[sceneSessionKey] = previous
             } else {
                 sceneSessions.removeValue(forKey: sceneSessionKey)
             }
@@ -1614,15 +1617,15 @@ struct RackSceneView: View {
                             Spacer()
                             ShareLink(item: scene.url) { Image(systemName: "square.and.arrow.up") }
                         }
-                        if !model.sceneSessions.isEmpty {
-                            Section("Scenes in this session") {
-                                ForEach(model.sceneSessions.keys.sorted(), id: \.self) { key in
-                                    if let scene = model.sceneSessions[key] {
-                                        Button("\(scene.document.name) · unsaved session") {
-                                            model.restoreSessionScene(key)
-                                            name = model.sceneName
-                                        }
-                                    }
+                    }
+                }
+                if !model.sceneSessions.isEmpty {
+                    Section("Scenes in this session") {
+                        ForEach(model.sceneSessions.keys.sorted(), id: \.self) { key in
+                            if let scene = model.sceneSessions[key] {
+                                Button("\(scene.document.name) · unsaved session") {
+                                    model.restoreSessionScene(key)
+                                    name = model.sceneName
                                 }
                             }
                         }
