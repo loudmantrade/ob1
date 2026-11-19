@@ -134,6 +134,9 @@ extension OberVaveModel {
                 $0.epoch == event.epoch && $0.source == event.source &&
                     $0.status == event.status && $0.controller == controller
             }
+            let before = withUnsafeBytes(of: event.before.parameters) { Array($0.bindMemory(to: UInt8.self)) }
+            let after = withUnsafeBytes(of: event.after.parameters) { Array($0.bindMemory(to: UInt8.self)) }
+            if key == nil && before == after { continue }
             var index = key
             if let key, externalParameterGestures[key].expired(at: frame) {
                 sceneParameterHistory.record(externalParameterGestures.remove(at: key).edits)
@@ -144,8 +147,6 @@ extension OberVaveModel {
                     source: event.source, status: event.status, controller: controller, frame: frame))
                 index = externalParameterGestures.count - 1
             }
-            let before = withUnsafeBytes(of: event.before.parameters) { Array($0.bindMemory(to: UInt8.self)) }
-            let after = withUnsafeBytes(of: event.after.parameters) { Array($0.bindMemory(to: UInt8.self)) }
             externalParameterGestures[index!].merge(slot: Int(event.slot), before: before, after: after)
             externalParameterGestures[index!].frame = frame
         }
@@ -163,12 +164,33 @@ extension OberVaveModel {
 
     func applySceneParameterHistory(undo: Bool) {
         syncExternalParameterHistory()
-        guard pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty,
+        guard pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty, activeSceneValueEdits.isEmpty,
               externalParameterGestures.isEmpty,
               pendingSceneName == nil, !sceneSwitchPending else {
             errorMessage = "Finish the current parameter edit before using history."; return
         }
-        guard let edits = undo ? sceneParameterHistory.undoStack.last : sceneParameterHistory.redoStack.last else { return }
+        guard let entry = undo ? sceneParameterHistory.undoStack.last : sceneParameterHistory.redoStack.last else { return }
+        if case .value(let edit) = entry {
+            let expected = undo ? edit.after : edit.before
+            let replacement = undo ? edit.before : edit.after
+            guard sceneValue(edit.field) == expected, edit.field != .tempo || !isMIDIClockActive else {
+                errorMessage = "The scene setting changed or is controlled by MIDI clock; history was not applied."
+                return
+            }
+            restoringSceneHistory = true
+            switch edit.field {
+            case .tempo: setTempo(Int(replacement))
+            case .masterLevel: setMasterLevelDB(replacement)
+            case .masterPan: setMasterPan(replacement)
+            case .keyboardChannels:
+                keyboardChannelMask = UInt32(replacement)
+                ov_keyboard_channels(keyboardChannelMask)
+            }
+            restoringSceneHistory = false
+            sceneParameterHistory.acknowledge(undo: undo)
+            return
+        }
+        guard case .parameters(let edits) = entry else { return }
         let changes = edits.map { edit in
             ov_rack_parameter_change(slot: UInt32(edit.slot), parameter: UInt32(edit.parameter),
                 expected: UInt32(undo ? edit.after : edit.before), replacement: UInt32(undo ? edit.before : edit.after))
@@ -466,7 +488,9 @@ extension OberVaveModel {
     }
 
     func toggleKeyboardChannel(_ channel: Int) {
-        keyboardChannelMask ^= 1 << (channel - 1)
+        let next = keyboardChannelMask ^ (1 << (channel - 1))
+        recordSceneValue(.keyboardChannels, before: Double(keyboardChannelMask), after: Double(next))
+        keyboardChannelMask = next
         ov_keyboard_channels(keyboardChannelMask)
     }
 
@@ -596,7 +620,7 @@ extension OberVaveModel {
             syncSequencerState()
             syncExternalParameterHistory(finish: true)
             guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
-                  pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty, recordingPattern == nil,
+                  pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty, activeSceneValueEdits.isEmpty, recordingPattern == nil,
                   ov_seq_record_state() == 0, pendingSceneName == nil, !sceneSwitchPending else {
                 throw SceneError.invalid("Finish recording and pending pattern edits before loading a scene.")
             }
@@ -616,7 +640,7 @@ extension OberVaveModel {
                     guard self.recordingPattern == nil, ov_seq_record_state() == 0,
                           self.pendingPatternTransfer == nil, self.pendingPianoPublication == nil,
                           self.pendingSequencerHistory == nil, self.pendingSceneParameterHistory == nil,
-                          self.activeParameterEdits.isEmpty else {
+                          self.activeParameterEdits.isEmpty, self.activeSceneValueEdits.isEmpty else {
                         throw SceneError.invalid("The scene changed while switching. Finish recording and try again.")
                     }
                     var previous = self.currentSceneSession()
@@ -650,7 +674,7 @@ extension OberVaveModel {
     private func applyScene(_ document: RackSceneDocument) throws {
         try document.validate()
         guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
-              pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty else { throw SceneError.invalid("Wait for the pending edit.") }
+              pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty, activeSceneValueEdits.isEmpty else { throw SceneError.invalid("Wait for the pending edit.") }
         guard recordingPattern == nil else { throw SceneError.invalid("Finish recording before loading a scene.") }
         var c = ov_scene_config()
         c.tempo = UInt32(document.tempo)
@@ -681,7 +705,9 @@ extension OberVaveModel {
         keyboardChannelMask = document.keyboardMask
         ov_keyboard_channels(document.keyboardMask)
         tempo = document.tempo
+        restoringSceneHistory = true
         setMasterLevelDB(document.masterDB); setMasterPan(document.masterPan)
+        restoringSceneHistory = false
         sceneName = document.name
         sceneStatus = "Loaded \(document.name)"
         showSelectedInstrument()
@@ -1737,7 +1763,21 @@ struct RackSceneView: View {
             .disabled(model.pendingSceneName != nil)
             .navigationTitle("Scenes & Instruments")
             .disabled(model.sceneSwitchPending)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                ToolbarItemGroup(placement: .navigationBarLeading) {
+                    Button { model.applySceneParameterHistory(undo: true) } label: {
+                        Image(systemName: "arrow.uturn.backward")
+                    }
+                    .accessibilityLabel("Undo scene edit")
+                    .disabled(model.sceneParameterHistory.undoStack.isEmpty || sceneHistoryBusy)
+                    Button { model.applySceneParameterHistory(undo: false) } label: {
+                        Image(systemName: "arrow.uturn.forward")
+                    }
+                    .accessibilityLabel("Redo scene edit")
+                    .disabled(model.sceneParameterHistory.redoStack.isEmpty || sceneHistoryBusy)
+                }
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
             .onAppear { name = model.sceneName; model.refreshSavedScenes() }
             .onChange(of: model.sceneName) { name = $0 }
             .sheet(item: $draftInstrument) { instrument in
@@ -1770,6 +1810,12 @@ struct RackSceneView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private var sceneHistoryBusy: Bool {
+        model.pendingSceneParameterHistory != nil || model.pendingSceneName != nil ||
+        model.sceneSwitchPending || !model.activeParameterEdits.isEmpty ||
+        !model.activeSceneValueEdits.isEmpty || !model.externalParameterGestures.isEmpty
     }
 }
 

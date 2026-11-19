@@ -372,6 +372,8 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var sceneParameterHistory = SceneParameterHistory()
     @Published var pendingSceneParameterHistory: PendingSceneParameterHistory?
     @Published var activeParameterEdits: [Int: SceneParameterEdit] = [:]
+    @Published var activeSceneValueEdits: [SceneValueField: SceneValueEdit] = [:]
+    var restoringSceneHistory = false
     @Published var externalParameterGestures: [ExternalParameterGesture] = []
     var sceneParameterToken: UInt64 = 0
     var pianoRollViewports: [Int: PianoRollViewport] = [:]
@@ -771,6 +773,27 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         }
     }
 
+    func setParameterGroup(_ values: [(SynthParameter, Int)]) {
+        guard pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty,
+              values.allSatisfy({ parameterValues.indices.contains($0.0.rawValue) }) else {
+            errorMessage = "Finish the current parameter edit before resetting controls."; return
+        }
+        syncExternalParameterHistory()
+        var edits: [SceneParameterEdit] = []
+        for (parameter, proposed) in values {
+            let index = parameter.rawValue
+            let value = min(parameterMax(parameter), max(0, proposed))
+            edits.append(SceneParameterEdit(slot: selectedSlot, parameter: index,
+                                            before: parameterValues[index], after: value))
+            ov_set_parameter(UInt32(index), UInt32(value))
+            parameterValues[index] = value
+            rememberPerformanceMode(parameter, value: value)
+        }
+        sceneParameterHistory.record(edits)
+        rememberSelectedInstrument()
+        recordMIDIActivity()
+    }
+
     var controllerContext: Int { selectedSlot }
     func armControllerLearn(_ armed: Bool) { ov_controller_learn(armed ? 1 : 0) }
     func takeControllerLearn() -> Int { Int(ov_controller_learned()) }
@@ -800,6 +823,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     func setTempo(_ bpm: Int) {
         guard !isMIDIClockActive else { return }
         let tempo = min(240, max(40, bpm))
+        recordSceneValue(.tempo, before: Double(self.tempo), after: Double(tempo))
         ov_set_tempo(UInt32(tempo))
         self.tempo = tempo
         recordMIDIActivity()
@@ -832,6 +856,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
 
     func setMasterLevelDB(_ decibels: Double) {
         let level = min(0, max(-48, decibels))
+        recordSceneValue(.masterLevel, before: masterLevelDB, after: level)
         audioEngine.mainMixerNode.outputVolume = level <= -48 ? 0 : Float(pow(10, level / 20))
         masterLevelDB = level
         recordMIDIActivity()
@@ -839,9 +864,40 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
 
     func setMasterPan(_ pan: Double) {
         let value = min(1, max(-1, pan))
+        recordSceneValue(.masterPan, before: masterPan, after: value)
         ov_set_master_pan(Float(value))
         masterPan = value
         recordMIDIActivity()
+    }
+
+    func sceneValue(_ field: SceneValueField) -> Double {
+        switch field {
+        case .tempo: Double(tempo)
+        case .masterLevel: masterLevelDB
+        case .masterPan: masterPan
+        case .keyboardChannels: Double(keyboardChannelMask)
+        }
+    }
+
+    func recordSceneValue(_ field: SceneValueField, before: Double, after: Double) {
+        guard !restoringSceneHistory else { return }
+        syncExternalParameterHistory()
+        if var edit = activeSceneValueEdits[field] {
+            edit.after = after
+            activeSceneValueEdits[field] = edit
+        } else {
+            sceneParameterHistory.record(SceneValueEdit(field: field, before: before, after: after))
+        }
+    }
+
+    func editSceneValue(_ field: SceneValueField, editing: Bool) {
+        if editing {
+            guard activeSceneValueEdits[field] == nil else { return }
+            let value = sceneValue(field)
+            activeSceneValueEdits[field] = SceneValueEdit(field: field, before: value, after: value)
+        } else if let edit = activeSceneValueEdits.removeValue(forKey: field) {
+            sceneParameterHistory.record(edit)
+        }
     }
 
     func tapTempo() {
@@ -1692,14 +1748,14 @@ struct ContentView: View {
                     Image(systemName: "arrow.uturn.backward")
                 }
                 .disabled(model.sceneParameterHistory.undoStack.isEmpty || model.pendingSceneParameterHistory != nil ||
-                          !model.activeParameterEdits.isEmpty || !model.externalParameterGestures.isEmpty)
-                .accessibilityLabel("Undo synthesizer parameter")
+                          !model.activeParameterEdits.isEmpty || !model.activeSceneValueEdits.isEmpty || !model.externalParameterGestures.isEmpty)
+                .accessibilityLabel("Undo scene edit")
                 Button { model.applySceneParameterHistory(undo: false) } label: {
                     Image(systemName: "arrow.uturn.forward")
                 }
                 .disabled(model.sceneParameterHistory.redoStack.isEmpty || model.pendingSceneParameterHistory != nil ||
-                          !model.activeParameterEdits.isEmpty || !model.externalParameterGestures.isEmpty)
-                .accessibilityLabel("Redo synthesizer parameter")
+                          !model.activeParameterEdits.isEmpty || !model.activeSceneValueEdits.isEmpty || !model.externalParameterGestures.isEmpty)
+                .accessibilityLabel("Redo scene edit")
             }
             Menu {
                 ForEach(model.instruments) { instrument in
@@ -2043,7 +2099,8 @@ private struct SynthTempoControl: View {
                     set: { model.setTempo(Int($0.rounded())) }
                 ),
                 in: 40...240,
-                step: 1
+                step: 1,
+                onEditingChanged: { model.editSceneValue(.tempo, editing: $0) }
             )
             .tint(.cyan)
             .disabled(model.isMIDIClockActive)
@@ -2118,6 +2175,8 @@ var body: some View {
                     onEditingChanged: { editing in
 #if OBERVAVE_AU
                         model.editOutput(pan: false, editing: editing)
+#else
+                        model.editSceneValue(.masterLevel, editing: editing)
 #endif
                     }
                 )
@@ -2131,6 +2190,8 @@ var body: some View {
                     onEditingChanged: { editing in
 #if OBERVAVE_AU
                         model.editOutput(pan: true, editing: editing)
+#else
+                        model.editSceneValue(.masterPan, editing: editing)
 #endif
                     }
                 )
@@ -2489,9 +2550,13 @@ struct SynthControlPanel: View {
 
         private func reset(_ slot: Int) {
             let p = ModulationMatrix.parameters(slot: slot)
+#if OBERVAVE_AU
             model.setParameter(p.source, value: 0)
             model.setParameter(p.destination, value: 0)
             model.setParameter(p.amount, value: 64)
+#else
+            model.setParameterGroup([(p.source, 0), (p.destination, 0), (p.amount, 64)])
+#endif
         }
 
         private func route(_ slot: Int) -> some View {
@@ -2693,9 +2758,15 @@ struct ControllersView: View {
     }
 
     private func reset(_ slot: Int) {
+#if OBERVAVE_AU
         for (field, value) in [0, 12, 0, 0, 128, 64, 0].enumerated() {
             model.setParameter(ControllerRouting.parameter(slot, field), value: value)
         }
+#else
+        model.setParameterGroup([0, 12, 0, 0, 128, 64, 0].enumerated().map {
+            (ControllerRouting.parameter(slot, $0.offset), $0.element)
+        })
+#endif
     }
 
     private func binding(_ slot: Int, _ field: Int) -> Binding<Int> {

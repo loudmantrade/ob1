@@ -232,15 +232,39 @@ struct SceneParameterEdit: Equatable {
     var after: Int
 }
 
+enum SceneValueField: Hashable {
+    case tempo, masterLevel, masterPan, keyboardChannels
+}
+
+struct SceneValueEdit: Equatable {
+    var field: SceneValueField
+    var before: Double
+    var after: Double
+}
+
+enum SceneHistoryEntry: Equatable {
+    case parameters([SceneParameterEdit])
+    case value(SceneValueEdit)
+}
+
 struct SceneParameterHistory {
-    private(set) var undoStack: [[SceneParameterEdit]] = []
-    private(set) var redoStack: [[SceneParameterEdit]] = []
+    private(set) var undoStack: [SceneHistoryEntry] = []
+    private(set) var redoStack: [SceneHistoryEntry] = []
     private static let limit = 32
 
     mutating func record(_ edits: [SceneParameterEdit]) {
         let changes = edits.filter { $0.before != $0.after }
         guard !changes.isEmpty else { return }
-        undoStack.append(changes)
+        append(.parameters(changes))
+    }
+
+    mutating func record(_ edit: SceneValueEdit) {
+        guard edit.before != edit.after else { return }
+        append(.value(edit))
+    }
+
+    private mutating func append(_ entry: SceneHistoryEntry) {
+        undoStack.append(entry)
         if undoStack.count > Self.limit { undoStack.removeFirst() }
         redoStack.removeAll()
     }

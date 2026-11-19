@@ -318,9 +318,11 @@ Switching waits for an audio-owned snapshot before replacing the scene; if the
 audio engine is stopped or recording is active, switching is rejected rather
 than saving a potentially stale session state.
 
-The standalone synth screen also provides a separate, per-scene parameter
+The standalone synth screen also provides a separate, per-scene scene-edit
 history, limited to 32 actions. A knob or slider gesture is one action;
-individual parameter selections are separate actions. External MIDI CC,
+individual parameter selections are separate actions, and a multi-control
+reset is one action. Tempo, master level and pan, and keyboard channel
+selection share that history. External MIDI CC,
 channel pressure and pitch bend changes to synth parameters are grouped by
 source, channel and controller until 500 ms of audio time without a matching
 message. Pattern automation is excluded. Applying parameter history checks
@@ -328,7 +330,7 @@ the current audio values and scene epoch atomically; conflicts are rejected
 without changing any parameter or restarting playback. If the external MIDI
 event queue overflows, the parameter history is cleared and an error is shown
 rather than preserving an incomplete history. This parameter history does not
-yet cover presets, instrument management, scene settings or mixer operations.
+yet cover presets, instrument management, all scene settings or mixer operations.
 
 Copy/Paste retains relative timing and routing, with the most recent empty-grid
 tap as the paste anchor (initially tick zero). Paste creates new note IDs and
