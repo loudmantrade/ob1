@@ -177,6 +177,17 @@ int ov_seq_change_full_bundle(const ov_rack_sound_change* sounds, uint32_t sound
                               const ov_seq_slot_change* slots, uint32_t slot_count,
                               const ov_seq_tempo_change* tempo,
                               uint64_t epoch, uint64_t token);
+/* Also reject if any audio-owned slot configuration, solo state, generation,
+   or cell revision differs from the supplied audio-boundary snapshot.
+   The snapshot is copied before return. */
+int ov_seq_change_guarded_bundle(const ov_rack_sound_change* sounds, uint32_t sound_count,
+                                 const ov_rack_mixer_change* mixer, uint32_t mixer_count,
+                                 const ov_seq_cell_change* cells, uint32_t cell_count,
+                                 const ov_seq_route_change* routes, uint32_t route_count,
+                                 const ov_seq_slot_guard* guards, uint32_t guard_count,
+                                 const ov_seq_slot_change* slots, uint32_t slot_count,
+                                 const ov_seq_tempo_change* tempo, const ov_seq_scene_snapshot* expected,
+                                 uint64_t token);
 /* Brief, output-stage preview for this instrument. Audio owner schedules Note Off;
    previews do not enter the recorder and have independent note ownership. */
 int ov_seq_audition(uint32_t slot, uint32_t pitch, uint32_t velocity, uint64_t epoch);

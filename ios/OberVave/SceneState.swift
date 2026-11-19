@@ -748,6 +748,35 @@ extension SceneRestorePlan {
     func enqueue(snapshot: ov_seq_scene_snapshot, token: UInt64) throws {
         let generations = withUnsafeBytes(of: snapshot.generations) { Array($0.bindMemory(to: UInt64.self)) }
         let revisions = withUnsafeBytes(of: snapshot.revisions) { Array($0.bindMemory(to: UInt64.self)) }
+        let capturedSlots = withUnsafeBytes(of: snapshot.scene.slots) { Array($0.bindMemory(to: ov_rack_slot.self)) }
+        let previous = Dictionary(uniqueKeysWithValues: before.scene.instruments.map { ($0.slot, $0) })
+        let soloMask = before.sequencer.columns.reduce(UInt32(0)) {
+            $1.solo ? $0 | (1 << $1.slot) : $0
+        }
+        guard snapshot.solo_mask == soloMask, Int(snapshot.scene.tempo) == before.scene.tempo else {
+            throw SceneError.invalid("The mixer or tempo changed before the scene snapshot.")
+        }
+        for index in 0..<16 {
+            let captured = capturedSlots[index]
+            guard let instrument = previous[index] else {
+                guard captured.present == 0 else {
+                    throw SceneError.invalid("The instrument list changed before the scene snapshot.")
+                }
+                continue
+            }
+            let config = captured.config
+            let parameters = withUnsafeBytes(of: config.parameters) { $0.map(Int.init) }
+            let cc = withUnsafeBytes(of: config.cc) { $0.map(Int.init) }
+            guard captured.present != 0, Int(config.engine) == instrument.engine,
+                  Int(config.program) == instrument.programIndex, Int(config.channel) == instrument.channel,
+                  Int(config.low_note) == instrument.lowNote, Int(config.high_note) == instrument.highNote,
+                  config.sync == (instrument.sync ? 1 : 0), Int(config.grid) == instrument.grid,
+                  config.level_db == Float(instrument.levelDB), config.pan == Float(instrument.pan),
+                  config.muted == (instrument.muted ? 1 : 0),
+                  parameters == instrument.parameters, cc == instrument.cc else {
+                throw SceneError.invalid("An instrument changed before the scene snapshot.")
+            }
+        }
         let oldColumns = Dictionary(uniqueKeysWithValues: before.sequencer.columns.map { ($0.slot, $0) })
         let newColumns = Dictionary(uniqueKeysWithValues: after.sequencer.columns.map { ($0.slot, $0) })
         guard let oldPatterns = before.scene.patterns, let newPatterns = after.scene.patterns else {
@@ -857,11 +886,13 @@ extension SceneRestorePlan {
                             guards.withUnsafeBufferPointer { g in
                                 slotChanges.withUnsafeBufferPointer { a in
                                     withUnsafePointer(to: &tempo) { t in
-                                        ov_seq_change_full_bundle(s.baseAddress, UInt32(s.count),
-                                            m.baseAddress, UInt32(m.count), c.baseAddress, UInt32(c.count),
-                                            r.baseAddress, UInt32(r.count), g.baseAddress, UInt32(g.count),
-                                            a.baseAddress, UInt32(a.count), changeTempo ? t : nil,
-                                            snapshot.epoch, token)
+                                        withUnsafePointer(to: snapshot) { expected in
+                                            ov_seq_change_guarded_bundle(s.baseAddress, UInt32(s.count),
+                                                m.baseAddress, UInt32(m.count), c.baseAddress, UInt32(c.count),
+                                                r.baseAddress, UInt32(r.count), g.baseAddress, UInt32(g.count),
+                                                a.baseAddress, UInt32(a.count), changeTempo ? t : nil,
+                                                expected, token)
+                                        }
                                     }
                                 }
                             }

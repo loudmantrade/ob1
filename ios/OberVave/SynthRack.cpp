@@ -350,6 +350,8 @@ struct BundleChangeRequest final : Retired {
     uint32_t slotCount = 0;
     bool changesTempo = false;
     ov_seq_tempo_change tempo {};
+    bool hasSnapshotGuard = false;
+    ov_seq_scene_snapshot snapshotGuard {};
     uint64_t epoch = 0, token = 0;
 };
 constexpr uint32_t parameterResultCapacity = 16;
@@ -1097,6 +1099,28 @@ bool matchesSlot(const BundleChangeRequest::Slot& change)
     }
     return true;
 }
+bool matchesSceneSnapshot(const ov_seq_scene_snapshot& snapshot)
+{
+    if (snapshot.epoch != sceneEpoch.load() || snapshot.solo_mask != soloMask) return false;
+    for (uint32_t slot = 0; slot < capacity; ++slot) {
+        const auto& expected = snapshot.scene.slots[slot];
+        const auto& current = scene->slots[slot];
+        if (slotGenerations[slot].load() != snapshot.generations[slot] ||
+            bool(current) != bool(expected.present)) return false;
+        if (current) {
+            const auto& a = current->config;
+            const auto& b = expected.config;
+            if (a.engine != b.engine || a.channel != b.channel || a.low_note != b.low_note ||
+                a.high_note != b.high_note || a.program != b.program || a.sync != b.sync ||
+                a.grid != b.grid || a.level_db != b.level_db || a.pan != b.pan || a.muted != b.muted ||
+                !std::equal(std::begin(a.parameters), std::end(a.parameters), std::begin(b.parameters)) ||
+                !std::equal(std::begin(a.cc), std::end(a.cc), std::begin(b.cc))) return false;
+        }
+        for (uint32_t row = 0; row < music::sequencerRows; ++row)
+            if (clipRevisions[slot][row].load() != snapshot.revisions[slot][row]) return false;
+    }
+    return true;
+}
 void applySlot(BundleChangeRequest::Slot& change)
 {
     const auto slot = change.slot;
@@ -1144,6 +1168,7 @@ void apply(const Command& c)
         }
         for (uint32_t i = 0; i < request->slotCount && valid; ++i)
             valid = matchesSlot(request->slots[i]);
+        if (valid && request->hasSnapshotGuard) valid = matchesSceneSnapshot(request->snapshotGuard);
         if (valid && request->changesTempo) {
             auto expected = request->tempo.expected;
             valid = !clock.external && !clock.quarter &&
@@ -2054,6 +2079,7 @@ static int changeBundle(const ov_rack_sound_change* sounds, uint32_t sound_count
                         const ov_seq_slot_guard* guards, uint32_t guard_count,
                         const ov_seq_slot_change* slots, uint32_t slot_count,
                         const ov_seq_tempo_change* tempoChange,
+                        const ov_seq_scene_snapshot* expectedSnapshot,
                         uint64_t epoch, uint64_t token, bool allowProgramChange, bool allowEmpty)
 {
     using namespace rack;
@@ -2129,6 +2155,7 @@ static int changeBundle(const ov_rack_sound_change* sounds, uint32_t sound_count
         }
         request->slotCount = slot_count;
         if (tempoChange) { request->changesTempo = true; request->tempo = *tempoChange; }
+        if (expectedSnapshot) { request->hasSnapshotGuard = true; request->snapshotGuard = *expectedSnapshot; }
         request->epoch = epoch; request->token = token;
         if (parameterOutstanding.fetch_add(1) >= parameterResultCapacity) {
             parameterOutstanding.fetch_sub(1); error.store(4); return 0;
@@ -2146,7 +2173,7 @@ int ov_seq_change_bundle_with_routes(const ov_rack_sound_change* sounds, uint32_
                                      uint64_t epoch, uint64_t token)
 {
     return changeBundle(sounds, sound_count, mixer, mixer_count, cells, cell_count,
-                        routes, route_count, nullptr, 0, nullptr, 0, nullptr, epoch, token, false, false);
+                        routes, route_count, nullptr, 0, nullptr, 0, nullptr, nullptr, epoch, token, false, false);
 }
 int ov_rack_slot_generation(uint32_t slot, uint64_t* generation)
 {
@@ -2164,7 +2191,7 @@ int ov_seq_change_bundle_with_programs(const ov_rack_sound_change* sounds, uint3
                                        uint64_t epoch, uint64_t token)
 {
     return changeBundle(sounds, sound_count, mixer, mixer_count, cells, cell_count,
-                        routes, route_count, guards, guard_count, nullptr, 0, nullptr, epoch, token, true, false);
+                        routes, route_count, guards, guard_count, nullptr, 0, nullptr, nullptr, epoch, token, true, false);
 }
 int ov_seq_change_bundle_with_slots(const ov_rack_sound_change* sounds, uint32_t sound_count,
                                     const ov_rack_mixer_change* mixer, uint32_t mixer_count,
@@ -2175,7 +2202,7 @@ int ov_seq_change_bundle_with_slots(const ov_rack_sound_change* sounds, uint32_t
                                     uint64_t epoch, uint64_t token)
 {
     return changeBundle(sounds, sound_count, mixer, mixer_count, cells, cell_count,
-                        routes, route_count, guards, guard_count, slots, slot_count, nullptr, epoch, token, true, false);
+                        routes, route_count, guards, guard_count, slots, slot_count, nullptr, nullptr, epoch, token, true, false);
 }
 uint32_t ov_seq_internal_tempo(void) { return rack::internalTempo.load(); }
 int ov_seq_change_full_bundle(const ov_rack_sound_change* sounds, uint32_t sound_count,
@@ -2188,7 +2215,21 @@ int ov_seq_change_full_bundle(const ov_rack_sound_change* sounds, uint32_t sound
                               uint64_t epoch, uint64_t token)
 {
     return changeBundle(sounds, sound_count, mixer, mixer_count, cells, cell_count,
-                        routes, route_count, guards, guard_count, slots, slot_count, tempo, epoch, token, true, true);
+                        routes, route_count, guards, guard_count, slots, slot_count, tempo, nullptr, epoch, token, true, true);
+}
+int ov_seq_change_guarded_bundle(const ov_rack_sound_change* sounds, uint32_t sound_count,
+                                 const ov_rack_mixer_change* mixer, uint32_t mixer_count,
+                                 const ov_seq_cell_change* cells, uint32_t cell_count,
+                                 const ov_seq_route_change* routes, uint32_t route_count,
+                                 const ov_seq_slot_guard* guards, uint32_t guard_count,
+                                 const ov_seq_slot_change* slots, uint32_t slot_count,
+                                 const ov_seq_tempo_change* tempo, const ov_seq_scene_snapshot* expected,
+                                 uint64_t token)
+{
+    if (!expected) { rack::error.store(2); return 0; }
+    return changeBundle(sounds, sound_count, mixer, mixer_count, cells, cell_count,
+                        routes, route_count, guards, guard_count, slots, slot_count,
+                        tempo, expected, expected->epoch, token, true, true);
 }
 int ov_seq_audition(uint32_t slot, uint32_t pitch, uint32_t velocity, uint64_t epoch)
 {

@@ -581,6 +581,29 @@ struct SceneChecks {
         render()
         var result = ov_rack_parameter_result()
         precondition(ov_rack_read_parameter_result(&result) != 0 && result.token == 4000 && result.success != 0)
+        var mismatched = before
+        mismatched.scene.instruments[0].channel = 4
+        let mismatchedPlan = try SceneRestorePlan(before: mismatched, after: mismatched)
+        do {
+            try mismatchedPlan.enqueue(snapshot: captured, token: 4007)
+            fatalError("Scene restore accepted a stale UI instrument")
+        } catch { }
+        precondition(ov_rack_set_parameter(0, UInt32(SynthParameter.cutoff.rawValue), 42) != 0)
+        try unchanged.enqueue(snapshot: captured, token: 4008)
+        render()
+        precondition(ov_rack_read_parameter_result(&result) != 0 && result.token == 4008 && result.success == 0)
+        precondition(ov_rack_set_parameter(0, UInt32(SynthParameter.cutoff.rawValue),
+            UInt32(instrument.parameters[SynthParameter.cutoff.rawValue])) != 0)
+        render()
+        captured = snapshot()
+        var otherClip = SequencerPattern(slot: 0, row: 5, name: "Concurrent").coreClip()
+        precondition(ov_seq_set_clip(&otherClip) != 0)
+        try unchanged.enqueue(snapshot: captured, token: 4009)
+        render()
+        precondition(ov_rack_read_parameter_result(&result) != 0 && result.token == 4009 && result.success == 0)
+        precondition(ov_seq_delete(0, 5) != 0)
+        render()
+        captured = snapshot()
         try plan.enqueue(snapshot: captured, token: 4001)
         ov_set_tempo(121)
         render()
