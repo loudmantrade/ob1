@@ -6,11 +6,17 @@ extern "C" {
 #endif
 #define OV_SEQ_ROWS 8
 #define OV_SEQ_NOTES 1024
+#define OV_SEQ_AUTOMATION 256
 typedef struct {
     uint64_t id;
     int64_t start, duration;
     uint32_t pitch, velocity, output;
 } ov_seq_note;
+typedef struct {
+    uint64_t id;
+    int64_t tick;
+    uint32_t kind, controller, value; /* kind 0 CC, 1 pitch bend */
+} ov_seq_automation;
 typedef struct {
     uint32_t slot, row, count, loop, intro_enabled, quantize;
     int64_t length, intro;
@@ -18,6 +24,8 @@ typedef struct {
     int64_t loop_start, loop_end;
     char name[97];
     ov_seq_note notes[OV_SEQ_NOTES];
+    uint32_t automation_count;
+    ov_seq_automation automation[OV_SEQ_AUTOMATION];
 } ov_seq_clip;
 /* Calls enqueue control-thread commands. No struct pointers are retained. */
 int ov_seq_set_clip(const ov_seq_clip* clip);

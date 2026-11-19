@@ -297,7 +297,8 @@ std::atomic<uint32_t> editRead {0}, editWrite {0}, editOutstanding {0};
 std::unique_ptr<SequencerClip> prepareClip(const ov_seq_clip& input)
 {
     if (input.slot >= capacity || input.row >= music::sequencerRows ||
-        input.count > music::patternNoteCapacity || input.loop > 1 || input.intro_enabled > 1 ||
+        input.count > music::patternNoteCapacity || input.automation_count > music::patternAutomationCapacity ||
+        input.loop > 1 || input.intro_enabled > 1 ||
         input.regions_enabled > 1 ||
         !std::memchr(input.name, 0, sizeof(input.name))) throw EngineCreationFailure {};
     auto clip = std::make_unique<SequencerClip>();
@@ -311,6 +312,16 @@ std::unique_ptr<SequencerClip> prepareClip(const ov_seq_clip& input)
     data->quantization.grid = input.quantize;
     std::copy(std::begin(input.name), std::end(input.name), data->name.begin());
     data->count = input.count;
+    data->automationCount = input.automation_count;
+    for (uint32_t i = 0; i < input.automation_count; ++i) {
+        const auto& point = input.automation[i];
+        if (point.kind > 1 || point.controller > 127 || point.value > 16383)
+            throw EngineCreationFailure {};
+        data->automation[i] = {point.id, point.tick, music::AutomationKind(point.kind),
+                               uint8_t(point.controller), uint16_t(point.value)};
+    }
+    std::sort(data->automation.begin(), data->automation.begin() + data->automationCount,
+        [](const auto& a, const auto& b) { return a.tick != b.tick ? a.tick < b.tick : a.id < b.id; });
     for (uint32_t i = 0; i < input.count; ++i) {
         const auto& note = input.notes[i];
         if (note.pitch > 127 || !note.velocity || note.velocity > 127 || note.output > 1 ||
@@ -537,6 +548,11 @@ void encodeClip(uint32_t slot, uint32_t row, const music::PatternData& data, ov_
     output.regions_enabled = data.regionsEnabled;
     output.loop_start = data.loopStart; output.loop_end = data.loopEnd;
     output.quantize = uint32_t(data.quantization.grid);
+    output.automation_count = data.automationCount;
+    for (uint32_t i = 0; i < data.automationCount; ++i) {
+        const auto& point = data.automation[i];
+        output.automation[i] = {point.id, point.tick, uint32_t(point.kind), point.controller, point.value};
+    }
     std::copy(data.name.begin(), data.name.end(), output.name);
     for (uint32_t i = 0; i < data.count; ++i) {
         const auto& note = data.notes[i];
@@ -799,7 +815,12 @@ bool samePattern(const music::PatternData& a, const music::PatternData& b)
     if (a.id != b.id || a.name != b.name || a.length != b.length || a.intro != b.intro ||
         a.introEnabled != b.introEnabled || a.loop != b.loop || a.quantization.grid != b.quantization.grid ||
         a.regionsEnabled != b.regionsEnabled || a.loopStart != b.loopStart || a.loopEnd != b.loopEnd ||
-        a.count != b.count) return false;
+        a.count != b.count || a.automationCount != b.automationCount) return false;
+    for (uint32_t i = 0; i < a.automationCount; ++i) {
+        const auto& x = a.automation[i]; const auto& y = b.automation[i];
+        if (x.id != y.id || x.tick != y.tick || x.kind != y.kind ||
+            x.controller != y.controller || x.value != y.value) return false;
+    }
     for (uint32_t i = 0; i < a.count; ++i) {
         const auto& x = a.notes[i]; const auto& y = b.notes[i];
         if (x.id != y.id || x.start != y.start || x.duration != y.duration || x.pitch != y.pitch ||

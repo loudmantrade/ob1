@@ -294,6 +294,34 @@ struct SceneChecks {
             try regionEditor.regions(patternStart: 0, loopStart: 0, loopEnd: 240, tailEnd: 240, loop: true)
             preconditionFailure("Shortening cannot delete notes")
         } catch { precondition(regionEditor.pattern == regionPattern) }
+        let points = [
+            SequencerAutomation(id: 1, tick: 480, kind: .cc, controller: 1, value: 127),
+            SequencerAutomation(id: 2, tick: 480, kind: .pitchBend, controller: 0, value: 8192)
+        ]
+        try regionEditor.setAutomation(points)
+        let automatedPattern = regionEditor.pattern
+        let automatedJSON = try JSONEncoder().encode(automatedPattern)
+        let decodedAutomation = try JSONDecoder().decode(SequencerPattern.self, from: automatedJSON)
+        precondition(decodedAutomation == automatedPattern)
+        precondition(SequencerPattern(core: automatedPattern.coreClip()) == automatedPattern)
+        var json = try JSONSerialization.jsonObject(with: automatedJSON) as! [String: Any]
+        var jsonPoints = json["automation"] as! [[String: Any]]
+        jsonPoints[0]["kind"] = 99
+        json["automation"] = jsonPoints
+        let unknownKind = try JSONSerialization.data(withJSONObject: json)
+        do {
+            _ = try JSONDecoder().decode(SequencerPattern.self, from: unknownKind)
+            preconditionFailure("Unknown automation kinds must fail")
+        } catch {}
+        regionEditor.undo()
+        precondition(regionEditor.pattern == regionPattern)
+        regionEditor.redo()
+        precondition(regionEditor.pattern == automatedPattern)
+        var invalidPoint = points[0]; invalidPoint.value = 128
+        do {
+            try regionEditor.setAutomation([invalidPoint])
+            preconditionFailure("Invalid automation must be rejected")
+        } catch { precondition(regionEditor.pattern == automatedPattern) }
         var editor = try PianoRollEditBuffer(pattern: editPattern)
         editor.selection = [1, 2, 3]
         try editor.changeDuration(by: 120)

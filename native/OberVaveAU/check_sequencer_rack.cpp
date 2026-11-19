@@ -752,6 +752,35 @@ static void checkLivePatternReplacement()
     std::puts("PASS live snapshot replacement: stale revision rejected, held notes release normally, next loop uses edited notes, transport and unrelated column continue");
 }
 
+static void checkAutomationClip()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
+    auto source = std::make_unique<ov_seq_clip>(clip(0, 0));
+    source->automation_count = 2;
+    source->automation[0] = {2, 0, 1, 0, 16383};
+    source->automation[1] = {1, 0, 0, 1, 93};
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(source.get()) && ov_seq_launch(0, 0, 0)); render();
+    assert(engine(0).dsp.ctl_mod == 93 && engine(0).dsp.ctl_bend == 8191);
+    assert(engine(1).dsp.ctl_mod != 93 && engine(1).dsp.ctl_bend != 8191);
+    auto output = std::make_unique<ov_seq_clip>();
+    rack::encodeClip(0, 0, rack::clips[0][0]->pattern.data(), *output);
+    assert(output->automation_count == 2 && output->automation[0].id == 1 &&
+           output->automation[1].id == 2 && output->automation[1].value == 16383);
+    auto replacement = std::make_unique<ov_seq_clip>(*source);
+    replacement->automation[0].value = 8192;
+    const auto epoch = ov_seq_scene_epoch(), revision = ov_seq_cell_revision(0, 0);
+    assert(ov_seq_replace_pattern(source.get(), replacement.get(), epoch, revision, 602)); render();
+    ov_seq_edit_result result {};
+    assert(ov_seq_read_edit(&result) && result.success);
+    assert(ov_seq_replace_pattern(source.get(), replacement.get(), epoch, revision + 1, 603)); render();
+    assert(ov_seq_read_edit(&result) && !result.success);
+    assert(ov_rack_stop_all()); render();
+    assert(!ov_rack_take_error());
+    std::puts("PASS automation bridge: CC and 14-bit bend route to one instrument, ordered round-trip and edit conflict");
+}
+
 static void checkRegionClip()
 {
     auto scene = std::make_unique<ov_scene_config>();
@@ -1002,5 +1031,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkRegionClip(); checkAudition(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkAudition(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

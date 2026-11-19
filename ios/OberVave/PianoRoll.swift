@@ -276,7 +276,7 @@ struct PianoRollView: View {
             }
         }
         let current = displayedPattern
-        if current.version == 3 {
+        if current.hasRegions {
             let tailX = max(left, left + viewport.x(forTick: Double(current.loopEnd)))
             if tailX < size.width {
                 context.fill(Path(CGRect(x: tailX, y: top, width: size.width - tailX, height: grid.height)),
@@ -307,8 +307,8 @@ struct PianoRollView: View {
         }
         let markers: [(String, Int64, Color)] = [
             ("START", -current.intro, .green),
-            ("LOOP", current.version == 3 ? current.loopStart : 0, .cyan),
-            ("END", current.version == 3 ? current.loopEnd : current.length, .orange),
+            ("LOOP", current.hasRegions ? current.loopStart : 0, .cyan),
+            ("END", current.hasRegions ? current.loopEnd : current.length, .orange),
             ("TAIL", current.length, .red)
         ]
         for (label, tick, color) in markers {
@@ -349,8 +349,8 @@ struct PianoRollRegionsSheet: View {
     init(pattern: SequencerPattern, apply: @escaping (Int64, Int64, Int64, Int64, Bool) -> Void) {
         self.apply = apply
         _start = State(initialValue: String(-pattern.intro))
-        _loopStart = State(initialValue: String(pattern.version == 3 ? pattern.loopStart : 0))
-        _loopEnd = State(initialValue: String(pattern.version == 3 ? pattern.loopEnd : pattern.length))
+        _loopStart = State(initialValue: String(pattern.hasRegions ? pattern.loopStart : 0))
+        _loopEnd = State(initialValue: String(pattern.hasRegions ? pattern.loopEnd : pattern.length))
         _tailEnd = State(initialValue: String(pattern.length))
         _loop = State(initialValue: pattern.loop)
     }
