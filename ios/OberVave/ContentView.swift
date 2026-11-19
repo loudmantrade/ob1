@@ -612,15 +612,11 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
                 errorMessage = "Could not load default libraries: \(error.localizedDescription)"
             }
         }
-        if let data = UserDefaults.standard.data(forKey: applicationDefaultKey) {
-            do {
-                let saved = try JSONDecoder().decode(ApplicationDefault.self, from: data)
-                try saved.validate()
-                applicationDefault = saved
-            } catch {
-                applicationDefaultAvailable = false
-                errorMessage = "Could not load application default: \(error.localizedDescription)"
-            }
+        do {
+            applicationDefault = try ApplicationDefaultStore(defaults: .standard, key: applicationDefaultKey).load()
+        } catch {
+            applicationDefaultAvailable = false
+            errorMessage = "Could not load application default: \(error.localizedDescription)"
         }
         let metronome = UserDefaults.standard.object(forKey: "sequencer-record-metronome") as? Bool ?? true
         recordMetronome = metronome
@@ -799,9 +795,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             return false
         }
         do {
-            try value.validate()
-            let data = try JSONEncoder().encode(value)
-            UserDefaults.standard.set(data, forKey: applicationDefaultKey)
+            try ApplicationDefaultStore(defaults: .standard, key: applicationDefaultKey).save(value)
             applicationDefault = value
             return true
         } catch {

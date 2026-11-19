@@ -387,6 +387,10 @@ from a saved scene when no layout default exists, and copied with Save As.
 When a pattern default moves, is copied, or is deleted, its membership in the
 saved layout follows the same operation and is restored by sequencer Undo/Redo.
 Restoring a scene default is not yet available.
+In Scenes & Instruments, **Save Application Default** saves a separate snapshot
+of the scene, sequencer, patterns and device settings after confirmation. It
+does not replace scene or preset libraries. Restoring this snapshot is not yet
+available.
 
 Copy/Paste retains relative timing and routing, with the most recent empty-grid
 tap as the paste anchor (initially tick zero). Paste creates new note IDs and

@@ -666,6 +666,27 @@ struct ApplicationDefault: Codable {
     }
 }
 
+struct ApplicationDefaultStore {
+    let defaults: UserDefaults
+    let key: String
+
+    func load() throws -> ApplicationDefault? {
+        guard let value = defaults.object(forKey: key) else { return nil }
+        guard let data = value as? Data else {
+            throw SceneError.invalid("Invalid application default storage.")
+        }
+        let snapshot = try JSONDecoder().decode(ApplicationDefault.self, from: data)
+        try snapshot.validate()
+        return snapshot
+    }
+
+    func save(_ snapshot: ApplicationDefault) throws {
+        try snapshot.validate()
+        let data = try JSONEncoder().encode(snapshot)
+        defaults.set(data, forKey: key)
+    }
+}
+
 struct SequencerSettingsEdit: Equatable {
     var before: SequencerDefault
     var after: SequencerDefault

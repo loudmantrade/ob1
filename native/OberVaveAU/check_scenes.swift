@@ -80,6 +80,32 @@ struct SceneChecks {
             sustainStopGesture: true, arpLatencyAuto: true, arpLatencyManualMS: -12, recordMetronome: true)
         let application = ApplicationDefault(scene: applicationScene, sequencer: settings, device: device)
         try application.validate()
+        let suite = "io.github.joakimeriksson.obervave.tests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else { fatalError("Could not create test defaults suite") }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ApplicationDefaultStore(defaults: defaults, key: "application")
+        let initiallyStored = try store.load()
+        precondition(initiallyStored == nil)
+        defaults.set("scene library", forKey: "scenes")
+        defaults.set("preset library", forKey: "presets")
+        try store.save(application)
+        let storedApplication = try store.load()
+        precondition(storedApplication?.scene.patterns == [pattern] && storedApplication?.device == device)
+        precondition(defaults.string(forKey: "scenes") == "scene library")
+        precondition(defaults.string(forKey: "presets") == "preset library")
+        var invalidApplication = application
+        invalidApplication.device.bleMIDIBufferMilliseconds = 51
+        do {
+            try store.save(invalidApplication)
+            fatalError("Invalid application default was saved")
+        } catch { }
+        let preservedApplication = try store.load()
+        precondition(preservedApplication?.device == device)
+        defaults.set("corrupt", forKey: "application")
+        do {
+            _ = try store.load()
+            fatalError("Invalid application default storage was loaded")
+        } catch { }
         var decodedApplication = try JSONDecoder().decode(ApplicationDefault.self, from: JSONEncoder().encode(application))
         try decodedApplication.validate()
         precondition(decodedApplication.scene.patterns == [pattern] && decodedApplication.device == device)

@@ -996,7 +996,7 @@ extension OberVaveModel {
               sceneHistoryJump == nil, sequencerHistoryJump == nil,
               activeParameterEdits.isEmpty, activeSceneValueEdits.isEmpty,
               activeMixerGestures.isEmpty, externalParameterGestures.isEmpty,
-              recordingPattern == nil, ov_seq_record_state() == 0 else {
+              recordingPattern == nil, ov_seq_record_state() == 0, ov_seq_record_ready() == 0 else {
             errorMessage = "Finish recording and pending edits before saving the scene default."
             return
         }
@@ -1037,7 +1037,7 @@ extension OberVaveModel {
             defer { self.sceneSwitchPending = false }
             do {
                 guard self.sceneSessionKey == sceneKey, epoch == ov_seq_scene_epoch(),
-                      self.recordingPattern == nil, ov_seq_record_state() == 0,
+                      self.recordingPattern == nil, ov_seq_record_state() == 0, ov_seq_record_ready() == 0,
                       self.rackSlotGenerations() == generations,
                       self.instruments == capturedInstruments, self.sceneName == capturedName,
                       self.masterLevelDB == capturedMasterDB, self.masterPan == capturedMasterPan,
@@ -2394,6 +2394,7 @@ struct RackSceneView: View {
     @State private var name = ""
     @State private var importsScene = false
     @State private var confirmsNew = false
+    @State private var confirmsApplicationDefault = false
     @State private var loadsScene: SavedRackScene?
     @State private var removesInstrument: RackInstrument?
 
@@ -2429,6 +2430,11 @@ struct RackSceneView: View {
                                     Text(instrument.name).foregroundStyle(instrument.slot == model.selectedSlot ? .cyan : .primary)
                                     Text("CH \(instrument.channel)  |  \(rackNoteName(instrument.lowNote)) - \(rackNoteName(instrument.highNote))\(instrument.muted ? "  |  MUTE" : "")")
                                         .font(.caption.monospaced()).foregroundStyle(.secondary)
+                                }
+                                Section("Application default") {
+                                    Button("Save Application Default") { confirmsApplicationDefault = true }
+                                    Text("Saves the current scene, patterns, sequencer and device settings without changing scene or preset libraries.")
+                                        .font(.footnote).foregroundStyle(.secondary)
                                 }
                             }
                             .buttonStyle(.plain)
@@ -2496,6 +2502,10 @@ struct RackSceneView: View {
             }
             .confirmationDialog("Create a new scene? Current unsaved edits remain available during this session.", isPresented: $confirmsNew) {
                 Button("New Empty Scene", role: .destructive) { model.newScene() }
+            }
+            .confirmationDialog("Replace the saved application default with the current state?",
+                                isPresented: $confirmsApplicationDefault) {
+                Button("Save Application Default") { model.saveSceneDefault(application: true) }
             }
             .confirmationDialog("Load this scene? Current unsaved edits remain available during this session.", isPresented: Binding(
                 get: { loadsScene != nil }, set: { if !$0 { loadsScene = nil } })) {
