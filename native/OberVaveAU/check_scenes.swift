@@ -237,6 +237,10 @@ struct SceneChecks {
         precondition(arbitration.mode == .editing)
         arbitration.cancel()
         precondition(arbitration.mode == .idle)
+        arbitration.begin(); arbitration.abandonEdit(); arbitration.begin()
+        precondition(arbitration.mode == .awaitingRelease)
+        arbitration.allReleased()
+        precondition(arbitration.mode == .idle)
         viewport.leftTick = 1_000_000; viewport.topPitch = -100
         viewport.clamp(length: 3840, intro: 0, size: .init(width: 600, height: 400))
         precondition(viewport.leftTick == 4800 && viewport.topPitch == 0)

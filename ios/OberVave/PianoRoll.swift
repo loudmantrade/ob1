@@ -824,7 +824,13 @@ final class PianoRollNavigationView: UIView {
         if fingers.count == 2 && arbitration.mode == .navigating {
             onNavigation?(point(fingers[0]), point(fingers[1]), false)
         } else if fingers.count == 1 && arbitration.mode == .editing {
-            onEdit?(.move, point(fingers[0]))
+            if bounds.contains(fingers[0].location(in: self)) {
+                onEdit?(.move, point(fingers[0]))
+            } else {
+                holdTimer?.invalidate()
+                onEdit?(.cancel, .zero)
+                arbitration.abandonEdit()
+            }
         }
     }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {

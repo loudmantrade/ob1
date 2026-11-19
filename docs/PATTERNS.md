@@ -291,6 +291,8 @@ it; tap then drag copies the selection, and tap then hold deletes it.
 The second touch must begin within 400 ms of the first tap; once a hold has
 begun, its deletion eligibility does not expire while the finger stays down.
 The hold deletes the selected group when its note is selected.
+Leaving the editor during a one-finger gesture cancels its uncommitted edit;
+the finger must be lifted before another edit can start.
 Undo and Redo operate on whole gestures. Audio publication is revision-checked
 and does not restart active or queued playback. Already-sounding notes retain
 their original release times; future onsets use the new data.

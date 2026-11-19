@@ -566,6 +566,7 @@ struct PianoRollTouchArbitration {
         return true
     }
     mutating func fingerLifted() { if mode == .navigating { mode = .awaitingRelease } }
+    mutating func abandonEdit() { if mode == .editing { mode = .awaitingRelease } }
     mutating func allReleased() { mode = .idle }
     mutating func cancel() { mode = .idle }
 }
