@@ -1449,6 +1449,10 @@ static void checkFullSceneSnapshot()
     assert(ov_rack_snapshot_request()); render();
     assert(ov_rack_snapshot_read(&legacy) && !legacy.slots[0].present);
     assert(!ov_seq_snapshot_read(&snapshot));
+    assert(rack::send(0xFA, 0, 0, 0, false, false)); render();
+    assert(ov_rack_snapshot_request()); render();
+    assert(ov_seq_snapshot_read(&snapshot) && snapshot.clock_external);
+    assert(rack::send(0xFC, 0, 0, 0, false, false)); render();
     assert(!ov_rack_take_error());
     std::puts("PASS full scene snapshot: audio-boundary revisions, generations, solo and single-consumer compatibility");
 }
