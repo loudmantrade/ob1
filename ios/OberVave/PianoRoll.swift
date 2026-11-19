@@ -511,7 +511,8 @@ struct PianoRollView: View {
             }
             if phase == .move && !active.moved { laneGesture = active; return }
             let sample = coordinates(point, pattern: active.baseline.pattern)
-            if laneMode == .draw, let previous = active.last, previous.tick != sample.tick {
+            if laneMode == .draw, let previous = active.last,
+               previous.tick != sample.tick, previous.value != sample.value {
                 let step = max(Int64(1), snap == 0 ? 120 : snap)
                 let distance = abs(sample.tick - previous.tick)
                 let count = min(Int64(257), distance / step)

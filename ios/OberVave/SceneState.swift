@@ -834,11 +834,19 @@ struct PianoRollEditBuffer {
             !($0.kind == kind && $0.controller == controller && (first...last).contains($0.tick))
         }
 
-        guard values.count <= 256 - points.count, UInt64(values.count) <= UInt64.max - nextAutomationID else {
+        let sorted = values.sorted { $0.tick < $1.tick }
+        guard zip(sorted, sorted.dropFirst()).allSatisfy({ pair in pair.0.tick < pair.1.tick }) else {
+            throw SceneError.invalid("An automation stroke cannot contain duplicate times.")
+        }
+        var simplified: [(tick: Int64, value: Int)] = []
+        for value in sorted where simplified.last?.value != value.value {
+            simplified.append(value)
+        }
+        guard simplified.count <= 256 - points.count, UInt64(simplified.count) <= UInt64.max - nextAutomationID else {
             throw SceneError.invalid("The pattern cannot hold more than 256 automation points.")
         }
         var next = nextAutomationID
-        for value in values {
+        for value in simplified {
             points.append(SequencerAutomation(id: next, tick: value.tick, kind: kind,
                                                controller: controller, value: value.value))
             next += 1

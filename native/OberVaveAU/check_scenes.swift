@@ -380,6 +380,12 @@ struct SceneChecks {
         precondition(regionEditor.pattern.automation.filter { $0.kind == .cc }.map(\.id) == [3, 4])
         precondition(regionEditor.pattern.automation.contains(where: { $0.kind == .pitchBend && $0.id == 2 }))
         regionEditor.undo()
+        var simplifiedEditor = regionEditor
+        let flatStroke = (0...300).map { (tick: Int64($0), value: 64) }
+        try simplifiedEditor.automationStroke(flatStroke, kind: .cc, controller: 1)
+        precondition(simplifiedEditor.pattern.automation.filter { $0.kind == .cc }.count == 2)
+        simplifiedEditor.undo()
+        precondition(simplifiedEditor.pattern == regionEditor.pattern)
         try regionEditor.automationStroke([(tick: 960, value: 64)], kind: .cc, controller: 1)
         precondition(regionEditor.pattern.automation.contains(where: { $0.id == 5 }))
         var editor = try PianoRollEditBuffer(pattern: editPattern)
