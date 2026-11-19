@@ -391,6 +391,9 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     private let sceneDefaultsKey = "io.github.joakimeriksson.obervave.scene-defaults"
     private let defaultLibrariesKey = "io.github.joakimeriksson.obervave.default-libraries-v1"
     private var defaultLibrariesAvailable = true
+    private let applicationDefaultKey = "io.github.joakimeriksson.obervave.application-default-v1"
+    private var applicationDefaultAvailable = true
+    private(set) var applicationDefault: ApplicationDefault?
     var sequencerDefaults: [String: SequencerDefault] = [:]
     private var sequencerDefaultsAvailable = true
     private let sequencerDefaultsKey = "io.github.joakimeriksson.obervave.sequencer-defaults"
@@ -609,6 +612,16 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
                 errorMessage = "Could not load default libraries: \(error.localizedDescription)"
             }
         }
+        if let data = UserDefaults.standard.data(forKey: applicationDefaultKey) {
+            do {
+                let saved = try JSONDecoder().decode(ApplicationDefault.self, from: data)
+                try saved.validate()
+                applicationDefault = saved
+            } catch {
+                applicationDefaultAvailable = false
+                errorMessage = "Could not load application default: \(error.localizedDescription)"
+            }
+        }
         let metronome = UserDefaults.standard.object(forKey: "sequencer-record-metronome") as? Bool ?? true
         recordMetronome = metronome
         ov_seq_set_metronome(metronome ? 1 : 0)
@@ -769,6 +782,31 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             errorMessage = "The requested scene default operation is not available yet."
         case .restore, .save:
             break
+        }
+    }
+
+    var applicationDeviceSettings: ApplicationDeviceSettings {
+        ApplicationDeviceSettings(bleMIDIBufferMilliseconds: bleMidiBufferMilliseconds,
+            sustainInverted: sustainInverted, sustainStopGesture: sustainStopGesture,
+            arpLatencyAuto: arpLatencyAuto, arpLatencyManualMS: arpLatencyManualMS,
+            recordMetronome: recordMetronome)
+    }
+
+    @discardableResult
+    func persistApplicationDefault(_ value: ApplicationDefault) -> Bool {
+        guard applicationDefaultAvailable else {
+            errorMessage = "The existing application default could not be loaded."
+            return false
+        }
+        do {
+            try value.validate()
+            let data = try JSONEncoder().encode(value)
+            UserDefaults.standard.set(data, forKey: applicationDefaultKey)
+            applicationDefault = value
+            return true
+        } catch {
+            errorMessage = "Could not save application default: \(error.localizedDescription)"
+            return false
         }
     }
 

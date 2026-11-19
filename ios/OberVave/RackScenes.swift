@@ -987,7 +987,7 @@ extension OberVaveModel {
                     pianoRollViewports: [:], fileURL: nil), key: UUID().uuidString)
     }
 
-    func saveSceneDefault(all: Bool = false) {
+    func saveSceneDefault(all: Bool = false, application: Bool = false) {
         syncSequencerState()
         syncExternalParameterHistory(finish: true)
         guard !sceneSwitchPending, pendingSceneName == nil, pendingSceneParameterHistory == nil,
@@ -1010,6 +1010,8 @@ extension OberVaveModel {
         let capturedKeyboardMask = keyboardChannelMask
         let capturedSelectedSlot = selectedSlot
         let capturedSettings = currentSequencerSettings()
+        let capturedDevice = applicationDeviceSettings
+        let includePatterns = all || application
         guard let generations = rackSlotGenerations() else {
             errorMessage = "An instrument is changing; try saving defaults again."
             return
@@ -1017,7 +1019,7 @@ extension OberVaveModel {
         let revisions = (0..<128).map {
             ov_seq_cell_revision(UInt32($0 / 8), UInt32($0 % 8))
         }
-        guard !all || (0..<128).allSatisfy({
+        guard !includePatterns || (0..<128).allSatisfy({
             ov_seq_pad_pending(UInt32($0 / 8), UInt32($0 % 8)) == 0
         }) else {
             errorMessage = "Wait for pending pad actions before saving defaults."
@@ -1040,10 +1042,11 @@ extension OberVaveModel {
                       self.instruments == capturedInstruments, self.sceneName == capturedName,
                       self.masterLevelDB == capturedMasterDB, self.masterPan == capturedMasterPan,
                       self.keyboardChannelMask == capturedKeyboardMask, self.selectedSlot == capturedSelectedSlot,
-                      !all || self.currentSequencerSettings() == capturedSettings else {
+                      !includePatterns || self.currentSequencerSettings() == capturedSettings,
+                      !application || self.applicationDeviceSettings == capturedDevice else {
                     throw SceneError.invalid("The scene changed while taking the snapshot.")
                 }
-                if all {
+                if includePatterns {
                     guard self.patterns == capturedPatterns else {
                         throw SceneError.invalid("Patterns changed while taking the snapshot.")
                     }
@@ -1074,18 +1077,27 @@ extension OberVaveModel {
                     tempo: Int(snapshot.tempo), masterDB: capturedMasterDB, masterPan: capturedMasterPan,
                     keyboardMask: capturedKeyboardMask,
                     selectedSlot: captured.isEmpty ? nil : capturedSelectedSlot, patterns: nil)
+                var sequence = capturedSettings
+                if includePatterns {
+                    sequence.columns = captured.sorted { $0.slot < $1.slot }.map {
+                        SequencerDefault.Column(slot: $0.slot, level: Double(Float($0.levelDB)),
+                            pan: Double(Float($0.pan)), muted: $0.muted, recordBeats: $0.recordBeats,
+                            solo: self.soloSlots.contains($0.slot))
+                    }
+                }
+                if application {
+                    var appScene = document
+                    appScene.patterns = capturedPatterns
+                    let value = ApplicationDefault(scene: appScene, sequencer: sequence, device: capturedDevice)
+                    if self.persistApplicationDefault(value) { self.sceneStatus = "Saved application default" }
+                    return true
+                }
                 var libraries = self.currentDefaultLibraries()
                 try libraries.scenes.set(document, scene: sceneKey)
                 if all {
                     for instrument in captured { try libraries.instruments.set(instrument, scene: sceneKey) }
                     try libraries.patterns.replaceScene(capturedPatterns, scene: sceneKey)
                     try libraries.setPatternLayout(capturedPatterns, scene: sceneKey)
-                    var sequence = capturedSettings
-                    sequence.columns = captured.sorted { $0.slot < $1.slot }.map {
-                        SequencerDefault.Column(slot: $0.slot, level: Double(Float($0.levelDB)),
-                            pan: Double(Float($0.pan)), muted: $0.muted, recordBeats: $0.recordBeats,
-                            solo: self.soloSlots.contains($0.slot))
-                    }
                     libraries.sequencers[sceneKey] = sequence
                 }
                 if self.persistDefaultLibraries(libraries) {
