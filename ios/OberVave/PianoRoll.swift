@@ -2,6 +2,8 @@
 import SwiftUI
 import UIKit
 
+private let pianoRollRulerHeight: CGFloat = 78
+
 struct PianoRollView: View {
     @ObservedObject var model: OberVaveModel
     let pattern: SequencerPattern
@@ -26,6 +28,7 @@ struct PianoRollView: View {
     @State private var gridHeight: CGFloat = 0
     @State private var laneGesture: AutomationGesture?
     @State private var velocityGesture: VelocityGesture?
+    @State private var markerGesture: MarkerGesture?
 
     private enum Lane: String, CaseIterable { case none = "Off", velocity = "Velocity", cc = "CC", bend = "Pitch Bend" }
     private enum LaneMode: String, CaseIterable { case points = "Points", draw = "Freehand" }
@@ -43,6 +46,14 @@ struct PianoRollView: View {
     private struct VelocityGesture {
         let baseline: PianoRollEditBuffer
         let note: SequencerNote
+    }
+    private struct MarkerGesture {
+        let baseline: PianoRollEditBuffer
+        let marker: PianoRollMarker
+        let start: CGPoint
+        var moved = false
+        var candidate: PianoRollEditBuffer?
+        var error: String?
     }
 
     private struct EditGesture {
@@ -133,7 +144,7 @@ struct PianoRollView: View {
             }
             GeometryReader { proxy in
                 let gridSize = CGSize(width: max(0, proxy.size.width - 54),
-                                      height: max(0, proxy.size.height - 26 - (lane == .none ? 0 : laneHeight)))
+                                      height: max(0, proxy.size.height - pianoRollRulerHeight - (lane == .none ? 0 : laneHeight)))
                 Canvas { context, size in
                     draw(context: &context, size: size)
                 }
@@ -221,6 +232,10 @@ struct PianoRollView: View {
 
     private func touch(_ phase: PianoRollNavigationView.EditPhase, _ point: CGPoint) {
         guard !busy else { return }
+        if markerGesture != nil || (phase == .begin && point.y < 0) {
+            markerTouch(phase, point)
+            return
+        }
         if velocityGesture != nil || (phase == .begin && lane == .velocity && point.y >= gridHeight) {
             velocityTouch(phase, point)
             return
@@ -310,6 +325,54 @@ struct PianoRollView: View {
         case .cancel:
             if let active = gesture { editor = active.baseline }
             gesture = nil; selectionRect = nil; lastTap = nil
+        }
+    }
+
+    private func markerTouch(_ phase: PianoRollNavigationView.EditPhase, _ point: CGPoint) {
+        switch phase {
+        case .begin:
+            guard point.x >= 0, let current = editor,
+                  let marker = PianoRollMarker.hit(point, pattern: current.pattern, viewport: viewport) else { return }
+            guard current.pattern.hasRegions else {
+                model.errorMessage = "Apply Regions before dragging markers to preserve legacy playback."
+                return
+            }
+            markerGesture = MarkerGesture(baseline: current, marker: marker, start: point)
+        case .move, .end:
+            guard var active = markerGesture else { return }
+            if abs(point.x - active.start.x) >= 8 { active.moved = true }
+            if !active.moved {
+                if phase == .end { markerGesture = nil } else { markerGesture = active }
+                return
+            }
+            let pattern = active.baseline.pattern
+            var start = -pattern.intro, loopStart = pattern.loopStart
+            var loopEnd = pattern.loopEnd, tailEnd = pattern.length
+            let tick = snapped(viewport.tick(at: Double(point.x)))
+            switch active.marker {
+            case .patternStart: start = tick
+            case .loopStart: loopStart = tick
+            case .loopEnd: loopEnd = tick
+            case .tailEnd: tailEnd = tick
+            }
+            var candidate = active.baseline
+            do {
+                try candidate.regions(patternStart: start, loopStart: loopStart, loopEnd: loopEnd,
+                                      tailEnd: tailEnd, loop: pattern.loop)
+                active.candidate = candidate; active.error = nil; editor = candidate
+            } catch {
+                active.candidate = nil; active.error = error.localizedDescription; editor = active.baseline
+            }
+            markerGesture = active
+            if phase == .end {
+                markerGesture = nil
+                if let candidate = active.candidate { publish(candidate, replacing: active.baseline) }
+                else if let error = active.error { model.errorMessage = error }
+            }
+        case .cancel:
+            if let active = markerGesture { editor = active.baseline }
+            markerGesture = nil
+        case .hold: break
         }
     }
 
@@ -435,7 +498,7 @@ struct PianoRollView: View {
     }
 
     private func draw(context: inout GraphicsContext, size: CGSize) {
-        let left: CGFloat = 54, top: CGFloat = 26
+        let left: CGFloat = 54, top = pianoRollRulerHeight
         let grid = CGRect(x: left, y: top, width: max(0, size.width - left),
                           height: max(0, size.height - top - (lane == .none ? 0 : laneHeight)))
         context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.black.opacity(0.9)))
@@ -483,19 +546,18 @@ struct PianoRollView: View {
             context.fill(Path(roundedRect: rect.intersection(grid), cornerRadius: 3),
                          with: .color(editor?.selection.contains(note.id) == true ? .orange : .cyan))
         }
-        let markers: [(String, Int64, Color)] = [
-            ("START", -current.intro, .green),
-            ("LOOP", current.hasRegions ? current.loopStart : 0, .cyan),
-            ("END", current.hasRegions ? current.loopEnd : current.length, .orange),
-            ("TAIL", current.length, .red)
-        ]
-        for (label, tick, color) in markers {
-            let x = left + viewport.x(forTick: Double(tick))
+        let colors: [Color] = [.green, .cyan, .orange, .red]
+        for marker in PianoRollMarker.allCases {
+            let color = colors[marker.rawValue]
+            let x = left + viewport.x(forTick: Double(marker.tick(in: current)))
             if x >= left && x <= size.width {
                 var line = Path(); line.move(to: CGPoint(x: x, y: top)); line.addLine(to: CGPoint(x: x, y: grid.maxY))
                 context.stroke(line, with: .color(color.opacity(0.8)), lineWidth: 1)
-                context.draw(Text(label).font(.system(size: 8, weight: .bold)).foregroundColor(color),
-                             at: CGPoint(x: x + 12, y: 20))
+                let y = top - 60 + CGFloat(marker.rawValue) * 15 + 7.5
+                context.fill(Path(ellipseIn: CGRect(x: x - 5, y: y - 5, width: 10, height: 10)),
+                             with: .color(color))
+                context.draw(Text(marker.title).font(.system(size: 9, weight: .bold)).foregroundColor(color),
+                             at: CGPoint(x: x + 23, y: y))
             }
         }
         if let selectionRect {
@@ -650,7 +712,7 @@ final class PianoRollNavigationView: UIView {
 
     private func point(_ touch: UITouch) -> CGPoint {
         let point = touch.location(in: self)
-        return CGPoint(x: point.x - 54, y: point.y - 26)
+        return CGPoint(x: point.x - 54, y: point.y - pianoRollRulerHeight)
     }
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches where !fingers.contains(touch) { fingers.append(touch) }

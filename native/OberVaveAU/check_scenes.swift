@@ -285,6 +285,12 @@ struct SceneChecks {
         var regionEditor = try PianoRollEditBuffer(pattern: editPattern)
         try regionEditor.regions(patternStart: 0, loopStart: 240, loopEnd: 960, tailEnd: 3840, loop: true)
         let regionPattern = regionEditor.pattern
+        let markerViewport = PianoRollViewport()
+        for marker in PianoRollMarker.allCases {
+            let point = CoreGraphics.CGPoint(x: markerViewport.x(forTick: Double(marker.tick(in: regionPattern))),
+                                             y: -60 + Double(marker.rawValue) * 15 + 7.5)
+            precondition(PianoRollMarker.hit(point, pattern: regionPattern, viewport: markerViewport) == marker)
+        }
         let regionJSON = try JSONEncoder().encode(regionPattern)
         let decodedRegion = try JSONDecoder().decode(SequencerPattern.self, from: regionJSON)
         precondition(decodedRegion == regionPattern)

@@ -328,8 +328,10 @@ Shortening rejects out-of-range note starts rather than deleting them.
 Version 1/2 clips remain in legacy mode with their original unbounded release
 behavior until the user applies Regions; that explicit conversion can change
 their tail behavior. A fresh recording replaces regions with legacy defaults.
-Marker dragging, bar/beat/tick entry and arbitrary positive pattern starts
-are not yet supported.
+Marker handles have separate ruler rows, even when markers coincide. Dragging
+is enabled after explicit Regions conversion and uses the selected snap grid;
+invalid moves are rejected without changing notes. Bar/beat/tick entry and
+arbitrary positive pattern starts are not yet supported.
 Acceptance requires portable timing/ownership and scene-migration regressions,
 the existing sequencer and AU suites, a signed iPad build, and the physical
 iPad gesture/audio checklist from the implementation specification.

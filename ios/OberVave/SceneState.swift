@@ -574,6 +574,35 @@ enum PianoRollNoteHit {
     }
 }
 
+enum PianoRollMarker: Int, CaseIterable {
+    case patternStart, loopStart, loopEnd, tailEnd
+
+    var title: String {
+        switch self {
+        case .patternStart: "START"
+        case .loopStart: "LOOP"
+        case .loopEnd: "END"
+        case .tailEnd: "TAIL"
+        }
+    }
+
+    func tick(in pattern: SequencerPattern) -> Int64 {
+        switch self {
+        case .patternStart: -pattern.intro
+        case .loopStart: pattern.hasRegions ? pattern.loopStart : 0
+        case .loopEnd: pattern.hasRegions ? pattern.loopEnd : pattern.length
+        case .tailEnd: pattern.length
+        }
+    }
+
+    static func hit(_ point: CoreGraphics.CGPoint, pattern: SequencerPattern,
+                    viewport: PianoRollViewport) -> PianoRollMarker? {
+        let row = Int(floor((Double(point.y) + 60) / 15))
+        guard let marker = Self(rawValue: row), point.y >= -60, point.y < 0 else { return nil }
+        return abs(viewport.x(forTick: Double(marker.tick(in: pattern))) - Double(point.x)) <= 16 ? marker : nil
+    }
+}
+
 struct PianoRollEditBuffer {
     enum Scale: CaseIterable {
         case chromatic, major, naturalMinor, harmonicMinor, melodicMinor
