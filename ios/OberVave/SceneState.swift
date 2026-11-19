@@ -595,6 +595,35 @@ struct PianoRollEditBuffer {
         nextNoteID += 1
     }
 
+    func copySelection() throws -> [SequencerNote] {
+        try selectedIndices().map { pattern.notes[$0] }
+    }
+
+    mutating func paste(_ notes: [SequencerNote], at anchor: Int64) throws {
+        guard !notes.isEmpty else { throw SceneError.invalid("Copy notes before pasting.") }
+        guard notes.count <= 1024 - pattern.notes.count,
+              UInt64(notes.count) <= UInt64.max - nextNoteID else {
+            throw SceneError.invalid("The pattern has no remaining note capacity or IDs.")
+        }
+        let first = notes.map(\.start).min()!
+        var candidate = pattern
+        var newSelection: Set<UInt64> = []
+        var next = nextNoteID
+        for var note in notes {
+            let (offset, offsetOverflow) = note.start.subtractingReportingOverflow(first)
+            let (start, startOverflow) = anchor.addingReportingOverflow(offset)
+            guard !offsetOverflow, !startOverflow else { throw SceneError.invalid("Paste timing is outside the supported range.") }
+            note.start = start
+            note.id = next
+            next += 1
+            candidate.notes.append(note)
+            newSelection.insert(note.id)
+        }
+        try commit(candidate)
+        nextNoteID = next
+        selection = newSelection
+    }
+
     mutating func transpose(by semitones: Int) throws {
         let indices = operationIndices()
         guard !indices.isEmpty else { return }

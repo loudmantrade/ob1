@@ -254,6 +254,22 @@ struct SceneChecks {
         precondition(PianoRollNoteHit.zone(x: 0, width: 2) == .velocity &&
                      PianoRollNoteHit.zone(x: 1, width: 2) == .body &&
                      PianoRollNoteHit.zone(x: 2, width: 2) == .duration)
+        var pasted = try PianoRollEditBuffer(pattern: editPattern)
+        pasted.selection = [1, 3]
+        let copiedNotes = try pasted.copySelection()
+        try pasted.paste(copiedNotes, at: 1000)
+        precondition(pasted.pattern.notes.suffix(2).map(\.start) == [1000, 1480])
+        precondition(pasted.pattern.notes.suffix(2).map(\.id) == [4, 5])
+        precondition(pasted.pattern.notes.last?.output == false)
+        pasted.undo()
+        precondition(pasted.pattern == editPattern)
+        pasted.redo()
+        precondition(pasted.pattern.notes.count == 5)
+        let beforeInvalidPaste = pasted.pattern
+        do {
+            try pasted.paste(copiedNotes, at: editPattern.length - 1)
+            preconditionFailure("Out-of-range paste must fail")
+        } catch { precondition(pasted.pattern == beforeInvalidPaste) }
         var editor = try PianoRollEditBuffer(pattern: editPattern)
         editor.selection = [1, 2, 3]
         try editor.changeDuration(by: 120)

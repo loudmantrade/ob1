@@ -14,6 +14,11 @@ struct PianoRollView: View {
     @State private var lastTap: (id: UInt64, time: TimeInterval)?
     @State private var selectionRect: CGRect?
     @State private var snap: Int64 = 240
+    @State private var clipboard: [SequencerNote] = []
+    @State private var pasteAnchor: Int64 = 0
+    @State private var scaleRoot = 0
+    @State private var scale: PianoRollEditBuffer.Scale = .major
+    @State private var scaleDirection: PianoRollEditBuffer.ScaleDirection = .nearest
 
     private struct EditGesture {
         let start: CGPoint
@@ -41,7 +46,33 @@ struct PianoRollView: View {
                 Spacer()
                 Button("Undo") { command { $0.undo() } }.disabled(editor?.canUndo != true || busy)
                 Button("Redo") { command { $0.redo() } }.disabled(editor?.canRedo != true || busy)
+                Button("Copy") {
+                    do { clipboard = try editor?.copySelection() ?? [] }
+                    catch { model.errorMessage = error.localizedDescription }
+                }.disabled(editor?.selection.isEmpty != false || busy)
+                Button("Paste") { command { try $0.paste(clipboard, at: pasteAnchor) } }
+                    .disabled(clipboard.isEmpty || busy)
                 Button("Delete") { command { try $0.deleteSelection() } }.disabled(editor?.selection.isEmpty != false || busy)
+                Menu("Music") {
+                    Button("Transpose +1") { command { try $0.transpose(by: 1) } }
+                    Button("Transpose -1") { command { try $0.transpose(by: -1) } }
+                    Button("Octave up") { command { try $0.transpose(by: 12) } }
+                    Button("Octave down") { command { try $0.transpose(by: -12) } }
+                    Picker("Root", selection: $scaleRoot) {
+                        ForEach(0..<12, id: \.self) { Text(["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"][$0]).tag($0) }
+                    }
+                    Picker("Scale", selection: $scale) {
+                        ForEach(PianoRollEditBuffer.Scale.allCases, id: \.self) { Text(String(describing: $0)).tag($0) }
+                    }
+                    Picker("Direction", selection: $scaleDirection) {
+                        Text("Nearest").tag(PianoRollEditBuffer.ScaleDirection.nearest)
+                        Text("Up").tag(PianoRollEditBuffer.ScaleDirection.up)
+                        Text("Down").tag(PianoRollEditBuffer.ScaleDirection.down)
+                    }
+                    Button("Conform to scale") {
+                        command { try $0.conform(root: scaleRoot, scale: scale, direction: scaleDirection) }
+                    }
+                }.disabled(busy)
                 Picker("Snap", selection: $snap) {
                     Text("Off").tag(Int64(0)); Text("1/4").tag(Int64(960))
                     Text("1/8").tag(Int64(480)); Text("1/16").tag(Int64(240))
@@ -49,7 +80,7 @@ struct PianoRollView: View {
                 }.pickerStyle(.menu)
                 Button("Close", action: close).buttonStyle(.bordered)
             }
-            Text("Two fingers: pan/zoom · Hold empty: create · Body: move · Left: velocity · Right: length")
+            Text("Two fingers: pan/zoom · Hold empty: create · Tap empty: paste anchor · Left: velocity · Right: length")
                 .font(.caption).foregroundStyle(.secondary)
             GeometryReader { proxy in
                 let gridSize = CGSize(width: max(0, proxy.size.width - 54), height: max(0, proxy.size.height - 26))
@@ -192,6 +223,7 @@ struct PianoRollView: View {
                 lastTap = (hit.id, ProcessInfo.processInfo.systemUptime)
             } else {
                 editor?.selection = []; lastTap = nil
+                pasteAnchor = snapped(viewport.tick(at: Double(point.x)))
             }
         case .cancel:
             if let active = gesture { editor = active.baseline }

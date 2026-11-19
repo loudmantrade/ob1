@@ -292,8 +292,14 @@ Undo and Redo operate on whole gestures. Audio publication is revision-checked
 and does not restart active or queued playback. Already-sounding notes retain
 their original release times; future onsets use the new data.
 
-The editor remains incomplete: audition, explicit clipboard and musical
-operations are not yet exposed. Controller automation requires bounded,
+Copy/Paste retains relative timing and routing, with the most recent empty-grid
+tap as the paste anchor (initially tick zero). Paste creates new note IDs and
+rejects invalid destinations. Transpose and scale conform affect the selection,
+or all notes when no notes are selected; nearest-scale ties choose the lower
+pitch.
+
+The editor remains incomplete: audition and note quantization are not yet
+exposed. Controller automation requires bounded,
 versioned events with backward-compatible decoding and audio scheduling.
 Independent loop/tail markers require a versioned migration preserving old
 loop behavior, plus iteration-specific note release and real-time capacity
