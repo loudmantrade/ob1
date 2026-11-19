@@ -608,6 +608,25 @@ struct SceneChecks {
         captured = snapshot()
         precondition(captured.scene.slots.0.config.program == UInt32(instrument.programIndex))
         precondition(captured.scene.slots.1.present == 0 && captured.internal_tempo == 120 && captured.solo_mask == 0)
+        var replaced = before
+        replaced.scene.instruments[0].defaultIdentity = UUID()
+        replaced.scene.instruments[0].programIndex = 19
+        replaced.scene.patterns?[0].name = "Replacement"
+        replaced.scene.patterns?.append(SequencerPattern(slot: 0, row: 7, name: "Last row"))
+        replaced.sequencer.columns[0].solo = true
+        let replacement = try SceneRestorePlan(before: before, after: replaced)
+        precondition(replacement.slots.count == 1 && replacement.slots[0].structural)
+        try replacement.enqueue(snapshot: captured, token: 4005)
+        render()
+        precondition(ov_rack_read_parameter_result(&result) != 0 && result.token == 4005 && result.success != 0)
+        captured = snapshot()
+        precondition(captured.scene.slots.0.config.program == 19 && captured.solo_mask == 1)
+        let replacementReverse = try SceneRestorePlan(before: replaced, after: before)
+        try replacementReverse.enqueue(snapshot: captured, token: 4006)
+        render()
+        precondition(ov_rack_read_parameter_result(&result) != 0 && result.token == 4006 && result.success != 0)
+        captured = snapshot()
+        precondition(captured.scene.slots.0.config.program == UInt32(instrument.programIndex) && captured.solo_mask == 0)
         ov_rack_collect()
         print("PASS Swift scene restore bridge: structural slots, sound, route, mixer, cells, tempo and conflict")
     }
