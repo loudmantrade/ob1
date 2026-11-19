@@ -1483,6 +1483,14 @@ static void checkBundleTempo()
                                      &guard, 1, nullptr, 0, &tempo, epoch, 961)); render();
     assert(ov_rack_read_parameter_result(&result) && !result.success && ov_seq_internal_tempo() == 121);
     assert(rack::send(0xFA, 0, 0, 0, false, false)); render();
+    assert(ov_seq_change_full_bundle(nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0,
+                                     &guard, 1, nullptr, 0, nullptr, epoch, 966)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.token == 966 && result.success);
+    auto invalidGuard = guard;
+    ++invalidGuard.generation;
+    assert(ov_seq_change_full_bundle(nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0,
+                                     &invalidGuard, 1, nullptr, 0, nullptr, epoch, 967)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.token == 967 && !result.success);
     assert(ov_seq_change_full_bundle(&sound, 1, nullptr, 0, nullptr, 0, nullptr, 0,
                                      &guard, 1, nullptr, 0, &tempo, epoch, 962)); render();
     assert(ov_rack_read_parameter_result(&result) && !result.success && ov_seq_internal_tempo() == 121);

@@ -165,7 +165,8 @@ int ov_seq_change_bundle_with_slots(const ov_rack_sound_change* sounds, uint32_t
                                     uint64_t epoch, uint64_t token);
 /* An optional tempo change is checked and committed with the entire bundle.
    It is rejected while MIDI clock controls the transport or if the internal
-   tempo no longer equals expected. */
+   tempo no longer equals expected. An empty bundle is a checked audio-owner
+   barrier (epoch, supplied slot guards and recording state still apply). */
 typedef struct { uint32_t expected, replacement; } ov_seq_tempo_change;
 uint32_t ov_seq_internal_tempo(void);
 int ov_seq_change_full_bundle(const ov_rack_sound_change* sounds, uint32_t sound_count,

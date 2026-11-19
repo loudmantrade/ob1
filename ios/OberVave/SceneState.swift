@@ -808,9 +808,7 @@ extension SceneRestorePlan {
         }
         let structuralSlots = slots.filter(\.structural)
         var tempo = ov_seq_tempo_change(expected: snapshot.internal_tempo, replacement: UInt32(after.scene.tempo))
-        let hasAudioChanges = !sounds.isEmpty || !mixers.isEmpty || !routes.isEmpty ||
-            !cells.isEmpty || !structuralSlots.isEmpty
-        let changeTempo = before.scene.tempo != after.scene.tempo || !hasAudioChanges
+        let changeTempo = before.scene.tempo != after.scene.tempo
         if changeTempo {
             guard snapshot.clock_external == 0 else {
                 throw SceneError.invalid("Stop MIDI clock before restoring the scene.")
