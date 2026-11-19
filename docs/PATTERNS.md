@@ -387,7 +387,7 @@ JSON persistence. These checks do not substitute for physical touch/audio tests.
    confirm replacement; only affected players stop, unrelated loops continue.
 8. Short-tap+stationary hold: release opens destructive Delete confirmation.
    Cancel, then retry and confirm. Hold+drag must never request deletion.
-9. Double tap: only the Piano Roll placeholder opens; playback must not toggle.
+9. Double tap: only the Piano Roll opens; playback must not toggle.
    Single populated tap dispatches after 240 ms; empty/recording taps are immediate.
 10. Scroll horizontally/vertically from pad edges, empty cells and gaps.
     No unintended move or recording should occur. Reveal distant destinations
@@ -402,6 +402,32 @@ JSON persistence. These checks do not substitute for physical touch/audio tests.
 14. Check VoiceOver pad activation and Pattern actions, and test the gesture
     thresholds/scroll trade-off on older iPads. Installation alone does not
     verify these physical interactions.
+
+### Piano Roll physical iPad checklist (not yet verified)
+
+1. Double-tap a populated cell during playback and verify no launch, stop or
+   recording occurs. Close and reopen it; viewport and both zoom levels persist.
+2. Tap notes to select and audition, including rapid taps and a pitch already
+   sounding elsewhere. Verify brief previews and no stuck or silenced notes.
+3. Hold empty space to create, tap empty space to clear, and drag in each
+   direction to select a rectangle. Move, copy and delete individual/group
+   notes; verify one Undo/Redo step per gesture.
+4. Drag left edges vertically for velocity, right edges horizontally for
+   duration, and bodies diagonally for pitch/time. Test short notes, zoom
+   extremes, group limits and velocity/duration values.
+5. Test transpose, scale directions, custom snap, start/end quantization and
+   selected versus all-note operations; save and reload without losing originals.
+6. Edit velocity, CC1, another CC and centered/full-range pitch bend; draw and
+   delete points and freehand strokes, play them, undo, save and reload.
+7. Drag and enter all four markers including negative and positive starts.
+   Verify invalid edits are rejected, tail-only onsets stay silent, ONE-SHOT
+   finishes and overlapping loop iterations release independently.
+8. Pan and pinch each axis and both simultaneously from notes and lanes; cross
+   fingers and add a second finger mid-edit. No edit may commit, and the
+   remaining finger must not restart one until all fingers are lifted.
+9. Exercise dense patterns on an older supported iPad while playback and other
+   instruments run. Record A then B, test ARP Input/Output, KEY-LOCK, scene
+   reload and live sound-design controls without glitches.
 
 `musical_patterns` is registered in the existing CTest suite. It can also run
 independently of Apple frameworks:

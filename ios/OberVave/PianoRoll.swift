@@ -181,15 +181,21 @@ struct PianoRollView: View {
                 }
                 .onAppear {
                     gridHeight = gridSize.height
-                    viewport.clamp(length: pattern.length, intro: pattern.intro, size: gridSize)
+                    viewport.clamp(length: displayedPattern.length, intro: displayedPattern.intro, size: gridSize)
                 }
                 .onChange(of: proxy.size) { _ in
                     gridHeight = gridSize.height
-                    viewport.clamp(length: pattern.length, intro: pattern.intro, size: gridSize)
+                    viewport.clamp(length: displayedPattern.length, intro: displayedPattern.intro, size: gridSize)
                 }
                 .onChange(of: lane) { _ in
                     gridHeight = gridSize.height
-                    viewport.clamp(length: pattern.length, intro: pattern.intro, size: gridSize)
+                    viewport.clamp(length: displayedPattern.length, intro: displayedPattern.intro, size: gridSize)
+                }
+                .onChange(of: displayedPattern.length) { length in
+                    viewport.clamp(length: length, intro: displayedPattern.intro, size: gridSize)
+                }
+                .onChange(of: displayedPattern.intro) { intro in
+                    viewport.clamp(length: displayedPattern.length, intro: intro, size: gridSize)
                 }
             }
         }
@@ -602,8 +608,22 @@ struct PianoRollView: View {
             let rect = CGRect(x: x, y: y + 1, width: max(2, Double(note.duration) * viewport.beatWidth / 960),
                               height: max(2, viewport.pitchHeight - 2))
             guard rect.intersects(grid) else { continue }
+            let selected = editor?.selection.contains(note.id) == true
+            let color: Color = selected ? .orange : .cyan
             context.fill(Path(roundedRect: rect.intersection(grid), cornerRadius: 3),
-                         with: .color(editor?.selection.contains(note.id) == true ? .orange : .cyan))
+                         with: .color(color.opacity(0.35 + 0.65 * Double(note.velocity) / 127)))
+            if let active = gesture, active.moved, active.hit?.id == note.id {
+                let label: String
+                switch active.hit?.zone {
+                case .velocity: label = "Velocity \(note.velocity)"
+                case .duration: label = "Duration \(note.duration)"
+                case .body: label = "Pitch \(note.pitch) · Tick \(note.start)"
+                case nil: label = ""
+                }
+                context.draw(Text(label).font(.caption2).foregroundColor(.white),
+                             at: CGPoint(x: min(size.width - 60, max(left + 60, rect.midX)),
+                                         y: max(top + 8, rect.minY - 8)))
+            }
         }
         let colors: [Color] = [.green, .cyan, .orange, .red]
         for marker in PianoRollMarker.allCases {

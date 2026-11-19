@@ -161,7 +161,7 @@ This is audio-clock-driven and does not record metronome sound into MIDI.
 | Short tap, then drag the same pad | COPY |
 | Hold, then drag | COPY |
 | Short tap, then hold stationary and release | DELETE confirmation |
-| Double short tap | Deferred Piano Roll placeholder, no playback action |
+| Double short tap | Open Piano Roll, no playback action |
 | Hold stationary and release | Pattern actions (editor, Duplicate, Delete, etc.) |
 
 Holding an empty pad opens the existing manual pattern editor without arming
@@ -182,6 +182,12 @@ their ARP/Latch notes, and leaves FX tails/unrelated columns intact. Copies
 never auto-start. The UI updates its saved pattern model only after audio
 acknowledgement; save/load waits for pending edits. VoiceOver retains pad
 activation, Pattern actions, Piano Roll and manual Create Pattern actions.
+
+The Piano Roll supports note and group editing, Undo/Redo, musical operations,
+controller lanes and editable loop/tail markers. Its session viewport uses
+two-finger pan and independent horizontal/vertical pinch. See
+[PATTERNS.md](../../docs/PATTERNS.md) for gestures, compatibility and the
+physical iPad acceptance checklist.
 - The **intro marker** reserves up to twelve beats before zero (two full
   count-in bars plus up to one bar waiting for scene alignment). Negative-start
   notes play once before the main loop, not on subsequent iterations.
