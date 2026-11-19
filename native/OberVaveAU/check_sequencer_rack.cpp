@@ -818,11 +818,35 @@ static void checkRegionClip()
     assert(rack::clips[0][0]->pattern.data().loopEnd == 1200);
     assert(ov_seq_arm(0, 0, 2, 1, 4, 1)); render();
     assert(!rack::recordings[0].recorder.data.regionsEnabled);
+    assert(!rack::recordings[0].recorder.data.explicitPatternStart);
     assert(ov_rack_stop_all()); render();
     auto completion = std::make_unique<ov_seq_clip>();
     while (ov_seq_record_ready()) assert(ov_seq_read_record(completion.get()));
     assert(!ov_rack_take_error());
     std::puts("PASS region clip: audio-owned looping, tail exclusion, cursor, revision-safe edits and recording reset");
+}
+
+static void checkIndependentRegionClip()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()};
+    auto region = std::make_unique<ov_seq_clip>(clip(0, 0));
+    region->regions_enabled = 2; region->intro = 480; region->intro_enabled = 1;
+    region->pattern_start = -480; region->loop_start = -240; region->loop_end = -120;
+    region->notes[0].start = -240; region->notes[0].duration = 30;
+    auto output = std::make_unique<ov_seq_clip>();
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(region.get())); assert(ov_seq_launch(0, 0, 0)); render();
+    rack::encodeClip(0, 0, rack::clips[0][0]->pattern.data(), *output);
+    assert(output->regions_enabled == 2 && output->pattern_start == -480);
+    assert(ov_seq_active(0) == 0 && ov_seq_position_ticks(0) < 0 && ov_seq_position(0) == 0);
+    const auto origin = rack::players[0].origin;
+    while (rack::musicalPosition.value < origin + 100 * music::tickUnit) render();
+    assert(ov_seq_position_ticks(0) >= -240 && ov_seq_position_ticks(0) < -120);
+    assert(ov_seq_position(0) == 0);
+    assert(ov_rack_stop_all()); render();
+    assert(!ov_rack_take_error());
+    std::puts("PASS independent regions: explicit schema survives bridge and negative loop cursor");
 }
 
 static void checkAudition()
@@ -1038,5 +1062,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkAudition(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

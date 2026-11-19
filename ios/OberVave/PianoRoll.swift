@@ -378,7 +378,7 @@ struct PianoRollView: View {
                 return
             }
             let pattern = active.baseline.pattern
-            var start = -pattern.intro, loopStart = pattern.loopStart
+            var start = pattern.patternStart, loopStart = pattern.loopStart
             var loopEnd = pattern.loopEnd, tailEnd = pattern.length
             let tick = snapped(viewport.tick(at: Double(point.x)))
             switch active.marker {
@@ -634,7 +634,7 @@ struct PianoRollView: View {
             }
         }
         if Int(ov_seq_active(UInt32(pattern.slot))) == pattern.row {
-            let tick = Double(ov_seq_position(UInt32(pattern.slot))) * Double(current.length) / 65535
+            let tick = Double(ov_seq_position_ticks(UInt32(pattern.slot)))
             let x = left + viewport.x(forTick: tick)
             if x >= left && x <= size.width {
                 var line = Path(); line.move(to: CGPoint(x: x, y: top)); line.addLine(to: CGPoint(x: x, y: size.height))
@@ -656,7 +656,7 @@ struct PianoRollRegionsSheet: View {
 
     init(pattern: SequencerPattern, apply: @escaping (Int64, Int64, Int64, Int64, Bool) -> Void) {
         self.apply = apply
-        _start = State(initialValue: PianoRollPosition.format(-pattern.intro))
+        _start = State(initialValue: PianoRollPosition.format(pattern.patternStart))
         _loopStart = State(initialValue: PianoRollPosition.format(pattern.hasRegions ? pattern.loopStart : 0))
         _loopEnd = State(initialValue: PianoRollPosition.format(pattern.hasRegions ? pattern.loopEnd : pattern.length))
         _tailEnd = State(initialValue: PianoRollPosition.format(pattern.length))
@@ -686,9 +686,9 @@ struct PianoRollRegionsSheet: View {
                     Button("Apply") {
                         guard let start = PianoRollPosition.parse(start), let loopStart = PianoRollPosition.parse(loopStart),
                               let loopEnd = PianoRollPosition.parse(loopEnd), let tailEnd = PianoRollPosition.parse(tailEnd),
-                              (-11520...0).contains(start), loopStart >= 0, loopStart < loopEnd,
+                              start >= -11520, start <= loopStart, loopStart < loopEnd,
                               loopEnd <= tailEnd, tailEnd <= SequencerPattern.maxTicks else {
-                            message = "Require -11520 ≤ start ≤ 0 ≤ loop start < loop end ≤ tail end."
+                            message = "Require -11520 ≤ start ≤ loop start < loop end ≤ tail end."
                             return
                         }
                         apply(start, loopStart, loopEnd, tailEnd, loop)

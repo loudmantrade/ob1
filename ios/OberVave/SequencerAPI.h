@@ -21,8 +21,8 @@ typedef struct {
 typedef struct {
     uint32_t slot, row, count, loop, intro_enabled, quantize;
     int64_t length, intro;
-    uint32_t regions_enabled;
-    int64_t loop_start, loop_end;
+    uint32_t regions_enabled; /* 0 legacy, 1 start=-intro, 2 explicit start */
+    int64_t pattern_start, loop_start, loop_end;
     char name[97];
     ov_seq_note notes[OV_SEQ_NOTES];
     uint32_t automation_count;
@@ -65,6 +65,7 @@ uint64_t ov_seq_transport_beat(void); /* zero-based global quarter count since t
 int32_t ov_seq_active(uint32_t slot);
 int32_t ov_seq_pending(uint32_t slot);
 uint32_t ov_seq_position(uint32_t slot); /* 0..65535 */
+int64_t ov_seq_position_ticks(uint32_t slot); /* signed pattern-relative audio-owned position */
 int32_t ov_seq_recording_slot(void);
 int32_t ov_seq_recording_row(void);
 uint32_t ov_seq_stopping(uint32_t slot);

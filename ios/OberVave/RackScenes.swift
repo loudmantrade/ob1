@@ -188,8 +188,10 @@ extension OberVaveModel {
         var transport: [UInt32] = [state, ov_seq_record_progress(), ov_seq_record_remaining()]
         for instrument in instruments {
             let slot = UInt32(instrument.slot)
+            let position = UInt64(bitPattern: ov_seq_position_ticks(slot))
             transport.append(contentsOf: [UInt32(ov_seq_active(slot) + 1), UInt32(ov_seq_pending(slot) + 1),
                                           ov_seq_stopping(slot), ov_seq_position(slot),
+                                          UInt32(truncatingIfNeeded: position), UInt32(truncatingIfNeeded: position >> 32),
                                           ov_seq_record_state_for_slot(slot), ov_seq_record_progress_for_slot(slot),
                                           ov_seq_record_remaining_for_slot(slot)])
             for row in 0..<8 { transport.append(ov_seq_pad_pending(slot, UInt32(row))) }

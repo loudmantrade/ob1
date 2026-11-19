@@ -285,6 +285,16 @@ struct SceneChecks {
         var regionEditor = try PianoRollEditBuffer(pattern: editPattern)
         try regionEditor.regions(patternStart: 0, loopStart: 240, loopEnd: 960, tailEnd: 3840, loop: true)
         let regionPattern = regionEditor.pattern
+        precondition(regionPattern.version == 6 && regionPattern.patternStart == 0)
+        var independent = regionEditor
+        try independent.regions(patternStart: 200, loopStart: 240, loopEnd: 960, tailEnd: 3840, loop: true)
+        precondition(independent.pattern.notes == editPattern.notes && independent.pattern.patternStart == 200)
+        let independentJSON = try JSONEncoder().encode(independent.pattern)
+        let decodedIndependent = try JSONDecoder().decode(SequencerPattern.self, from: independentJSON)
+        precondition(decodedIndependent == independent.pattern)
+        precondition(SequencerPattern(core: independent.pattern.coreClip()) == independent.pattern)
+        try independent.regions(patternStart: -480, loopStart: -240, loopEnd: 960, tailEnd: 3840, loop: true)
+        precondition(independent.pattern.intro == 480 && independent.pattern.loopStart == -240)
         let markerViewport = PianoRollViewport()
         for marker in PianoRollMarker.allCases {
             let point = CoreGraphics.CGPoint(x: markerViewport.x(forTick: Double(marker.tick(in: regionPattern))),
@@ -337,7 +347,7 @@ struct SceneChecks {
         regionEditor.selection = [1]
         try regionEditor.quantizeNotes(grid: 240, strength: 50, ends: true)
         let perNotePattern = regionEditor.pattern
-        precondition(perNotePattern.version == 5 && perNotePattern.notes[0].start == automatedPattern.notes[0].start &&
+        precondition(perNotePattern.version == 6 && perNotePattern.notes[0].start == automatedPattern.notes[0].start &&
                      perNotePattern.notes[0].quantization == NoteQuantization(grid: 240, strength: 50, ends: true) &&
                      perNotePattern.notes[1].quantization == nil)
         let perNoteJSON = try JSONEncoder().encode(perNotePattern)

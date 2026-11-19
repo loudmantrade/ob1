@@ -58,6 +58,7 @@ struct PatternData {
     bool loop = true;
     // Legacy patterns retain their original unbounded tail behavior.
     bool regionsEnabled = false;
+    bool explicitPatternStart = false;
     Tick patternStart = 0, loopStart = 0, loopEnd = 0;
     uint32_t automationCount = 0;
     std::array<PatternAutomation, patternAutomationCapacity> automation {};

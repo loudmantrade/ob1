@@ -322,7 +322,7 @@ selected, the same signed velocity delta applies to the selected group.
 Re-recording retains automation;
 if the new take cannot contain its points, publication fails instead of
 silently discarding them.
-The Regions command enables version 3 for the edited pattern, with numeric tick
+The Regions command enables version 6 for the edited pattern, with numeric tick
 positions for pattern start, loop start/end and tail end, and LOOP/ONE-SHOT.
 The editor displays these markers and shades the non-triggering tail. Each
 iteration has independently owned note releases, capped at its tail end.
@@ -334,9 +334,10 @@ their tail behavior. A fresh recording replaces regions with legacy defaults.
 Marker handles have separate ruler rows, even when markers coincide. Dragging
 is enabled after explicit Regions conversion and uses the selected snap grid;
 invalid moves are rejected without changing notes. Numeric positions accept
-raw ticks or 4/4 bar:beat:tick notation. The portable scheduler supports
-independent negative or positive starts, but the current scene format and
-editor do not yet expose them.
+raw ticks or 4/4 bar:beat:tick notation. Pattern start may be positive or
+negative, and loop start may be negative; notes outside the playing range are
+retained. Version 6 preserves this independent start alongside automation and
+per-note quantization. Versions 3–5 keep their original start semantics.
 Acceptance requires portable timing/ownership and scene-migration regressions,
 the existing sequencer and AU suites, a signed iPad build, and the physical
 iPad gesture/audio checklist from the implementation specification.
