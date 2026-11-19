@@ -1287,6 +1287,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
 
     func refreshParameterValues() {
         syncRackState()
+        guard !sceneSwitchPending, pendingSceneParameterHistory == nil else { return }
         let currentTempo = Int(ov_tempo())
         if currentTempo != tempo { tempo = currentTempo }
         let clockActive = ov_midi_clock_active() != 0

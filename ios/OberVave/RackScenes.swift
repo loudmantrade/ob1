@@ -669,8 +669,9 @@ extension OberVaveModel {
 
     func syncRackState() {
         syncSequencerState()
+        guard !sceneSwitchPending, pendingSceneParameterHistory == nil else { return }
         var captured = ov_scene_config()
-        if !sceneSwitchPending && pendingSceneName != nil && ov_rack_snapshot_read(&captured) != 0 {
+        if pendingSceneName != nil && ov_rack_snapshot_read(&captured) != 0 {
             finishSceneSave(captured)
         }
         guard pendingSceneName == nil else { return }
@@ -708,7 +709,8 @@ extension OberVaveModel {
     }
 
     func selectInstrument(_ slot: Int) {
-        guard pendingSceneName == nil, pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty,
+        guard pendingSceneName == nil, !sceneSwitchPending, pendingSceneParameterHistory == nil,
+              activeParameterEdits.isEmpty,
               instruments.contains(where: { $0.slot == slot }) else { return }
         rememberSelectedInstrument()
         cancelMidiLearn()
@@ -748,7 +750,8 @@ extension OberVaveModel {
     }
 
     func configureInstrument(_ instrument: RackInstrument, recordHistory: Bool = true) -> Bool {
-        guard pendingSceneName == nil, pendingSceneParameterHistory == nil, pendingSequencerSettings == nil else {
+        guard pendingSceneName == nil, !sceneSwitchPending, pendingSceneParameterHistory == nil,
+              pendingSequencerSettings == nil else {
             errorMessage = "Wait for the pending scene or sequencer edit."
             return false
         }
