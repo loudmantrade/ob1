@@ -687,6 +687,59 @@ struct ApplicationDefaultStore {
     }
 }
 
+struct SceneRestorePlan {
+    struct Slot {
+        var index: Int
+        var before: RackInstrument?
+        var after: RackInstrument?
+        var structural: Bool
+    }
+
+    struct Cell {
+        var cell: PatternCell
+        var before: SequencerPattern?
+        var after: SequencerPattern?
+    }
+
+    var slots: [Slot]
+    var cells: [Cell]
+
+    init(before: ApplicationDefault, after: ApplicationDefault) throws {
+        try before.validate()
+        try after.validate()
+        let previous = Dictionary(uniqueKeysWithValues: before.scene.instruments.map { ($0.slot, $0) })
+        let target = Dictionary(uniqueKeysWithValues: after.scene.instruments.map { ($0.slot, $0) })
+        let oldColumns = Dictionary(uniqueKeysWithValues: before.sequencer.columns.map { ($0.slot, $0) })
+        let newColumns = Dictionary(uniqueKeysWithValues: after.sequencer.columns.map { ($0.slot, $0) })
+        guard let beforePatterns = before.scene.patterns, let afterPatterns = after.scene.patterns else {
+            throw SceneError.invalid("A scene restore snapshot is missing patterns.")
+        }
+        let oldPatterns = Dictionary(uniqueKeysWithValues: beforePatterns.map { ($0.id, $0) })
+        let newPatterns = Dictionary(uniqueKeysWithValues: afterPatterns.map { ($0.id, $0) })
+        var plannedSlots: [Slot] = []
+        var plannedCells: [Cell] = []
+        for index in 0..<16 {
+            let old = previous[index], new = target[index]
+            let structural = old == nil || new == nil ||
+                old?.engine != new?.engine || old?.defaultIdentity != new?.defaultIdentity
+            let changedCells = (0..<8).compactMap { row -> Cell? in
+                let cell = PatternCell(slot: index, row: row)
+                let beforePattern = oldPatterns[cell.id], afterPattern = newPatterns[cell.id]
+                guard beforePattern != afterPattern else { return nil }
+                return Cell(cell: cell, before: beforePattern, after: afterPattern)
+            }
+            if old != nil || new != nil {
+                if old != new || oldColumns[index] != newColumns[index] || !changedCells.isEmpty {
+                    plannedSlots.append(Slot(index: index, before: old, after: new, structural: structural))
+                }
+                if !structural { plannedCells.append(contentsOf: changedCells) }
+            }
+        }
+        slots = plannedSlots
+        cells = plannedCells
+    }
+}
+
 struct SequencerSettingsEdit: Equatable {
     var before: SequencerDefault
     var after: SequencerDefault

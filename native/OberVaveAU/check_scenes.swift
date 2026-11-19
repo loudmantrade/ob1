@@ -80,6 +80,27 @@ struct SceneChecks {
             sustainStopGesture: true, arpLatencyAuto: true, arpLatencyManualMS: -12, recordMetronome: true)
         let application = ApplicationDefault(scene: applicationScene, sequencer: settings, device: device)
         try application.validate()
+        let unchangedPlan = try SceneRestorePlan(before: application, after: application)
+        precondition(unchangedPlan.slots.isEmpty && unchangedPlan.cells.isEmpty)
+        var targetApplication = application
+        targetApplication.scene.instruments[0].programIndex = 18
+        targetApplication.scene.patterns?[0].name = "Edited"
+        var addedInstrument = RackInstrument.oberVave(slot: 1, channel: 2)
+        addedInstrument.levelDB = -6
+        targetApplication.scene.instruments.append(addedInstrument)
+        targetApplication.scene.patterns?.append(SequencerPattern(slot: 1, row: 1, name: "Added"))
+        targetApplication.sequencer.columns.append(SequencerDefault.Column(slot: 1, level: -6, pan: 0,
+                                                                            muted: false, recordBeats: 4))
+        let plan = try SceneRestorePlan(before: application, after: targetApplication)
+        precondition(plan.slots.count == 2 && !plan.slots[0].structural && plan.slots[1].structural)
+        precondition(plan.cells.count == 1 && plan.cells[0].cell.id == 0 &&
+                     plan.cells[0].before?.name == pattern.name && plan.cells[0].after?.name == "Edited")
+        let reversedPlan = try SceneRestorePlan(before: targetApplication, after: application)
+        precondition(reversedPlan.slots[1].before?.slot == 1 && reversedPlan.slots[1].after == nil)
+        targetApplication = application
+        targetApplication.scene.instruments[0].defaultIdentity = UUID()
+        let replacementPlan = try SceneRestorePlan(before: application, after: targetApplication)
+        precondition(replacementPlan.slots.count == 1 && replacementPlan.slots[0].structural)
         let suite = "io.github.joakimeriksson.obervave.tests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suite) else { fatalError("Could not create test defaults suite") }
         defer { defaults.removePersistentDomain(forName: suite) }
