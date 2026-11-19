@@ -112,6 +112,16 @@ struct RackInstanceSidebar: View {
 }
 
 extension OberVaveModel {
+    func rackSlotGenerations() -> [UInt64]? {
+        var result: [UInt64] = []
+        for slot in 0..<16 {
+            var generation: UInt64 = 0
+            guard ov_rack_slot_generation(UInt32(slot), &generation) != 0 else { return nil }
+            result.append(generation)
+        }
+        return result
+    }
+
     func jumpSceneHistory(undo: Bool, steps: Int) {
         guard sceneHistoryJump == nil, steps > 0 else { return }
         syncExternalParameterHistory()
@@ -994,6 +1004,16 @@ extension OberVaveModel {
         let sceneKey = sceneSessionKey
         let capturedInstruments = instruments
         let capturedPatterns = patterns
+        let capturedName = sceneName
+        let capturedMasterDB = masterLevelDB
+        let capturedMasterPan = masterPan
+        let capturedKeyboardMask = keyboardChannelMask
+        let capturedSelectedSlot = selectedSlot
+        let capturedSettings = currentSequencerSettings()
+        guard let generations = rackSlotGenerations() else {
+            errorMessage = "An instrument is changing; try saving defaults again."
+            return
+        }
         let revisions = (0..<128).map {
             ov_seq_cell_revision(UInt32($0 / 8), UInt32($0 % 8))
         }
@@ -1016,8 +1036,11 @@ extension OberVaveModel {
             do {
                 guard self.sceneSessionKey == sceneKey, epoch == ov_seq_scene_epoch(),
                       self.recordingPattern == nil, ov_seq_record_state() == 0,
-                      self.instruments.map(\.defaultIdentity) == capturedInstruments.map(\.defaultIdentity),
-                      self.instruments.map(\.slot) == capturedInstruments.map(\.slot) else {
+                      self.rackSlotGenerations() == generations,
+                      self.instruments == capturedInstruments, self.sceneName == capturedName,
+                      self.masterLevelDB == capturedMasterDB, self.masterPan == capturedMasterPan,
+                      self.keyboardChannelMask == capturedKeyboardMask, self.selectedSlot == capturedSelectedSlot,
+                      !all || self.currentSequencerSettings() == capturedSettings else {
                     throw SceneError.invalid("The scene changed while taking the snapshot.")
                 }
                 if all {
@@ -1047,17 +1070,17 @@ extension OberVaveModel {
                     captured[index].pan = Double(slot.config.pan)
                     captured[index].muted = slot.config.muted != 0
                 }
-                let document = RackSceneDocument(name: self.sceneName, instruments: captured,
-                    tempo: Int(snapshot.tempo), masterDB: self.masterLevelDB, masterPan: self.masterPan,
-                    keyboardMask: self.keyboardChannelMask,
-                    selectedSlot: captured.isEmpty ? nil : self.selectedSlot, patterns: nil)
+                let document = RackSceneDocument(name: capturedName, instruments: captured,
+                    tempo: Int(snapshot.tempo), masterDB: capturedMasterDB, masterPan: capturedMasterPan,
+                    keyboardMask: capturedKeyboardMask,
+                    selectedSlot: captured.isEmpty ? nil : capturedSelectedSlot, patterns: nil)
                 var libraries = self.currentDefaultLibraries()
                 try libraries.scenes.set(document, scene: sceneKey)
                 if all {
                     for instrument in captured { try libraries.instruments.set(instrument, scene: sceneKey) }
                     try libraries.patterns.replaceScene(capturedPatterns, scene: sceneKey)
                     try libraries.setPatternLayout(capturedPatterns, scene: sceneKey)
-                    var sequence = self.currentSequencerSettings()
+                    var sequence = capturedSettings
                     sequence.columns = captured.sorted { $0.slot < $1.slot }.map {
                         SequencerDefault.Column(slot: $0.slot, level: Double(Float($0.levelDB)),
                             pan: Double(Float($0.pan)), muted: $0.muted, recordBeats: $0.recordBeats,

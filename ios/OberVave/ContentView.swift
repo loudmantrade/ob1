@@ -791,6 +791,10 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         }
         let epoch = ov_seq_scene_epoch()
         let capturedInstruments = allInstruments ? instruments : [instrument]
+        guard let generations = rackSlotGenerations() else {
+            errorMessage = "An instrument is changing; try using preset defaults again."
+            return
+        }
         guard ov_rack_snapshot_request() != 0 else {
             errorMessage = "Could not request an audio snapshot."; return
         }
@@ -803,6 +807,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             do {
                 guard epoch == ov_seq_scene_epoch(), self.selectedSlot == instrument.slot,
                       self.bank * 128 + self.program == instrument.programIndex,
+                      self.rackSlotGenerations() == generations,
                       self.recordingPattern == nil, ov_seq_record_state() == 0 else {
                     throw SceneError.invalid("The scene or preset changed while taking the snapshot.")
                 }
