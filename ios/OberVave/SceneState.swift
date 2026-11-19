@@ -178,7 +178,7 @@ extension RackInstrument {
     }
 }
 
-struct RackSceneDocument: Codable {
+struct RackSceneDocument: Codable, Equatable {
     var version = 1
     var name: String
     var instruments: [RackInstrument]
@@ -639,7 +639,7 @@ struct ApplicationDeviceSettings: Codable, Equatable {
     }
 }
 
-struct ApplicationDefault: Codable {
+struct ApplicationDefault: Codable, Equatable {
     var version = 1
     var scene: RackSceneDocument
     var sequencer: SequencerDefault
@@ -663,6 +663,120 @@ struct ApplicationDefault: Codable {
                 throw SceneError.invalid("The application default has inconsistent mixer settings.")
             }
         }
+    }
+}
+
+struct SceneRestoreEdit: Equatable {
+    let before: ApplicationDefault
+    let after: ApplicationDefault
+    let restoresDevice: Bool
+
+    func applying(to current: ApplicationDefault, undo: Bool) throws -> ApplicationDefault {
+        let expected = undo ? after : before
+        let replacement = undo ? before : after
+        try current.validate()
+        try expected.validate()
+        try replacement.validate()
+        var result = current
+
+        func replace<T: Equatable>(_ value: inout T, _ old: T, _ new: T) throws {
+            guard old != new else { return }
+            guard value == old else {
+                throw SceneError.invalid("A restored field changed since this history step.")
+            }
+            value = new
+        }
+
+        try replace(&result.scene.name, expected.scene.name, replacement.scene.name)
+        try replace(&result.scene.tempo, expected.scene.tempo, replacement.scene.tempo)
+        try replace(&result.scene.masterDB, expected.scene.masterDB, replacement.scene.masterDB)
+        try replace(&result.scene.masterPan, expected.scene.masterPan, replacement.scene.masterPan)
+        try replace(&result.scene.keyboardMask, expected.scene.keyboardMask, replacement.scene.keyboardMask)
+        try replace(&result.scene.selectedSlot, expected.scene.selectedSlot, replacement.scene.selectedSlot)
+        try replace(&result.sequencer.launchGrid, expected.sequencer.launchGrid, replacement.sequencer.launchGrid)
+        try replace(&result.sequencer.recordMode, expected.sequencer.recordMode, replacement.sequencer.recordMode)
+        try replace(&result.sequencer.countBars, expected.sequencer.countBars, replacement.sequencer.countBars)
+        try replace(&result.sequencer.recordOutput, expected.sequencer.recordOutput, replacement.sequencer.recordOutput)
+        if restoresDevice {
+            try replace(&result.device.bleMIDIBufferMilliseconds, expected.device.bleMIDIBufferMilliseconds,
+                        replacement.device.bleMIDIBufferMilliseconds)
+            try replace(&result.device.sustainInverted, expected.device.sustainInverted, replacement.device.sustainInverted)
+            try replace(&result.device.sustainStopGesture, expected.device.sustainStopGesture, replacement.device.sustainStopGesture)
+            try replace(&result.device.arpLatencyAuto, expected.device.arpLatencyAuto, replacement.device.arpLatencyAuto)
+            try replace(&result.device.arpLatencyManualMS, expected.device.arpLatencyManualMS, replacement.device.arpLatencyManualMS)
+            try replace(&result.device.recordMetronome, expected.device.recordMetronome, replacement.device.recordMetronome)
+        }
+        var instruments = Dictionary(uniqueKeysWithValues: current.scene.instruments.map { ($0.slot, $0) })
+        let oldInstruments = Dictionary(uniqueKeysWithValues: expected.scene.instruments.map { ($0.slot, $0) })
+        let newInstruments = Dictionary(uniqueKeysWithValues: replacement.scene.instruments.map { ($0.slot, $0) })
+        var columns = Dictionary(uniqueKeysWithValues: current.sequencer.columns.map { ($0.slot, $0) })
+        let oldColumns = Dictionary(uniqueKeysWithValues: expected.sequencer.columns.map { ($0.slot, $0) })
+        let newColumns = Dictionary(uniqueKeysWithValues: replacement.sequencer.columns.map { ($0.slot, $0) })
+        for slot in 0..<16 {
+            let old = oldInstruments[slot], new = newInstruments[slot]
+            let structural = old == nil || new == nil ||
+                old?.defaultIdentity != new?.defaultIdentity || old?.engine != new?.engine
+            if structural {
+                if old != new {
+                    guard instruments[slot] == old, columns[slot] == oldColumns[slot] else {
+                        throw SceneError.invalid("An instrument changed since this history step.")
+                    }
+                    instruments[slot] = new
+                    columns[slot] = newColumns[slot]
+                }
+                continue
+            }
+            guard let old, let new, var value = instruments[slot],
+                  value.defaultIdentity == old.defaultIdentity, value.engine == old.engine,
+                  let oldColumn = oldColumns[slot], let newColumn = newColumns[slot],
+                  var column = columns[slot] else {
+                throw SceneError.invalid("An instrument changed since this history step.")
+            }
+            try replace(&value.name, old.name, new.name)
+            try replace(&value.channel, old.channel, new.channel)
+            try replace(&value.lowNote, old.lowNote, new.lowNote)
+            try replace(&value.highNote, old.highNote, new.highNote)
+            try replace(&value.levelDB, old.levelDB, new.levelDB)
+            try replace(&value.pan, old.pan, new.pan)
+            try replace(&value.muted, old.muted, new.muted)
+            try replace(&value.programIndex, old.programIndex, new.programIndex)
+            try replace(&value.sync, old.sync, new.sync)
+            try replace(&value.grid, old.grid, new.grid)
+            try replace(&value.arpMode, old.arpMode, new.arpMode)
+            try replace(&value.latchMode, old.latchMode, new.latchMode)
+            try replace(&value.recordBeats, old.recordBeats, new.recordBeats)
+            for index in value.parameters.indices {
+                try replace(&value.parameters[index], old.parameters[index], new.parameters[index])
+                try replace(&value.cc[index], old.cc[index], new.cc[index])
+            }
+            try replace(&column.level, oldColumn.level, newColumn.level)
+            try replace(&column.pan, oldColumn.pan, newColumn.pan)
+            try replace(&column.muted, oldColumn.muted, newColumn.muted)
+            try replace(&column.recordBeats, oldColumn.recordBeats, newColumn.recordBeats)
+            try replace(&column.solo, oldColumn.solo, newColumn.solo)
+            instruments[slot] = value
+            columns[slot] = column
+        }
+        guard let oldPatterns = expected.scene.patterns, let newPatterns = replacement.scene.patterns,
+              let currentPatterns = current.scene.patterns else {
+            throw SceneError.invalid("A scene restore history snapshot is missing patterns.")
+        }
+        let oldCells = Dictionary(uniqueKeysWithValues: oldPatterns.map { ($0.id, $0) })
+        let newCells = Dictionary(uniqueKeysWithValues: newPatterns.map { ($0.id, $0) })
+        var cells = Dictionary(uniqueKeysWithValues: currentPatterns.map { ($0.id, $0) })
+        for id in Set(oldCells.keys).union(newCells.keys) {
+            if oldCells[id] != newCells[id] {
+                guard cells[id] == oldCells[id] else {
+                    throw SceneError.invalid("A pattern changed since this history step.")
+                }
+                cells[id] = newCells[id]
+            }
+        }
+        result.scene.instruments = instruments.values.sorted { $0.slot < $1.slot }
+        result.sequencer.columns = columns.values.sorted { $0.slot < $1.slot }
+        result.scene.patterns = cells.values.sorted { $0.id < $1.id }
+        try result.validate()
+        return result
     }
 }
 

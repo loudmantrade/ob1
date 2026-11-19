@@ -97,6 +97,40 @@ struct SceneChecks {
                      plan.cells[0].before?.name == pattern.name && plan.cells[0].after?.name == "Edited")
         let reversedPlan = try SceneRestorePlan(before: targetApplication, after: application)
         precondition(reversedPlan.slots[1].before?.slot == 1 && reversedPlan.slots[1].after == nil)
+        let restoreEdit = SceneRestoreEdit(before: application, after: targetApplication, restoresDevice: false)
+        var currentAfter = targetApplication
+        currentAfter.scene.instruments[0].channel = 4
+        currentAfter.scene.instruments[0].parameters[SynthParameter.resonance.rawValue] = 45
+        currentAfter.scene.patterns?.append(SequencerPattern(slot: 0, row: 4, name: "Later pattern"))
+        currentAfter.sequencer.launchGrid = 0
+        currentAfter.device.sustainInverted = true
+        let undone = try restoreEdit.applying(to: currentAfter, undo: true)
+        precondition(undone.scene.instruments.count == 1 && undone.scene.instruments[0].channel == 4)
+        precondition(undone.scene.instruments[0].parameters[SynthParameter.resonance.rawValue] == 45)
+        precondition(undone.scene.instruments[0].programIndex == application.scene.instruments[0].programIndex)
+        precondition(undone.scene.patterns?.first(where: { $0.id == pattern.id }) == pattern)
+        precondition(undone.scene.patterns?.contains(where: { $0.row == 4 && $0.name == "Later pattern" }) == true)
+        precondition(undone.sequencer.launchGrid == 0 && undone.device.sustainInverted)
+        let redone = try restoreEdit.applying(to: undone, undo: false)
+        currentAfter.scene.patterns?.sort { $0.id < $1.id }
+        precondition(redone == currentAfter)
+        var conflicting = currentAfter
+        conflicting.scene.patterns?[0].name = "Edited after restore"
+        do {
+            _ = try restoreEdit.applying(to: conflicting, undo: true)
+            fatalError("Scene restore history overwrote a newer pattern edit")
+        } catch { }
+        conflicting = currentAfter
+        conflicting.scene.instruments[0].programIndex = 33
+        do {
+            _ = try restoreEdit.applying(to: conflicting, undo: true)
+            fatalError("Scene restore history overwrote a newer preset selection")
+        } catch { }
+        var deviceAfter = application
+        deviceAfter.device.sustainInverted = true
+        let deviceEdit = SceneRestoreEdit(before: application, after: deviceAfter, restoresDevice: true)
+        let deviceUndone = try deviceEdit.applying(to: deviceAfter, undo: true)
+        precondition(deviceUndone.device == application.device)
         targetApplication = application
         targetApplication.scene.instruments[0].defaultIdentity = UUID()
         let replacementPlan = try SceneRestorePlan(before: application, after: targetApplication)
