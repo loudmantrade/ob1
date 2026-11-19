@@ -208,6 +208,52 @@ static void checkAutomationHistory()
     assert(!ov_rack_take_error());
     std::puts("PASS automation history: actual manual baseline, automation-tolerant undo and later manual conflict");
 }
+static void checkAtomicSound()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
+    auto backing = std::make_unique<ov_seq_clip>(clip(1, 0));
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(backing.get()) && ov_seq_launch(1, 0, 0)); render();
+    const auto epoch = ov_seq_scene_epoch();
+    auto before = scene->slots[0].config, after = before;
+    after.parameters[rack::P_CUTOFF] = 23;
+    after.cc[rack::P_CUTOFF] = 74;
+    after.level_db = -12;
+    ov_rack_parameter_result result {};
+    assert(ov_rack_change_sound(0, &before, &after, epoch, 90)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.success && result.token == 90);
+    auto& actual = rack::scene->slots[0]->config;
+    assert(actual.parameters[rack::P_CUTOFF] == 23 && actual.cc[rack::P_CUTOFF] == 74);
+    assert(actual.level_db == before.level_db && ov_seq_active(1) == 0);
+    assert(ov_rack_change_sound(0, &before, &after, epoch, 91)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    assert(actual.parameters[rack::P_CUTOFF] == 23);
+    before.parameters[rack::P_CUTOFF] = 23; before.cc[rack::P_CUTOFF] = 74;
+    after.parameters[rack::P_CUTOFF] = 25;
+    assert(ov_rack_change_sound(0, &before, &after, epoch - 1, 92)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    assert(actual.parameters[rack::P_CUTOFF] == 23 && ov_seq_active(1) == 0);
+    auto staleCC = before;
+    staleCC.cc[rack::P_CUTOFF] = 73;
+    assert(ov_rack_change_sound(0, &staleCC, &after, epoch, 94)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    assert(actual.parameters[rack::P_CUTOFF] == 23 && actual.cc[rack::P_CUTOFF] == 74);
+    music::Event automation {};
+    automation.kind = music::Kind::ControlChange;
+    automation.data1 = 74; automation.data2 = 30;
+    automation.source = {music::SourceKind::Pattern, 1};
+    rack::routeEvent(automation);
+    assert(actual.parameters[rack::P_CUTOFF] == 30);
+    assert(ov_rack_change_sound(0, &before, &after, epoch, 95)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.success);
+    assert(actual.parameters[rack::P_CUTOFF] == 25 && actual.cc[rack::P_CUTOFF] == 74);
+    assert(ov_seq_active(1) == 0);
+    after.cc[rack::P_CUTOFF] = 200;
+    assert(!ov_rack_change_sound(0, &before, &after, epoch, 93));
+    assert(ov_rack_take_error() == 2);
+    std::puts("PASS atomic sound: isolated parameters and CCs, conflicts, epoch and playback continuity");
+}
 static void checkRack()
 {
     auto scene = std::make_unique<ov_scene_config>();
@@ -1295,5 +1341,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicCellHistory(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicCellHistory(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

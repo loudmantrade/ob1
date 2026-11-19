@@ -320,6 +320,11 @@ struct RouteChangeRequest final : Retired {
     uint32_t slot = 0, mask = 0;
     uint64_t epoch = 0, token = 0;
 };
+struct SoundChangeRequest final : Retired {
+    ov_instrument_config expected {}, replacement {};
+    uint32_t slot = 0;
+    uint64_t epoch = 0, token = 0;
+};
 constexpr uint32_t parameterResultCapacity = 16;
 std::array<ov_rack_parameter_result, parameterResultCapacity> parameterResults {};
 std::atomic<uint32_t> parameterRead {0}, parameterWrite {0}, parameterOutstanding {0};
@@ -476,7 +481,7 @@ void forgetPedals(uint32_t slot)
 }
 
 enum class Kind { MIDI, Audition, StopAll, SeqClip, SeqEdit, SeqChangeCells, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
-    SeqFinish, SourceClose, Parameter, ParameterChange, RouteChange, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
+    SeqFinish, SourceClose, Parameter, ParameterChange, RouteChange, SoundChange, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
 struct Command {
     Kind kind = Kind::MIDI;
     uint32_t slot = 0, a = 0, b = 0, c = 0, due = 0;
@@ -911,6 +916,38 @@ bool samePattern(const music::PatternData& a, const music::PatternData& b)
 void apply(const Command& c)
 {
     if (c.padAcknowledgement) padCommands[c.slot][c.a].fetch_sub(1);
+    if (c.kind == Kind::SoundChange) {
+        auto* request = static_cast<SoundChangeRequest*>(c.object);
+        auto& pointer = scene->slots[request->slot];
+        bool valid = request->epoch == sceneEpoch.load() && bool(pointer);
+        if (valid) {
+            const auto& current = pointer->config;
+            valid = current.engine == request->expected.engine && current.program == request->expected.program;
+            for (uint32_t p = 0; p < NPARAM && valid; ++p) {
+                valid = (current.parameters[p] == request->expected.parameters[p] || pointer->automatedParameters[p]) &&
+                    current.cc[p] == request->expected.cc[p];
+            }
+        }
+        if (valid) {
+            auto& inst = *pointer;
+            inst.engine->boundary({processedFrames});
+            for (uint32_t p = 0; p < NPARAM; ++p) {
+                const auto replacement = request->replacement.parameters[p];
+                if (inst.config.parameters[p] != replacement) {
+                    inst.config.parameters[p] = replacement;
+                    inst.engine->parameter(p, replacement);
+                }
+                inst.config.cc[p] = request->replacement.cc[p];
+                inst.automatedParameters[p] = false;
+            }
+            publish(request->slot);
+        }
+        const auto write = parameterWrite.load(std::memory_order_relaxed);
+        parameterResults[write % parameterResultCapacity] = {request->token, valid ? 1u : 0u};
+        parameterWrite.store(write + 1, std::memory_order_release);
+        retire(request);
+        return;
+    }
     if (c.kind == Kind::RouteChange) {
         auto* request = static_cast<RouteChangeRequest*>(c.object);
         auto& pointer = scene->slots[request->slot];
@@ -1963,6 +2000,26 @@ int ov_rack_change_route(uint32_t slot, uint32_t mask, const ov_instrument_confi
             parameterOutstanding.fetch_sub(1); error.store(4); return 0;
         }
         Command command; command.kind = Kind::RouteChange; command.object = request.get();
+        if (!enqueue(command)) { parameterOutstanding.fetch_sub(1); return 0; }
+        request.release(); return 1;
+    } catch (const std::bad_alloc&) { error.store(3); return 0; }
+}
+int ov_rack_change_sound(uint32_t slot, const ov_instrument_config* expected,
+                         const ov_instrument_config* replacement, uint64_t epoch, uint64_t token)
+{
+    using namespace rack;
+    if (slot >= capacity || !expected || !replacement || !valid(*expected) || !valid(*replacement) ||
+        expected->engine != replacement->engine || expected->program != replacement->program) {
+        error.store(2); return 0;
+    }
+    try {
+        auto request = std::make_unique<SoundChangeRequest>();
+        request->slot = slot; request->epoch = epoch; request->token = token;
+        request->expected = *expected; request->replacement = *replacement;
+        if (parameterOutstanding.fetch_add(1) >= parameterResultCapacity) {
+            parameterOutstanding.fetch_sub(1); error.store(4); return 0;
+        }
+        Command command; command.kind = Kind::SoundChange; command.object = request.get();
         if (!enqueue(command)) { parameterOutstanding.fetch_sub(1); return 0; }
         request.release(); return 1;
     } catch (const std::bad_alloc&) { error.store(3); return 0; }

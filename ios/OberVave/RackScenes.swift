@@ -209,6 +209,12 @@ extension OberVaveModel {
             errorMessage = "Finish the current parameter edit before using history."; return
         }
         guard let entry = undo ? sceneParameterHistory.undoStack.last : sceneParameterHistory.redoStack.last else { return }
+        if case .sound(let before, let after) = entry {
+            let expected = undo ? after : before
+            let target = undo ? before : after
+            submitSoundChange(expected: expected, target: target, undo: undo, recording: false)
+            return
+        }
         if case .route(let edit) = entry {
             let old = undo ? edit.after : edit.before
             let next = undo ? edit.before : edit.after
@@ -272,6 +278,26 @@ extension OberVaveModel {
             epoch: epoch, edits: edits, undo: undo)
     }
 
+    func submitSoundChange(expected: RackInstrument, target: RackInstrument, undo: Bool, recording: Bool) {
+        guard pendingSceneParameterHistory == nil, !sceneSwitchPending,
+              expected.slot == target.slot,
+              let current = instruments.first(where: { $0.slot == expected.slot }),
+              current.programIndex == expected.programIndex,
+              current.arpMode == expected.arpMode, current.latchMode == expected.latchMode else {
+            errorMessage = "The instrument changed; sound was not restored."
+            return
+        }
+        var old = expected.coreConfig(), replacement = target.coreConfig()
+        let epoch = ov_seq_scene_epoch()
+        sceneParameterToken &+= 1
+        guard ov_rack_change_sound(UInt32(expected.slot), &old, &replacement, epoch, sceneParameterToken) != 0 else {
+            errorMessage = "Could not queue the sound restore."
+            return
+        }
+        pendingSceneParameterHistory = PendingSceneParameterHistory(token: sceneParameterToken,
+            epoch: epoch, edits: [], undo: undo, sound: (expected, target), recordingSound: recording)
+    }
+
     var newInstrumentDraft: RackInstrument? {
         guard let slot = (0..<16).first(where: { candidate in
             !instruments.contains { $0.slot == candidate }
@@ -288,10 +314,22 @@ extension OberVaveModel {
             if let pending = pendingSceneParameterHistory, pending.token == parameterResult.token {
                 pendingSceneParameterHistory = nil
                 if parameterResult.success != 0 && pending.epoch == ov_seq_scene_epoch() {
-                    sceneParameterHistory.acknowledge(undo: pending.undo)
+                    if let sound = pending.sound, pending.recordingSound {
+                        sceneParameterHistory.recordSound(before: sound.before, after: sound.after)
+                    } else {
+                        sceneParameterHistory.acknowledge(undo: pending.undo)
+                    }
                     if let route = pending.route,
                        let index = instruments.firstIndex(where: { $0.slot == route.before.slot }) {
                         route.apply(to: &instruments[index], undo: pending.undo)
+                    }
+                    if let sound = pending.sound,
+                       let index = instruments.firstIndex(where: { $0.slot == sound.after.slot }) {
+                        instruments[index].parameters = sound.after.parameters
+                        instruments[index].cc = sound.after.cc
+                        instruments[index].arpMode = sound.after.arpMode
+                        instruments[index].latchMode = sound.after.latchMode
+                        if sound.after.slot == selectedSlot { showSelectedInstrument() }
                     }
                     for edit in pending.edits {
                         guard let index = instruments.firstIndex(where: { $0.slot == edit.slot }) else { continue }

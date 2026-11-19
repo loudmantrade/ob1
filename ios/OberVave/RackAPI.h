@@ -71,6 +71,11 @@ int ov_rack_automated_parameter(uint32_t slot, uint32_t parameter, uint32_t *val
 int ov_rack_change_route(uint32_t slot, uint32_t mask,
                          const ov_instrument_config *expected, const ov_instrument_config *replacement,
                          uint64_t epoch, uint64_t token);
+/* Replace a preset's parameter values and CC assignments as one checked
+   operation. Program, routing and arpeggiator clock settings are preserved.
+   The acknowledgement uses the parameter-result queue. */
+int ov_rack_change_sound(uint32_t slot, const ov_instrument_config *expected,
+                         const ov_instrument_config *replacement, uint64_t epoch, uint64_t token);
 /* Post-instrument level/pan/mute stereo peak, normalized to 0...65535; read clears it. */
 uint32_t ov_rack_take_level(uint32_t slot);
 uint32_t ov_rack_stop_generation(void);

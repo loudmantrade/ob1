@@ -830,8 +830,9 @@ struct PianoRollRegionsSheet: View {
     }
 }
 
-private struct PatternDefaultButton: UIViewRepresentable {
+struct PatternDefaultButton: UIViewRepresentable {
     let enabled: Bool
+    var subject = "Pattern"
     let action: (Bool) -> Void
 
     func makeUIView(context: Context) -> PatternDefaultControl {
@@ -840,12 +841,22 @@ private struct PatternDefaultButton: UIViewRepresentable {
 
     func updateUIView(_ control: PatternDefaultControl, context: Context) {
         control.isEnabled = enabled
+        control.subject = subject
         control.action = action
     }
 }
 
-private final class PatternDefaultControl: UIButton {
+final class PatternDefaultControl: UIButton {
     var action: ((Bool) -> Void)?
+    var subject = "Pattern" {
+        didSet {
+            accessibilityLabel = "\(subject) default"
+            accessibilityCustomActions = [
+                UIAccessibilityCustomAction(name: "Save \(subject.lowercased()) default", target: self,
+                                            selector: #selector(saveAccessibility))
+            ]
+        }
+    }
     private var holdTimer: Timer?
     private var holdTriggered = false
     private var trackingTouch = false

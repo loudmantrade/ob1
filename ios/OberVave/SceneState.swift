@@ -273,6 +273,7 @@ enum SceneHistoryEntry: Equatable {
     case parameters([SceneParameterEdit])
     case value(SceneValueEdit)
     case route(SceneRouteEdit)
+    case sound(before: RackInstrument, after: RackInstrument)
 
     var title: String {
         switch self {
@@ -291,6 +292,7 @@ enum SceneHistoryEntry: Equatable {
             case .keyboardChannels: return "Keyboard channels"
             }
         case .route(let edit): return "Instrument · \(edit.after.name)"
+        case .sound(_, let after): return "Sound · \(after.name)"
         }
     }
 }
@@ -316,6 +318,12 @@ struct SceneParameterHistory {
         append(.route(edit))
     }
 
+    mutating func recordSound(before: RackInstrument, after: RackInstrument) {
+        guard before.parameters != after.parameters || before.cc != after.cc ||
+              before.arpMode != after.arpMode || before.latchMode != after.latchMode else { return }
+        append(.sound(before: before, after: after))
+    }
+
     private mutating func append(_ entry: SceneHistoryEntry) {
         undoStack.append(entry)
         if undoStack.count > Self.limit { undoStack.removeFirst() }
@@ -334,6 +342,8 @@ struct PendingSceneParameterHistory {
     var edits: [SceneParameterEdit]
     var undo: Bool
     var route: SceneRouteEdit? = nil
+    var sound: (before: RackInstrument, after: RackInstrument)? = nil
+    var recordingSound = false
 }
 
 struct ExternalParameterGesture {

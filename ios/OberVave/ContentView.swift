@@ -472,6 +472,9 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     private var audioRecoveryWorkItem: DispatchWorkItem?
     private var audioInterrupted = false
     private let presetLibraryKey = "io.github.joakimeriksson.obervave.preset-library"
+    private let presetDefaultsKey = "io.github.joakimeriksson.obervave.preset-defaults"
+    private var presetDefaults: [String: StoredPreset] = [:]
+    private var presetDefaultsAvailable = true
     private let patternDefaultsKey = "io.github.joakimeriksson.obervave.pattern-defaults"
     private let arpSyncKey = "io.github.joakimeriksson.obervave.arp-master-sync"
     private let arpSyncGridKey = "io.github.joakimeriksson.obervave.arp-master-sync-grid"
@@ -521,6 +524,16 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             return cc == 255 ? -1 : cc
         }
         super.init()
+        if let data = UserDefaults.standard.data(forKey: presetDefaultsKey) {
+            do {
+                let saved = try JSONDecoder().decode([String: StoredPreset].self, from: data)
+                for preset in saved.values { try validatePresetDefault(preset) }
+                presetDefaults = saved
+            } catch {
+                presetDefaultsAvailable = false
+                errorMessage = "Could not load preset defaults: \(error.localizedDescription)"
+            }
+        }
         if let data = UserDefaults.standard.data(forKey: patternDefaultsKey) {
             do {
                 let saved = try JSONDecoder().decode(PatternDefaultLibrary.self, from: data)
@@ -631,9 +644,96 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             (bank == 0 && program < 70)
     }
 
-    func restoreCurrentPresetDefaults() {
-        selectPreset(bank: bank, program: program)
-        presetRevision &+= 1
+    private func validatePresetDefault(_ preset: StoredPreset) throws {
+        guard preset.parameters.count == Int(ov_parameter_count()),
+              preset.ccAssignments.count == preset.parameters.count,
+              preset.parameters.enumerated().allSatisfy({ (0...Int(ov_parameter_max(UInt32($0.offset)))).contains($0.element) }),
+              preset.ccAssignments.allSatisfy({ (-1...127).contains($0) }),
+              preset.arpSelectedMode.map({ (1...8).contains($0) }) ?? true,
+              preset.latchSelectedMode.map({ (1...2).contains($0) }) ?? true else {
+            throw SceneError.invalid("Invalid preset default values.")
+        }
+    }
+
+    func capturePresetDefault(save: Bool) {
+        syncSequencerState()
+        syncExternalParameterHistory(finish: true)
+        guard presetDefaultsAvailable, pendingSceneName == nil, !sceneSwitchPending,
+              pendingSceneParameterHistory == nil, pendingPatternTransfer == nil,
+              pendingPianoPublication == nil, pendingSequencerHistory == nil,
+              sceneHistoryJump == nil, sequencerHistoryJump == nil,
+              activeParameterEdits.isEmpty, activeSceneValueEdits.isEmpty,
+              recordingPattern == nil, ov_seq_record_state() == 0,
+              let instrument = selectedInstrument else {
+            errorMessage = "Finish recording and pending edits before using preset defaults."
+            return
+        }
+        let key = presetKey(bank: bank, program: program)
+        let epoch = ov_seq_scene_epoch()
+        guard ov_rack_snapshot_request() != 0 else {
+            errorMessage = "Could not request an audio snapshot."; return
+        }
+        sceneSwitchPending = true
+        sceneSwitchMonitor.start { [weak self] in
+            guard let self else { return true }
+            var snapshot = ov_scene_config()
+            guard ov_rack_snapshot_read(&snapshot) != 0 else { return false }
+            self.sceneSwitchPending = false
+            do {
+                guard epoch == ov_seq_scene_epoch(), self.selectedSlot == instrument.slot,
+                      self.bank * 128 + self.program == instrument.programIndex,
+                      self.recordingPattern == nil, ov_seq_record_state() == 0 else {
+                    throw SceneError.invalid("The scene or preset changed while taking the snapshot.")
+                }
+                let slots = withUnsafeBytes(of: snapshot.slots) { Array($0.bindMemory(to: ov_rack_slot.self)) }
+                guard slots[instrument.slot].present != 0 else {
+                    throw SceneError.invalid("The instrument no longer exists.")
+                }
+                var before = instrument
+                before.updateSound(slots[instrument.slot].config)
+                guard before.programIndex == instrument.programIndex else {
+                    throw SceneError.invalid("The preset changed while taking the snapshot.")
+                }
+                if save {
+                    let value = StoredPreset(name: self.presetName(bank: self.bank, program: self.program),
+                        parameters: before.parameters, ccAssignments: before.cc.map { $0 == 255 ? -1 : $0 },
+                        arpSelectedMode: before.arpMode, latchSelectedMode: before.latchMode)
+                    try self.validatePresetDefault(value)
+                    var updated = self.presetDefaults
+                    updated[key] = value
+                    UserDefaults.standard.set(try JSONEncoder().encode(updated), forKey: self.presetDefaultsKey)
+                    self.presetDefaults = updated
+                    self.sceneStatus = "Saved preset default"
+                } else {
+                    let saved = self.presetDefaults[key] ?? self.presetLibrary.presets[key]
+                    var target = before
+                    if let saved {
+                        let factory = (0..<Int(ov_parameter_count())).map {
+                            Int(ov_rack_factory_parameter(UInt32(before.programIndex), UInt32($0)))
+                        }
+                        target.parameters = ModulationMatrix.migrateLegacy(saved.parameters, defaults: factory)
+                        let assignments = self.presetDefaults[key]?.ccAssignments ??
+                            self.presetLibrary.ccMappings[key] ?? saved.ccAssignments
+                        target.cc = ModulationMatrix.migrateLegacy(assignments, defaults: self.defaultCCAssignments)
+                            .map { $0 < 0 ? 255 : $0 }
+                        target.arpMode = saved.arpSelectedMode ?? 1
+                        target.latchMode = saved.latchSelectedMode ?? 2
+                    } else {
+                        target.parameters = (0..<Int(ov_parameter_count())).map {
+                            Int(ov_rack_factory_parameter(UInt32(before.programIndex), UInt32($0)))
+                        }
+                        target.cc = (self.presetLibrary.ccMappings[key] ?? self.defaultCCAssignments).map { $0 < 0 ? 255 : $0 }
+                        target.arpMode = 1; target.latchMode = 2
+                    }
+                    try target.validate()
+                    self.submitSoundChange(expected: before, target: target, undo: false, recording: true)
+                }
+            } catch { self.errorMessage = "Could not use preset default: \(error.localizedDescription)" }
+            return true
+        } onTimeout: { [weak self] in
+            self?.sceneSwitchPending = false
+            self?.errorMessage = "The audio engine did not provide a snapshot. Resume audio and try again."
+        }
     }
 
     func handleMappingTap(_ parameter: SynthParameter, count: Int) {
@@ -1682,7 +1782,7 @@ struct ContentView: View {
     @State private var keyboardOctaveCount = 2
     @State private var showsPresetEditor = false
     @State private var createsPreset = false
-    @State private var showsDefaultResetConfirmation = false
+    @State private var showsDefaultSaveConfirmation = false
     @State private var showsRack = false
 
     var body: some View {
@@ -1770,10 +1870,8 @@ struct ContentView: View {
             )
             .preferredColorScheme(.dark)
         }
-        .confirmationDialog("Restore this preset's saved sound and CC assignments?", isPresented: $showsDefaultResetConfirmation) {
-            Button("Restore Saved Preset", role: .destructive) {
-                model.restoreCurrentPresetDefaults()
-            }
+        .confirmationDialog("Save the current sound and MIDI assignments as this preset's default?", isPresented: $showsDefaultSaveConfirmation) {
+            Button("Update Preset Default") { model.capturePresetDefault(save: true) }
             Button("Cancel", role: .cancel) {}
         }
         .onReceive(Timer.publish(every: 0.04, on: .main, in: .common).autoconnect()) { _ in
@@ -1953,12 +2051,11 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
 
-                Button {
-                    showsDefaultResetConfirmation = true
-                } label: {
-                    Label("DEFAULT", systemImage: "arrow.counterclockwise")
+                PatternDefaultButton(enabled: true, subject: "Preset") { save in
+                    if save { showsDefaultSaveConfirmation = true }
+                    else { model.capturePresetDefault(save: false) }
                 }
-                .buttonStyle(.bordered)
+                .frame(width: 76, height: 36)
 
                 Button {
                     model.midiMappingMode.toggle()

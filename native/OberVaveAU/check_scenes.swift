@@ -491,6 +491,19 @@ struct SceneChecks {
         precondition(sequenceHistory.undoStack.count == 32)
         print("PASS sequencer history: acknowledged undo/redo, restored piano history, branching and bounded storage")
         var soundHistory = SceneParameterHistory()
+        var savedSound = RackInstrument.oberVave(slot: 0, channel: 1)
+        let priorSound = savedSound
+        savedSound.parameters[SynthParameter.cutoff.rawValue] = 23
+        savedSound.cc[SynthParameter.cutoff.rawValue] = 74
+        var presetHistory = SceneParameterHistory()
+        presetHistory.recordSound(before: priorSound, after: priorSound)
+        precondition(presetHistory.undoStack.isEmpty)
+        presetHistory.recordSound(before: priorSound, after: savedSound)
+        precondition(presetHistory.undoStack == [.sound(before: priorSound, after: savedSound)])
+        presetHistory.acknowledge(undo: true)
+        precondition(presetHistory.redoStack == [.sound(before: priorSound, after: savedSound)])
+        presetHistory.acknowledge(undo: false)
+        precondition(presetHistory.undoStack.count == 1 && presetHistory.redoStack.isEmpty)
         let soundEdit = SceneParameterEdit(slot: 0, parameter: 1, before: 10, after: 40)
         soundHistory.record([soundEdit])
         precondition(soundHistory.undoStack == [.parameters([soundEdit])] && soundHistory.redoStack.isEmpty)

@@ -346,6 +346,13 @@ event queue overflows, the parameter history is cleared and an error is shown
 rather than preserving an incomplete history. This parameter history does not
 yet cover presets, instrument management, all scene settings or mixer operations.
 
+On the synth screen, tap DEFAULT to restore the current preset's default sound
+and MIDI assignments; hold it and confirm to update that default from an
+audio-owned snapshot. This does not overwrite the saved preset. Until a
+separate default is saved, the saved preset (or its factory sound) is used.
+The restore is one scene-history action, checked and applied on the audio
+thread without restarting the sequencer. Defaults are local to the device.
+
 Copy/Paste retains relative timing and routing, with the most recent empty-grid
 tap as the paste anchor (initially tick zero). Paste creates new note IDs and
 rejects invalid destinations. Transpose and scale conform affect the selection,
