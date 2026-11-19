@@ -845,8 +845,23 @@ static void checkIndependentRegionClip()
     assert(ov_seq_position_ticks(0) >= -240 && ov_seq_position_ticks(0) < -120);
     assert(ov_seq_position(0) == 0);
     assert(ov_rack_stop_all()); render();
+    region->intro = 0; region->intro_enabled = 0;
+    region->pattern_start = 240; region->loop_start = 240; region->loop_end = 960;
+    region->notes[0].start = 0; region->notes[0].duration = 900;
+    region->count = 2; region->notes[1] = {2, 300, 300, 67, 100, 1};
+    assert(ov_seq_set_clip(region.get())); assert(ov_seq_launch(0, 0, 0)); render();
+    const auto positiveOrigin = rack::players[0].origin;
+    while (rack::musicalPosition.value < positiveOrigin + 350 * music::tickUnit) render();
+    uint32_t active = 0;
+    for (const auto& note : rack::players[0].active) if (note.used) {
+        ++active; assert(note.on.data1 == 67);
+    }
+    assert(active == 1 && ov_seq_position_ticks(0) >= 350);
+    rack::encodeClip(0, 0, rack::clips[0][0]->pattern.data(), *output);
+    assert(output->count == 2 && output->notes[0].start == 0 && output->pattern_start == 240);
+    assert(ov_rack_stop_all()); render();
     assert(!ov_rack_take_error());
-    std::puts("PASS independent regions: explicit schema survives bridge and negative loop cursor");
+    std::puts("PASS independent regions: explicit schema, negative cursor and positive-start playback");
 }
 
 static void checkAudition()
