@@ -120,20 +120,27 @@ public:
         const auto period = loopEnd - loopStart;
         for (uint32_t i = 0; i < data.count; ++i) {
             const auto& note = data.notes[i];
-            if (data.regionsEnabled && note.start < data.patternStart) continue;
             const bool pickup = data.regionsEnabled ? note.start < data.loopStart : note.start < 0;
             if (pickup && note.start < 0 && (!data.introEnabled || !playIntro_)) continue;
             PatternTiming timing;
             if (clip->timingAt(i, timing) != PatternError::None) return false;
-            if (data.regionsEnabled && (timing.start < data.patternStart || note.start * tickUnit >= loopEnd ||
+            if (data.regionsEnabled && (note.start * tickUnit >= loopEnd ||
                 timing.start * tickUnit >= loopEnd)) continue;
             int64_t onset = origin + timing.start * tickUnit;
             const bool repeating = data.loop && (data.regionsEnabled
                 ? timing.start * tickUnit >= loopStart : note.start >= 0);
+            if (data.regionsEnabled && (note.start < data.patternStart || timing.start < data.patternStart) &&
+                !repeating) continue;
             int64_t iteration = 0;
+            if (data.regionsEnabled && repeating && note.start < data.patternStart &&
+                timing.start >= data.patternStart) {
+                onset += period;
+                iteration = 1;
+            }
             if (repeating && onset <= previous) {
-                iteration = (previous - onset) / period + 1;
-                onset += iteration * period;
+                const auto skipped = (previous - onset) / period + 1;
+                iteration += skipped;
+                onset += skipped * period;
             }
             uint32_t emitted = 0;
             while (onset > previous && onset <= now) {
@@ -191,13 +198,13 @@ public:
         };
         for (uint32_t i = 0; i < data.automationCount; ++i) {
             const auto& point = data.automation[i];
-            if (data.regionsEnabled && point.tick < data.patternStart) continue;
             const bool pickup = data.regionsEnabled ? point.tick < data.loopStart : point.tick < 0;
             if (pickup && point.tick < 0 && (!data.introEnabled || !playIntro_)) continue;
             if (data.regionsEnabled && point.tick * tickUnit >= loopEnd) continue;
             auto onset = origin + point.tick * tickUnit;
             const bool repeating = data.loop && (data.regionsEnabled
                 ? point.tick * tickUnit >= loopStart : point.tick >= 0);
+            if (data.regionsEnabled && point.tick < data.patternStart && !repeating) continue;
             if (repeating && onset <= previous)
                 onset += ((previous - onset) / period + 1) * period;
             if (onset > previous && onset <= now) push({onset, i});

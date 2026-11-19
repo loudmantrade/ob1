@@ -266,7 +266,34 @@ static void checkIndependentStarts()
     assert(events.size() == 1 && events[0].data1 == 61);
     assert(player.process(240 * tickUnit, 1, 0, 0, sink));
     assert(events.back().data1 == 62 && events.back().kind == Kind::NoteOn);
-    std::puts("PASS independent starts: editable pre-start data, negative repeating section and positive launch");
+    assert(player.stop(2, sink));
+
+    data->patternStart = 480; data->loopStart = 0; data->loopEnd = 960;
+    data->notes[0].start = 0; data->notes[1].start = 480; data->notes[2].start = 720;
+    data->automationCount = 1;
+    data->automation[0] = {1, 0, AutomationKind::ControlChange, 1, 42};
+    assert(pattern.restore(*data) == PatternError::None);
+    events.clear(); player.queue(0, &pattern, 0, LaunchGrid::Free);
+    for (Tick t = 0; t <= 480; t += 20) assert(player.process(t * tickUnit, t, 0, 0, sink));
+    uint32_t firstNote = 0, repeatNote = 0, controllers = 0;
+    for (const auto& event : events) {
+        if (event.kind == Kind::NoteOn && event.data1 == 60) {
+            ++repeatNote; assert(event.time.tick == 480);
+        }
+        if (event.kind == Kind::NoteOn && event.data1 == 61) ++firstNote;
+        if (event.kind == Kind::ControlChange) { ++controllers; assert(event.time.tick == 480); }
+    }
+    assert(firstNote == 1 && repeatNote == 1 && controllers == 1);
+    assert(player.stop(481, sink));
+    data->loop = false;
+    assert(pattern.restore(*data) == PatternError::None);
+    events.clear(); player.queue(0, &pattern, 0, LaunchGrid::Free);
+    for (Tick t = 0; t <= 960; t += 20) assert(player.process(t * tickUnit, t, 0, 0, sink));
+    for (const auto& event : events) {
+        assert(event.kind != Kind::ControlChange);
+        assert(event.kind != Kind::NoteOn || event.data1 != 60);
+    }
+    std::puts("PASS independent starts: pre-start retention, earlier loop on subsequent iterations and one-shot");
 }
 
 static void checkRecording()

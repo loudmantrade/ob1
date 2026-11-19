@@ -395,10 +395,6 @@ struct PianoRollView: View {
         case .begin:
             guard point.x >= 0, let current = editor,
                   let marker = PianoRollMarker.hit(point, pattern: current.pattern, viewport: viewport) else { return }
-            guard current.pattern.hasRegions else {
-                model.errorMessage = "Apply Regions before dragging markers to preserve legacy playback."
-                return
-            }
             markerGesture = MarkerGesture(baseline: current, marker: marker, start: point)
         case .move, .end:
             guard var active = markerGesture else { return }
@@ -408,19 +404,11 @@ struct PianoRollView: View {
                 return
             }
             let pattern = active.baseline.pattern
-            var start = pattern.patternStart, loopStart = pattern.loopStart
-            var loopEnd = pattern.loopEnd, tailEnd = pattern.length
-            let tick = snapped(viewport.tick(at: Double(point.x)))
-            switch active.marker {
-            case .patternStart: start = tick
-            case .loopStart: loopStart = tick
-            case .loopEnd: loopEnd = tick
-            case .tailEnd: tailEnd = tick
-            }
+            let tick = snapped(Double(active.marker.tick(in: pattern)) +
+                               Double(point.x - active.start.x) * 960 / viewport.beatWidth)
             var candidate = active.baseline
             do {
-                try candidate.regions(patternStart: start, loopStart: loopStart, loopEnd: loopEnd,
-                                      tailEnd: tailEnd, loop: pattern.loop)
+                try candidate.moveMarker(active.marker, to: tick)
                 active.candidate = candidate; active.error = nil; editor = candidate
             } catch {
                 active.candidate = nil; active.error = error.localizedDescription; editor = active.baseline
@@ -747,9 +735,9 @@ struct PianoRollRegionsSheet: View {
                     Button("Apply") {
                         guard let start = PianoRollPosition.parse(start), let loopStart = PianoRollPosition.parse(loopStart),
                               let loopEnd = PianoRollPosition.parse(loopEnd), let tailEnd = PianoRollPosition.parse(tailEnd),
-                              start >= -11520, start <= loopStart, loopStart < loopEnd,
+                              start >= -11520, loopStart >= -11520, start < loopEnd, loopStart < loopEnd,
                               loopEnd <= tailEnd, tailEnd <= SequencerPattern.maxTicks else {
-                            message = "Require -11520 ≤ start ≤ loop start < loop end ≤ tail end."
+                            message = "Start and Loop Start must be at least -11520 and before Loop End; Loop End must be at or before Tail End."
                             return
                         }
                         apply(start, loopStart, loopEnd, tailEnd, loop)

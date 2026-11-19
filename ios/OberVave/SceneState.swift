@@ -277,7 +277,7 @@ struct SequencerPattern: Codable, Equatable, Identifiable {
     func validate() throws {
         guard (2...6).contains(version), (0..<16).contains(slot), (0..<8).contains(row),
               (1...Self.maxTicks).contains(length), (0...11520).contains(intro),
-              (!hasRegions || (patternStart >= -intro && patternStart <= loopStart &&
+              (!hasRegions || (patternStart >= -intro && loopStart >= -intro && patternStart < loopEnd &&
                                loopStart < loopEnd && loopEnd <= length)),
               (version != 6 || hasRegions),
               (0...3840).contains(quantize), !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -816,20 +816,29 @@ struct PianoRollEditBuffer {
 
     mutating func regions(patternStart: Int64, loopStart: Int64, loopEnd: Int64,
                           tailEnd: Int64, loop: Bool) throws {
-        guard patternStart >= -11520, patternStart <= loopStart,
+        guard patternStart >= -11520, loopStart >= -11520, patternStart < loopEnd,
               loopStart < loopEnd, loopEnd <= tailEnd, tailEnd <= SequencerPattern.maxTicks else {
-            throw SceneError.invalid("Require -11520 ≤ pattern start ≤ loop start < loop end ≤ tail end.")
+            throw SceneError.invalid("Start and Loop Start must be at least -11520 and before Loop End; Loop End must be at or before Tail End.")
         }
         var candidate = pattern
         candidate.version = 6
         candidate.regionsEnabled = true
         candidate.regionStart = patternStart
-        candidate.intro = max(candidate.intro, -min(0, patternStart))
+        candidate.intro = max(candidate.intro, -min(0, patternStart, loopStart))
         candidate.loopStart = loopStart
         candidate.loopEnd = loopEnd
         candidate.length = tailEnd
         candidate.loop = loop
         try commit(candidate)
+    }
+
+    mutating func moveMarker(_ marker: PianoRollMarker, to tick: Int64) throws {
+        let start = marker == .patternStart ? tick : pattern.patternStart
+        let loopStart = marker == .loopStart ? tick : PianoRollMarker.loopStart.tick(in: pattern)
+        let loopEnd = marker == .loopEnd ? tick : PianoRollMarker.loopEnd.tick(in: pattern)
+        let tailEnd = marker == .tailEnd ? tick : pattern.length
+        try regions(patternStart: start, loopStart: loopStart, loopEnd: loopEnd,
+                    tailEnd: tailEnd, loop: pattern.loop)
     }
 
     mutating func setAutomation(_ points: [SequencerAutomation]) throws {

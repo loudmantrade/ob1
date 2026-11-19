@@ -342,15 +342,17 @@ The editor displays these markers and shades the non-triggering tail. Each
 iteration has independently owned note releases, capped at its tail end.
 Notes stored after loop end remain in the pattern and are not triggered.
 Shortening rejects out-of-range note starts rather than deleting them.
-Version 1/2 clips remain in legacy mode with their original unbounded release
-behavior until the user applies Regions; that explicit conversion can change
-their tail behavior. A fresh recording replaces regions with legacy defaults.
-Marker handles have separate ruler rows, even when markers coincide. Dragging
-is enabled after explicit Regions conversion and uses the selected snap grid;
-invalid moves are rejected without changing notes. Numeric positions accept
+Version 1/2 clips retain their original unbounded release behavior until a
+marker is moved or Regions is applied. Either action converts the clip to
+region semantics and can change its tail behavior. A fresh recording replaces
+regions with legacy defaults. Marker handles have separate ruler rows, even
+when markers coincide. Dragging uses the selected snap grid and applies on
+release as one undoable edit; invalid moves do not change notes. Numeric positions accept
 raw ticks or 4/4 bar:beat:tick notation. Pattern start may be positive or
-negative, and loop start may be negative; notes outside the playing range are
-retained. Version 6 preserves this independent start alongside automation and
+negative, and Loop Start may be before or equal to Pattern Start. Notes and
+automation between them are skipped on the initial pass but play on subsequent
+loops; in ONE-SHOT they remain silent. Other non-triggering notes are retained.
+Version 6 preserves this independent start alongside automation and
 per-note quantization. Versions 3–5 keep their original start semantics.
 Acceptance requires portable timing/ownership and scene-migration regressions,
 the existing sequencer and AU suites, a signed iPad build, and the physical

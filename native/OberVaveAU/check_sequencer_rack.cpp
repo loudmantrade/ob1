@@ -860,6 +860,21 @@ static void checkIndependentRegionClip()
     rack::encodeClip(0, 0, rack::clips[0][0]->pattern.data(), *output);
     assert(output->count == 2 && output->notes[0].start == 0 && output->pattern_start == 240);
     assert(ov_rack_stop_all()); render();
+    region->pattern_start = 480; region->loop_start = 0;
+    region->notes[0].duration = 300; region->notes[1].start = 480;
+    region->automation_count = 1; region->automation[0] = {1, 0, 0, 1, 93};
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(region.get())); assert(ov_seq_launch(0, 0, 0)); render();
+    const auto laterStartOrigin = rack::players[0].origin;
+    assert(engine(0).dsp.ctl_mod != 93);
+    for (const auto& note : rack::players[0].active)
+        if (note.used) assert(note.on.data1 != 60);
+    while (rack::musicalPosition.value < laterStartOrigin + 970 * music::tickUnit) render();
+    bool earlierNote = false;
+    for (const auto& note : rack::players[0].active)
+        if (note.used && note.on.data1 == 60) earlierNote = true;
+    assert(earlierNote && engine(0).dsp.ctl_mod == 93);
+    assert(ov_rack_stop_all()); render();
     assert(!ov_rack_take_error());
     std::puts("PASS independent regions: explicit schema, negative cursor and positive-start playback");
 }

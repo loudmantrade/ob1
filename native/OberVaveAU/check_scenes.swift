@@ -348,6 +348,18 @@ struct SceneChecks {
         quantizedEditor.undo()
         precondition(quantizedEditor.pattern == editPattern)
         var regionEditor = try PianoRollEditBuffer(pattern: editPattern)
+        var legacyMarkerEditor = regionEditor
+        try legacyMarkerEditor.moveMarker(.patternStart, to: 240)
+        precondition(legacyMarkerEditor.pattern.hasRegions && legacyMarkerEditor.pattern.patternStart == 240 &&
+                     legacyMarkerEditor.pattern.loopStart == 0 &&
+                     legacyMarkerEditor.pattern.loopEnd == editPattern.length &&
+                     legacyMarkerEditor.pattern.notes == editPattern.notes)
+        legacyMarkerEditor.undo()
+        precondition(legacyMarkerEditor.pattern == editPattern)
+        legacyMarkerEditor.redo()
+        precondition(legacyMarkerEditor.pattern.patternStart == 240)
+        try legacyMarkerEditor.moveMarker(.patternStart, to: 0)
+        precondition(legacyMarkerEditor.pattern.patternStart == legacyMarkerEditor.pattern.loopStart)
         try regionEditor.regions(patternStart: 0, loopStart: 240, loopEnd: 960, tailEnd: 3840, loop: true)
         let regionPattern = regionEditor.pattern
         precondition(regionPattern.version == 6 && regionPattern.patternStart == 0)
@@ -360,6 +372,19 @@ struct SceneChecks {
         precondition(SequencerPattern(core: independent.pattern.coreClip()) == independent.pattern)
         try independent.regions(patternStart: -480, loopStart: -240, loopEnd: 960, tailEnd: 3840, loop: true)
         precondition(independent.pattern.intro == 480 && independent.pattern.loopStart == -240)
+        try independent.regions(patternStart: 240, loopStart: -480, loopEnd: 960, tailEnd: 3840, loop: true)
+        let earlierLoop = independent.pattern
+        precondition(earlierLoop.patternStart == 240 && earlierLoop.loopStart == -480 &&
+                     earlierLoop.notes == editPattern.notes)
+        let earlierJSON = try JSONEncoder().encode(earlierLoop)
+        let earlierDecoded = try JSONDecoder().decode(SequencerPattern.self, from: earlierJSON)
+        precondition(earlierDecoded == earlierLoop && SequencerPattern(core: earlierLoop.coreClip()) == earlierLoop)
+        independent.undo()
+        precondition(independent.pattern.loopStart == -240)
+        independent.redo()
+        precondition(independent.pattern == earlierLoop)
+        try independent.regions(patternStart: 240, loopStart: 240, loopEnd: 960, tailEnd: 3840, loop: true)
+        precondition(independent.pattern.patternStart == independent.pattern.loopStart)
         let markerViewport = PianoRollViewport()
         for marker in PianoRollMarker.allCases {
             let point = CoreGraphics.CGPoint(x: markerViewport.x(forTick: Double(marker.tick(in: regionPattern))),

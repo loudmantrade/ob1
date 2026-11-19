@@ -133,7 +133,8 @@ inline PatternError validatePattern(const PatternData& data)
     if (data.length < 1 || data.length > maxPatternTicks) return PatternError::InvalidLength;
     if (data.intro < 0 || data.intro > ticksPerQuarter * 12) return PatternError::InvalidLength;
     if (data.regionsEnabled &&
-        (data.patternStart < -data.intro || data.patternStart > data.loopStart ||
+        (data.patternStart < -data.intro || data.loopStart < -data.intro ||
+         data.patternStart >= data.loopEnd ||
          data.loopStart >= data.loopEnd || data.loopEnd > data.length))
         return PatternError::InvalidLength;
     const auto quantization = validatePatternQuantization(data.quantization);
