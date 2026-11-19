@@ -467,6 +467,7 @@ enum SceneHistoryEntry: Equatable {
     case value(SceneValueEdit)
     case route(SceneRouteEdit)
     case sounds([SceneSoundEdit])
+    case restore(SceneRestoreEdit)
 
     var title: String {
         switch self {
@@ -487,6 +488,8 @@ enum SceneHistoryEntry: Equatable {
         case .route(let edit): return "Instrument · \(edit.after.name)"
         case .sounds(let edits):
             return edits.count == 1 ? "Sound · \(edits[0].after.name)" : "Sounds · \(edits.count) instruments"
+        case .restore(let edit):
+            return edit.restoresDevice ? "Application default" : "Scene default"
         }
     }
 }
@@ -522,15 +525,22 @@ struct SceneParameterHistory {
         append(.sounds(changed))
     }
 
+    mutating func recordRestore(_ edit: SceneRestoreEdit) {
+        var after = edit.after
+        if !edit.restoresDevice { after.device = edit.before.device }
+        guard edit.before != after else { return }
+        append(.restore(edit))
+    }
+
     private mutating func append(_ entry: SceneHistoryEntry) {
         undoStack.append(entry)
         if undoStack.count > Self.limit { undoStack.removeFirst() }
         redoStack.removeAll()
     }
 
-    mutating func acknowledge(undo: Bool) {
-        if undo, let entry = undoStack.popLast() { redoStack.append(entry) }
-        if !undo, let entry = redoStack.popLast() { undoStack.append(entry) }
+    mutating func acknowledge(undo: Bool, replacing replacement: SceneHistoryEntry? = nil) {
+        if undo, let entry = undoStack.popLast() { redoStack.append(replacement ?? entry) }
+        if !undo, let entry = redoStack.popLast() { undoStack.append(replacement ?? entry) }
     }
 }
 
@@ -670,6 +680,7 @@ struct SceneRestoreEdit: Equatable {
     let before: ApplicationDefault
     let after: ApplicationDefault
     let restoresDevice: Bool
+    var patternHistories: SceneRestorePatternHistories? = nil
 
     func applying(to current: ApplicationDefault, undo: Bool) throws -> ApplicationDefault {
         let expected = undo ? after : before
@@ -1729,7 +1740,7 @@ enum PianoRollPosition {
     }
 }
 
-struct PianoRollEditBuffer {
+struct PianoRollEditBuffer: Equatable {
     enum Scale: CaseIterable {
         case chromatic, major, naturalMinor, harmonicMinor, melodicMinor
         case majorPentatonic, minorPentatonic, dorian, phrygian, lydian, mixolydian, locrian
@@ -2146,7 +2157,7 @@ struct PendingPatternTransfer {
     var before: [SequencerCellSnapshot]
 }
 
-struct SequencerCellSnapshot {
+struct SequencerCellSnapshot: Equatable {
     var cell: PatternCell
     var pattern: SequencerPattern?
     var pianoHistory: PianoRollEditBuffer?
@@ -2154,7 +2165,7 @@ struct SequencerCellSnapshot {
     var inDefaultLayout: Bool? = nil
 }
 
-struct SceneRestorePatternHistories {
+struct SceneRestorePatternHistories: Equatable {
     var before: [SequencerCellSnapshot]
     var after: [SequencerCellSnapshot]
 
@@ -2211,6 +2222,18 @@ struct SceneRestorePatternHistories {
             histories[cell.cell.id] = cell.pianoHistory
         }
     }
+}
+
+struct PendingSceneRestore {
+    var token: UInt64
+    var sceneKey: String
+    var epoch: UInt64
+    var target: ApplicationDefault
+    var edit: SceneRestoreEdit
+    var undo: Bool
+    var recording: Bool
+    var revisions: [Int: UInt64]
+    var generations: [Int: UInt64]
 }
 
 struct SequencerHistoryEntry {

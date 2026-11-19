@@ -375,6 +375,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var sceneParameterHistory = SceneParameterHistory()
     @Published var sceneHistoryJump: HistoryJump?
     @Published var pendingSceneParameterHistory: PendingSceneParameterHistory?
+    var pendingSceneRestore: PendingSceneRestore?
     @Published var activeParameterEdits: [Int: SceneParameterEdit] = [:]
     var startedParameterEdits: Set<Int> = []
     @Published var activeSceneValueEdits: [SceneValueField: SceneValueEdit] = [:]
@@ -774,7 +775,9 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         switch effect {
         case .restoreInstruments:
             capturePresetDefault(save: false, allInstruments: true)
-        case .restoreScene, .saveScene, .saveAll:
+        case .restoreScene:
+            restoreSceneDefault()
+        case .saveScene, .saveAll:
             errorMessage = "The requested scene default operation is not available yet."
         case .restore, .save:
             break
@@ -786,6 +789,20 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             sustainInverted: sustainInverted, sustainStopGesture: sustainStopGesture,
             arpLatencyAuto: arpLatencyAuto, arpLatencyManualMS: arpLatencyManualMS,
             recordMetronome: recordMetronome)
+    }
+
+    func applyApplicationDeviceSettings(_ settings: ApplicationDeviceSettings) {
+        setBLEMIDIBufferMilliseconds(settings.bleMIDIBufferMilliseconds)
+        setSustainInverted(settings.sustainInverted)
+        setSustainStopGesture(settings.sustainStopGesture)
+        setArpLatencyAuto(settings.arpLatencyAuto)
+        setArpLatencyManualMS(settings.arpLatencyManualMS)
+        setRecordMetronome(settings.recordMetronome)
+    }
+
+    var defaultLibrariesAreAvailable: Bool {
+        defaultLibrariesAvailable && sceneDefaultsAvailable && instrumentDefaultsAvailable &&
+            patternDefaultsAvailable && sequencerDefaultsAvailable
     }
 
     @discardableResult

@@ -386,11 +386,16 @@ together. Later individual saves remain independent. The layout is also seeded
 from a saved scene when no layout default exists, and copied with Save As.
 When a pattern default moves, is copied, or is deleted, its membership in the
 saved layout follows the same operation and is restored by sequencer Undo/Redo.
-Restoring a scene default is not yet available.
+Triple-tap DEFAULT to restore the saved scene using the current individual
+instrument, sequencer and pattern defaults. The operation checks and applies
+the audio state as one transaction and records one scene-history step. Undo
+and Redo reject conflicting later edits rather than overwriting them; unrelated
+Piano Roll histories are preserved. Finish recording and pending edits first.
+If the restore changes tempo, MIDI clock must be stopped.
 In Scenes & Instruments, **Save Application Default** saves a separate snapshot
 of the scene, sequencer, patterns and device settings after confirmation. It
-does not replace scene or preset libraries. Restoring this snapshot is not yet
-available.
+does not replace scene or preset libraries. **Restore Application Default**
+restores that snapshot after confirmation and adds a scene-history step.
 
 Copy/Paste retains relative timing and routing, with the most recent empty-grid
 tap as the paste anchor (initially tick zero). Paste creates new note IDs and

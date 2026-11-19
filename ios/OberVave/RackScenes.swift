@@ -138,7 +138,7 @@ extension OberVaveModel {
             let count = jump.undo ? sceneParameterHistory.undoStack.count : sceneParameterHistory.redoStack.count
             guard count > 0 else { sceneHistoryJump = nil; return }
             applySceneParameterHistory(undo: jump.undo)
-            if pendingSceneParameterHistory != nil { return }
+            if pendingSceneParameterHistory != nil || sceneSwitchPending { return }
             let after = jump.undo ? sceneParameterHistory.undoStack.count : sceneParameterHistory.redoStack.count
             guard after == count - 1 else { sceneHistoryJump = nil; return }
             sceneHistoryJump?.remaining -= 1
@@ -166,7 +166,7 @@ extension OberVaveModel {
     }
 
     func syncExternalParameterHistory(finish: Bool = false) {
-        guard pendingSceneParameterHistory == nil, sceneHistoryJump == nil else { return }
+        guard pendingSceneParameterHistory == nil, pendingSceneRestore == nil, sceneHistoryJump == nil else { return }
         let lost = ov_rack_external_history_lost()
         if lost != 0 {
             externalParameterGestures.removeAll()
@@ -223,6 +223,10 @@ extension OberVaveModel {
             errorMessage = "Finish the current parameter edit before using history."; return
         }
         guard let entry = undo ? sceneParameterHistory.undoStack.last : sceneParameterHistory.redoStack.last else { return }
+        if case .restore(let edit) = entry {
+            startSceneRestore(target: nil, history: edit, undo: undo)
+            return
+        }
         if case .sounds(let sounds) = entry {
             submitSoundChanges(sounds.map { undo ? SceneSoundEdit(before: $0.after, after: $0.before) : $0 },
                                undo: undo, recording: false)
@@ -340,6 +344,54 @@ extension OberVaveModel {
     func syncSequencerState() {
         var parameterResult = ov_rack_parameter_result()
         while ov_rack_read_parameter_result(&parameterResult) != 0 {
+            if let pending = pendingSceneRestore, pending.token == parameterResult.token {
+                pendingSceneRestore = nil
+                let unchanged = pending.sceneKey == sceneSessionKey && pending.epoch == ov_seq_scene_epoch() &&
+                    pending.revisions.allSatisfy {
+                        ov_seq_cell_revision(UInt32($0.key / 8), UInt32($0.key % 8)) == $0.value
+                    } && pending.generations.allSatisfy { slot, expected in
+                        var generation: UInt64 = 0
+                        return ov_rack_slot_generation(UInt32(slot), &generation) != 0 && generation == expected
+                    }
+                guard parameterResult.success != 0, unchanged else {
+                    sceneSwitchPending = false
+                    sceneHistoryJump = nil
+                    errorMessage = parameterResult.success == 0
+                        ? "The scene changed; the default restore was not applied."
+                        : "The scene restore was applied but superseded before synchronization."
+                    continue
+                }
+                if keyboardChannelMask != pending.target.scene.keyboardMask {
+                    releaseLockedKeys(channels: keyboardChannelMask & ~pending.target.scene.keyboardMask)
+                }
+                instruments = pending.target.scene.instruments
+                patterns = pending.target.scene.patterns ?? []
+                pending.edit.patternHistories?.apply(to: &pianoRollHistories, undo: pending.undo)
+                sequencerInteractionEpoch &+= 1
+                soloSlots.removeAll()
+                applySequencerSettingsLocally(pending.target.sequencer)
+                selectedSlot = pending.target.scene.selectedSlot ?? instruments.first?.slot ?? 0
+                ov_rack_select(UInt32(selectedSlot))
+                keyboardChannelMask = pending.target.scene.keyboardMask
+                ov_keyboard_channels(keyboardChannelMask)
+                tempo = Int(ov_tempo())
+                restoringSceneHistory = true
+                setMasterLevelDB(pending.target.scene.masterDB)
+                setMasterPan(pending.target.scene.masterPan)
+                restoringSceneHistory = false
+                if pending.edit.restoresDevice { applyApplicationDeviceSettings(pending.target.device) }
+                sceneName = pending.target.scene.name
+                showSelectedInstrument()
+                if pending.recording { sceneParameterHistory.recordRestore(pending.edit) }
+                else { sceneParameterHistory.acknowledge(undo: pending.undo, replacing: .restore(pending.edit)) }
+                sceneStatus = "Restored \(pending.edit.restoresDevice ? "application" : "scene") default"
+                sceneSwitchPending = false
+                if sceneHistoryJump != nil {
+                    sceneHistoryJump?.remaining -= 1
+                    advanceSceneHistoryJump()
+                }
+                continue
+            }
             if let pending = pendingSequencerSettings, pending.token == parameterResult.token {
                 pendingSequencerSettings = nil
                 let expectedCells = pending.undo ? pending.entry.after : pending.entry.before
@@ -985,6 +1037,137 @@ extension OberVaveModel {
             masterDB: masterLevelDB, masterPan: masterPan, keyboardMask: keyboardChannelMask, selectedSlot: nil)
         switchScene(to: SceneSessionState(document: empty, pianoRollHistories: [:],
                     pianoRollViewports: [:], fileURL: nil), key: UUID().uuidString)
+    }
+
+    private func currentRestoreState() -> ApplicationDefault {
+        let document = RackSceneDocument(name: sceneName, instruments: instruments, tempo: tempo,
+            masterDB: masterLevelDB, masterPan: masterPan, keyboardMask: keyboardChannelMask,
+            selectedSlot: instruments.isEmpty ? nil : selectedSlot, patterns: patterns)
+        return ApplicationDefault(scene: document, sequencer: currentSequencerSettings(),
+                                  device: applicationDeviceSettings)
+    }
+
+    func restoreSceneDefault() {
+        guard defaultLibrariesAreAvailable else {
+            errorMessage = "The scene defaults could not be loaded."
+            return
+        }
+        do {
+            let target = try currentDefaultLibraries().sceneRestoreTarget(scene: sceneSessionKey)
+            let value = ApplicationDefault(scene: target.document, sequencer: target.sequencer,
+                                           device: applicationDeviceSettings)
+            startSceneRestore(target: value, history: nil, undo: false)
+        } catch { errorMessage = "Could not restore scene default: \(error.localizedDescription)" }
+    }
+
+    func restoreApplicationDefault() {
+        guard let target = applicationDefault else {
+            errorMessage = "There is no available application default. Save one first."
+            return
+        }
+        startSceneRestore(target: target, history: nil, undo: false, restoresDevice: true)
+    }
+
+    private func startSceneRestore(target: ApplicationDefault?, history: SceneRestoreEdit?,
+                                   undo: Bool, restoresDevice: Bool = false) {
+        syncSequencerState()
+        if history == nil { syncExternalParameterHistory(finish: true) }
+        guard !sceneSwitchPending, pendingSceneName == nil, pendingSceneParameterHistory == nil,
+              pendingSceneRestore == nil, pendingSequencerHistory == nil, pendingSequencerSettings == nil,
+              pendingPatternTransfer == nil, pendingPianoPublication == nil, sequencerHistoryJump == nil,
+              activeParameterEdits.isEmpty, activeSceneValueEdits.isEmpty, activeMixerGestures.isEmpty,
+              externalParameterGestures.isEmpty, recordingPattern == nil,
+              ov_seq_record_state() == 0, ov_seq_record_ready() == 0,
+              (0..<128).allSatisfy({ ov_seq_pad_pending(UInt32($0 / 8), UInt32($0 % 8)) == 0 }) else {
+            errorMessage = "Finish recording and pending edits before restoring defaults."
+            return
+        }
+        let baseline = currentRestoreState()
+        let sceneKey = sceneSessionKey
+        let revisionsBeforeCapture = (0..<128).map {
+            ov_seq_cell_revision(UInt32($0 / 8), UInt32($0 % 8))
+        }
+        guard let generationsBeforeCapture = rackSlotGenerations() else {
+            errorMessage = "An instrument is changing; try restoring defaults again."
+            return
+        }
+        guard ov_rack_snapshot_request() != 0 else {
+            errorMessage = "Could not request an audio scene snapshot."
+            return
+        }
+        sceneSwitchPending = true
+        sceneSwitchMonitor.start { [weak self] in
+            guard let self else { return true }
+            var snapshot = ov_seq_scene_snapshot()
+            guard ov_seq_snapshot_read(&snapshot) != 0 else { return false }
+            do {
+                self.syncExternalParameterHistory(finish: true)
+                let revisions = withUnsafeBytes(of: snapshot.revisions) { Array($0.bindMemory(to: UInt64.self)) }
+                let generations = withUnsafeBytes(of: snapshot.generations) { Array($0.bindMemory(to: UInt64.self)) }
+                let cellsUnchanged = (0..<128).allSatisfy { index in
+                    let slot = UInt32(index / 8)
+                    let row = UInt32(index % 8)
+                    return ov_seq_pad_pending(slot, row) == 0 &&
+                        ov_seq_cell_revision(slot, row) == revisions[index]
+                }
+                guard self.sceneSessionKey == sceneKey, self.currentRestoreState() == baseline,
+                      snapshot.epoch == ov_seq_scene_epoch(), ov_seq_record_state() == 0,
+                      ov_seq_record_ready() == 0, self.externalParameterGestures.isEmpty,
+                      revisions == revisionsBeforeCapture, generations == generationsBeforeCapture,
+                      self.rackSlotGenerations() == generations, cellsUnchanged else {
+                    throw SceneError.invalid("The scene changed while taking the snapshot.")
+                }
+                var edit: SceneRestoreEdit
+                let destination: ApplicationDefault
+                if let history {
+                    guard (undo ? self.sceneParameterHistory.undoStack.last : self.sceneParameterHistory.redoStack.last) ==
+                            .restore(history) else {
+                        throw SceneError.invalid("Scene history changed while taking the snapshot.")
+                    }
+                    edit = history
+                    destination = try edit.applying(to: baseline, undo: undo)
+                    guard var patternHistories = edit.patternHistories else {
+                        throw SceneError.invalid("Scene restore history is incomplete.")
+                    }
+                    try patternHistories.refreshExpected(undo: undo, patterns: baseline.scene.patterns ?? [],
+                                                          histories: self.pianoRollHistories)
+                    edit.patternHistories = patternHistories
+                } else {
+                    guard let target else { throw SceneError.invalid("A scene restore target is missing.") }
+                    destination = target
+                    edit = SceneRestoreEdit(before: baseline, after: target, restoresDevice: restoresDevice)
+                    edit.patternHistories = try SceneRestorePatternHistories.prepare(before: baseline, after: target,
+                                                                                     histories: self.pianoRollHistories)
+                }
+                let plan = try SceneRestorePlan(before: baseline, after: destination)
+                var expectedRevisions: [Int: UInt64] = [:]
+                var expectedGenerations: [Int: UInt64] = [:]
+                for slot in plan.slots {
+                    expectedGenerations[slot.index] = generations[slot.index] &+ (slot.structural ? 2 : 0)
+                    if slot.structural {
+                        for row in 0..<8 {
+                            let id = slot.index * 8 + row
+                            expectedRevisions[id] = revisions[id] &+ 1
+                        }
+                    }
+                }
+                for cell in plan.cells { expectedRevisions[cell.cell.id] = revisions[cell.cell.id] &+ 1 }
+                self.sceneParameterToken &+= 1
+                try plan.enqueue(snapshot: snapshot, token: self.sceneParameterToken)
+                self.pendingSceneRestore = PendingSceneRestore(token: self.sceneParameterToken, sceneKey: sceneKey,
+                    epoch: snapshot.epoch, target: destination, edit: edit, undo: undo,
+                    recording: history == nil, revisions: expectedRevisions, generations: expectedGenerations)
+            } catch {
+                self.sceneSwitchPending = false
+                self.sceneHistoryJump = nil
+                self.errorMessage = "Could not restore defaults: \(error.localizedDescription)"
+            }
+            return true
+        } onTimeout: { [weak self] in
+            self?.sceneSwitchPending = false
+            self?.sceneHistoryJump = nil
+            self?.errorMessage = "The audio engine did not provide a snapshot. Resume audio and try again."
+        }
     }
 
     func saveSceneDefault(all: Bool = false, application: Bool = false) {
@@ -2410,6 +2593,7 @@ struct RackSceneView: View {
     @State private var importsScene = false
     @State private var confirmsNew = false
     @State private var confirmsApplicationDefault = false
+    @State private var confirmsApplicationRestore = false
     @State private var loadsScene: SavedRackScene?
     @State private var removesInstrument: RackInstrument?
 
@@ -2448,6 +2632,8 @@ struct RackSceneView: View {
                                 }
                                 Section("Application default") {
                                     Button("Save Application Default") { confirmsApplicationDefault = true }
+                                    Button("Restore Application Default") { confirmsApplicationRestore = true }
+                                        .disabled(model.applicationDefault == nil)
                                     Text("Saves the current scene, patterns, sequencer and device settings without changing scene or preset libraries.")
                                         .font(.footnote).foregroundStyle(.secondary)
                                 }
@@ -2521,6 +2707,10 @@ struct RackSceneView: View {
             .confirmationDialog("Replace the saved application default with the current state?",
                                 isPresented: $confirmsApplicationDefault) {
                 Button("Save Application Default") { model.saveSceneDefault(application: true) }
+            }
+            .confirmationDialog("Restore the saved application default? Scene, patterns, sequencer and device settings will change.",
+                                isPresented: $confirmsApplicationRestore) {
+                Button("Restore Application Default", role: .destructive) { model.restoreApplicationDefault() }
             }
             .confirmationDialog("Load this scene? Current unsaved edits remain available during this session.", isPresented: Binding(
                 get: { loadsScene != nil }, set: { if !$0 { loadsScene = nil } })) {
