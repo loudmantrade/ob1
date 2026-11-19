@@ -368,6 +368,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var pendingPatternTransfer: PendingPatternTransfer?
     @Published var pendingPianoPublication: PendingPianoPublication?
     var pianoRollViewports: [Int: PianoRollViewport] = [:]
+    var pianoRollHistories: [Int: PianoRollEditBuffer] = [:]
     var patternTransferToken: UInt64 = 0
     @Published var sequencerInteractionEpoch: UInt64 = 0
     @Published var soloSlots: Set<Int> = []

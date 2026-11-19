@@ -229,7 +229,13 @@ struct PianoRollView: View {
             Button("Cancel", role: .cancel) {}
         }
         .onAppear {
-            do { editor = try PianoRollEditBuffer(pattern: pattern) }
+            do {
+                if let saved = model.pianoRollHistories[pattern.id], saved.pattern == pattern {
+                    editor = saved
+                } else {
+                    editor = try PianoRollEditBuffer(pattern: pattern)
+                }
+            }
             catch { model.errorMessage = error.localizedDescription; close() }
         }
         .onChange(of: model.pendingPianoPublication?.token) { token in
@@ -262,7 +268,7 @@ struct PianoRollView: View {
         }
         let epoch = ov_seq_scene_epoch()
         let revision = ov_seq_cell_revision(UInt32(pattern.slot), UInt32(pattern.row))
-        if model.publishPianoPattern(expected: previous.pattern, replacement: candidate.pattern,
+        if model.publishPianoPattern(expected: previous.pattern, candidate: candidate,
                                      epoch: epoch, revision: revision) {
             beforePublication = previous
             editor = candidate

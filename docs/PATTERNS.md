@@ -301,6 +301,11 @@ the finger must be lifted before another edit can start.
 Undo and Redo operate on whole gestures. Audio publication is revision-checked
 and does not restart active or queued playback. Already-sounding notes retain
 their original release times; future onsets use the new data.
+Within the current scene, the Piano Roll history remains available after
+closing and reopening the editor. Moving a pattern transfers its history;
+copying it creates an independent copy of that history. Re-recording or
+replacing a pattern through the numeric pattern editor clears its history.
+History currently resets when a scene is loaded.
 
 Copy/Paste retains relative timing and routing, with the most recent empty-grid
 tap as the paste anchor (initially tick zero). Paste creates new note IDs and

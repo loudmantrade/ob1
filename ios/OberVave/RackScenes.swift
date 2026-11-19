@@ -134,6 +134,7 @@ extension OberVaveModel {
                     do {
                         try pattern.validate()
                         if instruments.contains(where: { $0.slot == pattern.slot }) {
+                            pianoRollHistories.removeValue(forKey: pattern.id)
                             patterns.removeAll { $0.id == pattern.id }
                             patterns.append(pattern)
                         }
@@ -163,9 +164,17 @@ extension OberVaveModel {
                 defer { pendingPatternTransfer = nil }
                 if editResult.success != 0 && pending.transfer.epoch == ov_seq_scene_epoch() {
                     let transfer = pending.transfer
+                    let sourceUnchanged = editResult.source_revision == ov_seq_cell_revision(UInt32(transfer.source.slot), UInt32(transfer.source.row))
+                    let destinationUnchanged = editResult.target_revision == ov_seq_cell_revision(UInt32(transfer.destination.slot), UInt32(transfer.destination.row))
+                    let sourceHistory = pianoRollHistories[transfer.source.id].flatMap {
+                        $0.pattern == transfer.source ? $0 : nil
+                    }
+                    if !transfer.copying && sourceUnchanged { pianoRollHistories.removeValue(forKey: transfer.source.id) }
+                    if !transfer.deleting && destinationUnchanged {
+                        pianoRollHistories[transfer.destination.id] = sourceHistory?.retargeted(to: transfer.destination)
+                    }
                     patterns = transfer.acknowledged(in: patterns,
-                        sourceUnchanged: editResult.source_revision == ov_seq_cell_revision(UInt32(transfer.source.slot), UInt32(transfer.source.row)),
-                        destinationUnchanged: editResult.target_revision == ov_seq_cell_revision(UInt32(transfer.destination.slot), UInt32(transfer.destination.row)))
+                        sourceUnchanged: sourceUnchanged, destinationUnchanged: destinationUnchanged)
                 } else {
                     errorMessage = "The pattern edit was rejected because a cell, scene or recording changed. No patterns were modified."
                 }
@@ -177,6 +186,7 @@ extension OberVaveModel {
                         UInt32(pending.replacement.slot), UInt32(pending.replacement.row))
                     if epoch == pending.epoch && revisionMatches {
                         patterns = pending.acknowledged(in: patterns, epoch: epoch, revisionMatches: revisionMatches)
+                        pianoRollHistories[pending.replacement.id] = pending.editor
                     } else {
                         errorMessage = "The Piano Roll edit was superseded by a newer scene or pattern change."
                     }
@@ -452,6 +462,7 @@ extension OberVaveModel {
         }
         sequencerInteractionEpoch &+= 1
         pianoRollViewports.removeAll()
+        pianoRollHistories.removeAll()
         instruments = document.instruments
         patterns = document.patterns ?? []
         soloSlots = []
@@ -497,6 +508,9 @@ extension OberVaveModel {
             }
             var clip = pattern.coreClip()
             guard ov_seq_set_clip(&clip) != 0 else { throw SceneError.invalid("Could not publish pattern to the audio engine.") }
+            if self.pattern(slot: pattern.slot, row: pattern.row) != pattern {
+                pianoRollHistories.removeValue(forKey: pattern.id)
+            }
             patterns.removeAll { $0.id == pattern.id }
             patterns.append(pattern)
             return true
@@ -504,12 +518,13 @@ extension OberVaveModel {
     }
 
     @discardableResult
-    func publishPianoPattern(expected: SequencerPattern, replacement: SequencerPattern,
+    func publishPianoPattern(expected: SequencerPattern, candidate: PianoRollEditBuffer,
                              epoch: UInt64, revision: UInt64) -> Bool {
         guard pendingSceneName == nil, pendingPatternTransfer == nil, pendingPianoPublication == nil else {
             errorMessage = "Wait for the pending scene or pattern operation."; return false
         }
         do {
+            let replacement = candidate.pattern
             guard expected.id == replacement.id else { throw SceneError.invalid("A Piano Roll edit cannot change its cell.") }
             try replacement.validate()
             var oldClip = expected.coreClip()
@@ -519,7 +534,7 @@ extension OberVaveModel {
                 throw SceneError.invalid("Could not queue the Piano Roll edit.")
             }
             pendingPianoPublication = PendingPianoPublication(token: patternTransferToken,
-                epoch: epoch, replacement: replacement)
+                epoch: epoch, replacement: replacement, editor: candidate)
             return true
         } catch { errorMessage = error.localizedDescription; return false }
     }

@@ -334,6 +334,15 @@ struct SceneChecks {
         precondition(pasted.pattern == editPattern)
         pasted.redo()
         precondition(pasted.pattern.notes.count == 5)
+        var copiedHistory = pasted.retargeted(to: PatternCell(slot: 2, row: 3))
+        precondition(copiedHistory.pattern.slot == 2 && copiedHistory.pattern.row == 3 && copiedHistory.canUndo)
+        copiedHistory.undo()
+        precondition(copiedHistory.pattern.slot == 2 && copiedHistory.pattern.row == 3 &&
+                     copiedHistory.pattern.notes == editPattern.notes)
+        copiedHistory.redo()
+        precondition(copiedHistory.pattern.slot == 2 && copiedHistory.pattern.row == 3 &&
+                     copiedHistory.pattern.notes.count == 5)
+        precondition(pasted.pattern.slot == editPattern.slot && pasted.pattern.row == editPattern.row)
         let beforeInvalidPaste = pasted.pattern
         do {
             try pasted.paste(copiedNotes, at: editPattern.length - 1)

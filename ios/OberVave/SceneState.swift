@@ -719,6 +719,20 @@ struct PianoRollEditBuffer {
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
 
+    func retargeted(to cell: PatternCell) -> PianoRollEditBuffer {
+        var result = self
+        func retarget(_ value: SequencerPattern) -> SequencerPattern {
+            var value = value
+            value.slot = cell.slot
+            value.row = cell.row
+            return value
+        }
+        result.pattern = retarget(pattern)
+        result.undoStack = undoStack.map(retarget)
+        result.redoStack = redoStack.map(retarget)
+        return result
+    }
+
     private mutating func commit(_ candidate: SequencerPattern) throws {
         try candidate.validate()
         guard candidate != pattern else { return }
@@ -1056,6 +1070,7 @@ struct PendingPianoPublication {
     var token: UInt64
     var epoch: UInt64
     var replacement: SequencerPattern
+    var editor: PianoRollEditBuffer? = nil
 
     func acknowledged(in patterns: [SequencerPattern], epoch: UInt64, revisionMatches: Bool) -> [SequencerPattern] {
         guard self.epoch == epoch && revisionMatches else { return patterns }
