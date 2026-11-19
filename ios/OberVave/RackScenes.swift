@@ -665,7 +665,7 @@ extension OberVaveModel {
     }
 
     @discardableResult
-    func storePattern(_ pattern: SequencerPattern) -> Bool {
+    func storePattern(_ pattern: SequencerPattern, expected: SequencerPattern? = nil) -> Bool {
         guard pendingSceneName == nil, pendingPatternTransfer == nil, pendingPianoPublication == nil,
               pendingSequencerHistory == nil else {
             errorMessage = "Wait for the pending scene or pattern operation."; return false
@@ -680,6 +680,9 @@ extension OberVaveModel {
             }
             let cell = PatternCell(slot: pattern.slot, row: pattern.row)
             let before = sequencerSnapshot(cell)
+            if let expected, before.pattern != expected {
+                throw SceneError.invalid("This pattern changed while the editor was open. Reopen it before saving.")
+            }
             if before.pattern == pattern { return true }
             let after = SequencerCellSnapshot(cell: cell, pattern: pattern, pianoHistory: nil)
             submitSequencerHistory(SequencerHistoryEntry(before: [before], after: [after]),
@@ -1145,7 +1148,7 @@ struct SequencerView: View {
         }
         .onDisappear { cancelGesture() }
         .sheet(item: $editing) { pattern in
-            SequencerPatternEditor(pattern: pattern) { model.storePattern($0) }
+            SequencerPatternEditor(pattern: pattern) { model.storePattern($0, expected: pattern) }
         }
         .confirmationDialog(
             "Delete pattern?",
