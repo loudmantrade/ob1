@@ -140,6 +140,14 @@ struct SceneChecks {
         precondition(sceneHistory.redoStack == [.restore(deviceEdit)])
         sceneHistory.acknowledge(undo: false)
         precondition(sceneHistory.undoStack == [.restore(deviceEdit)])
+        var differentProgram = application.scene.instruments[0]
+        differentProgram.programIndex = (differentProgram.programIndex + 1) % 128
+        let presetEdit = SceneSoundEdit(before: application.scene.instruments[0], after: differentProgram)
+        precondition(presetEdit.changed)
+        sceneHistory.recordSounds([presetEdit])
+        precondition(sceneHistory.undoStack.last == .sounds([presetEdit]))
+        sceneHistory.acknowledge(undo: true)
+        precondition(sceneHistory.redoStack.last == .sounds([presetEdit]))
         var removed = application
         removed.scene.instruments.removeAll()
         removed.scene.patterns?.removeAll()

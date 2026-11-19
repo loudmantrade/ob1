@@ -320,8 +320,29 @@ extension OberVaveModel {
         }
         let epoch = ov_seq_scene_epoch()
         sceneParameterToken &+= 1
-        let queued = changes.withUnsafeBufferPointer {
-            ov_rack_change_sounds($0.baseAddress, UInt32($0.count), epoch, sceneParameterToken)
+        let changesProgram = sounds.contains { $0.before.programIndex != $0.after.programIndex }
+        let queued: Int32
+        if changesProgram {
+            var guards: [ov_seq_slot_guard] = []
+            for sound in sounds {
+                var generation: UInt64 = 0
+                guard ov_rack_slot_generation(UInt32(sound.before.slot), &generation) != 0 else {
+                    errorMessage = "An instrument is changing; try the sound operation again."
+                    return
+                }
+                guards.append(ov_seq_slot_guard(slot: UInt32(sound.before.slot), generation: generation))
+            }
+            queued = changes.withUnsafeBufferPointer { changeBuffer in
+                guards.withUnsafeBufferPointer { guardBuffer in
+                    ov_seq_change_bundle_with_programs(changeBuffer.baseAddress, UInt32(changeBuffer.count),
+                        nil, 0, nil, 0, nil, 0, guardBuffer.baseAddress, UInt32(guardBuffer.count),
+                        epoch, sceneParameterToken)
+                }
+            }
+        } else {
+            queued = changes.withUnsafeBufferPointer {
+                ov_rack_change_sounds($0.baseAddress, UInt32($0.count), epoch, sceneParameterToken)
+            }
         }
         guard queued != 0 else {
             errorMessage = "Could not queue the sound restore."
@@ -444,6 +465,7 @@ extension OberVaveModel {
                         guard let index = instruments.firstIndex(where: { $0.slot == sound.after.slot }) else { continue }
                         instruments[index].parameters = sound.after.parameters
                         instruments[index].cc = sound.after.cc
+                        instruments[index].programIndex = sound.after.programIndex
                         instruments[index].arpMode = sound.after.arpMode
                         instruments[index].latchMode = sound.after.latchMode
                         if sound.after.slot == selectedSlot { showSelectedInstrument() }

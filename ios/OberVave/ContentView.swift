@@ -668,12 +668,41 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         guard (0..<6).contains(newBank), (0..<128).contains(newProgram) else { return }
         let changed = bank != newBank || program != newProgram
         guard changed || notifyCore else { return }
+        if notifyCore {
+            syncRackState()
+            syncExternalParameterHistory(finish: true)
+            guard activeParameterEdits.isEmpty, externalParameterGestures.isEmpty,
+                  let before = selectedInstrument else {
+                errorMessage = "Finish the current edit before selecting a preset."
+                return
+            }
+            let index = newBank * 128 + newProgram
+            let key = presetKey(bank: newBank, program: newProgram)
+            let factory = (0..<Int(ov_parameter_count())).map {
+                Int(ov_rack_factory_parameter(UInt32(index), UInt32($0)))
+            }
+            var after = before
+            after.programIndex = index
+            after.parameters = presetLibrary.presets[key].map {
+                ModulationMatrix.migrateLegacy($0.parameters, defaults: factory)
+            } ?? factory
+            let mappings = presetLibrary.ccMappings[key] ??
+                presetLibrary.presets[key]?.ccAssignments ?? defaultCCAssignments
+            after.cc = ModulationMatrix.migrateLegacy(mappings, defaults: defaultCCAssignments)
+                .map { $0 < 0 ? 255 : $0 }
+            after.arpMode = min(8, max(1, presetLibrary.presets[key]?.arpSelectedMode ?? 1))
+            after.latchMode = min(2, max(1, presetLibrary.presets[key]?.latchSelectedMode ?? 2))
+            do { try after.validate() }
+            catch {
+                errorMessage = "Could not select preset: \(error.localizedDescription)"
+                return
+            }
+            submitSoundChange(expected: before, target: after, undo: false, recording: true)
+            return
+        }
         bank = newBank
         program = newProgram
         let index = selectedPresetIndex
-        if notifyCore {
-            ov_select_program(UInt32(index))
-        }
         applyPresetData(for: index)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             self?.refreshParameterValues()

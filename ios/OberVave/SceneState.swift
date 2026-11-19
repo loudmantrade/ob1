@@ -457,7 +457,7 @@ struct SceneSoundEdit: Equatable {
     var after: RackInstrument
 
     var changed: Bool {
-        before.parameters != after.parameters || before.cc != after.cc ||
+        before.programIndex != after.programIndex || before.parameters != after.parameters || before.cc != after.cc ||
             before.arpMode != after.arpMode || before.latchMode != after.latchMode
     }
 }

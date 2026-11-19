@@ -350,7 +350,8 @@ event queue overflows, the parameter history is cleared and an error is shown
 rather than preserving an incomplete history. Adding or removing an instrument
 is also one scene-history step, including its patterns and their Piano Roll
 histories; it waits for an audio acknowledgement and rejects conflicting changes.
-Preset selection and some scene settings are not yet covered by scene history.
+Selecting a preset in the interface is also a scene-history action. External
+MIDI Program Change, MIDI mapping and some scene settings are not yet covered.
 
 The sequencer's DEFAULT button saves its launch and recording options, column
 mixer levels, pan, mute, solo, recording lengths and pattern layout when held and confirmed.
