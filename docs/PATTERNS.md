@@ -347,8 +347,10 @@ Applying parameter history checks the current audio values and scene epoch
 atomically; conflicts are rejected
 without changing any parameter or restarting playback. If the external MIDI
 event queue overflows, the parameter history is cleared and an error is shown
-rather than preserving an incomplete history. This parameter history does not
-yet cover preset selection, instrument management or all scene settings.
+rather than preserving an incomplete history. Adding or removing an instrument
+is also one scene-history step, including its patterns and their Piano Roll
+histories; it waits for an audio acknowledgement and rejects conflicting changes.
+Preset selection and some scene settings are not yet covered by scene history.
 
 The sequencer's DEFAULT button saves its launch and recording options, column
 mixer levels, pan, mute, solo, recording lengths and pattern layout when held and confirmed.
