@@ -4,6 +4,93 @@ import CoreGraphics
 
 @main
 struct SceneChecks {
+    static func checkPatternDefaults() throws {
+        let a = PatternCell(slot: 0, row: 1)
+        let b = PatternCell(slot: 2, row: 3)
+        let c = PatternCell(slot: 4, row: 5)
+        var pattern = SequencerPattern(slot: a.slot, row: a.row, name: "Original")
+        pattern.notes = [SequencerNote(id: 1, start: 0, duration: 240, pitch: 60, velocity: 100)]
+        var library = PatternDefaultLibrary()
+        try library.set(pattern, scene: "one", cell: a)
+        try library.transfer(scene: "one", source: a, destination: b, copying: true, deleting: false)
+        precondition(library.value(scene: "one", cell: a) == pattern)
+        var copy = try { () throws -> SequencerPattern in
+            guard let result = library.value(scene: "one", cell: b) else {
+                throw SceneError.invalid("Copied default is missing.")
+            }
+            return result
+        }()
+        precondition(copy.slot == b.slot && copy.row == b.row && copy.notes == pattern.notes)
+        copy.name = "Changed copy"
+        try library.set(copy, scene: "one", cell: b)
+        precondition(library.value(scene: "one", cell: a)?.name == "Original")
+        try library.transfer(scene: "one", source: b, destination: c, copying: false, deleting: false)
+        precondition(library.value(scene: "one", cell: b) == nil)
+        precondition(library.value(scene: "one", cell: c)?.name == "Changed copy")
+        precondition(library.value(scene: "two", cell: c) == nil)
+        let roundTrip = try JSONDecoder().decode(PatternDefaultLibrary.self, from: JSONEncoder().encode(library))
+        try roundTrip.validate()
+        precondition(roundTrip.value(scene: "one", cell: c) == library.value(scene: "one", cell: c))
+        try library.copyScene(from: "one", to: "other")
+        try library.replaceScene([pattern, copy], scene: "one")
+        precondition(library.value(scene: "one", cell: c) == nil)
+        precondition(library.value(scene: "other", cell: c)?.name == "Changed copy")
+        copy.name = "New individual default"
+        try library.set(copy, scene: "one", cell: b)
+        precondition(library.value(scene: "one", cell: b)?.name == "New individual default")
+        do {
+            try library.replaceScene([pattern, pattern], scene: "one")
+            fatalError("Duplicate defaults accepted")
+        } catch { }
+        precondition(library.value(scene: "one", cell: b)?.name == "New individual default")
+        try library.transfer(scene: "one", source: c, destination: c, copying: false, deleting: true)
+        precondition(library.value(scene: "one", cell: c) == nil)
+        do {
+            try library.set(pattern, scene: "one", cell: b)
+            fatalError("Mismatched default accepted")
+        } catch { }
+        print("PASS pattern defaults: scene isolation, independent copy, move, deletion, validation and serialization")
+    }
+
+    static func checkDefaultGesture() {
+        var gesture = DefaultButtonGesture()
+        precondition(gesture.down(at: 0).isEmpty)
+        precondition(gesture.up(at: 0.1).isEmpty)
+        precondition(gesture.tick(at: 0.35) == [.restore])
+        precondition(gesture.tick(at: 0.5).isEmpty)
+        precondition(gesture.down(at: 1).isEmpty)
+        precondition(gesture.up(at: 1.05).isEmpty)
+        precondition(gesture.down(at: 1.1).isEmpty)
+        precondition(gesture.up(at: 1.15).isEmpty)
+        precondition(gesture.tick(at: 1.4) == [.restoreInstruments])
+        precondition(gesture.down(at: 2).isEmpty)
+        precondition(gesture.up(at: 2.05).isEmpty)
+        precondition(gesture.down(at: 2.1).isEmpty)
+        precondition(gesture.up(at: 2.15).isEmpty)
+        precondition(gesture.down(at: 2.2).isEmpty)
+        precondition(gesture.up(at: 2.25) == [.restoreScene])
+        precondition(gesture.tick(at: 2.6).isEmpty)
+        precondition(gesture.down(at: 3).isEmpty)
+        precondition(gesture.tick(at: 3.5) == [.save])
+        precondition(gesture.up(at: 3.6).isEmpty)
+        precondition(gesture.down(at: 4).isEmpty)
+        precondition(gesture.up(at: 4.05).isEmpty)
+        precondition(gesture.down(at: 4.1).isEmpty)
+        precondition(gesture.up(at: 4.6) == [.saveScene])
+        precondition(gesture.tick(at: 5).isEmpty)
+        precondition(gesture.down(at: 6).isEmpty)
+        precondition(gesture.up(at: 6.05).isEmpty)
+        precondition(gesture.down(at: 6.1).isEmpty)
+        precondition(gesture.up(at: 6.15).isEmpty)
+        precondition(gesture.down(at: 6.2).isEmpty)
+        precondition(gesture.tick(at: 6.7) == [.saveAll])
+        precondition(gesture.up(at: 6.8).isEmpty)
+        precondition(gesture.down(at: 8).isEmpty)
+        gesture.cancel()
+        precondition(gesture.tick(at: 9).isEmpty)
+        print("PASS default gestures: single, double, triple, hold, tap-hold, double-tap-hold and cancellation")
+    }
+
     static func waitForSave(_ finished: () -> Bool) {
         let deadline = Date().addingTimeInterval(1)
         while !finished() && Date() < deadline {
@@ -199,6 +286,8 @@ struct SceneChecks {
     }
 
     static func main() throws {
+        try checkPatternDefaults()
+        checkDefaultGesture()
         checkCircularLayout()
         precondition(PianoRollGrid.visibleTicks(from: -300, through: 500, snap: 120, beatWidth: 96)
                      == [-240, -120, 0, 120, 240, 360, 480])

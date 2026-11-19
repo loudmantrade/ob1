@@ -381,6 +381,8 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     var sceneParameterToken: UInt64 = 0
     var pianoRollViewports: [Int: PianoRollViewport] = [:]
     var pianoRollHistories: [Int: PianoRollEditBuffer] = [:]
+    var patternDefaults = PatternDefaultLibrary()
+    private var patternDefaultsAvailable = true
     var sceneSessionKey = UUID().uuidString
     @Published var sceneSessions: [String: SceneSessionState] = [:]
     @Published var sceneSwitchPending = false
@@ -470,6 +472,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     private var audioRecoveryWorkItem: DispatchWorkItem?
     private var audioInterrupted = false
     private let presetLibraryKey = "io.github.joakimeriksson.obervave.preset-library"
+    private let patternDefaultsKey = "io.github.joakimeriksson.obervave.pattern-defaults"
     private let arpSyncKey = "io.github.joakimeriksson.obervave.arp-master-sync"
     private let arpSyncGridKey = "io.github.joakimeriksson.obervave.arp-master-sync-grid"
     private let bleMidiBufferKey = "io.github.joakimeriksson.obervave.ble-midi-buffer-ms"
@@ -518,6 +521,16 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             return cc == 255 ? -1 : cc
         }
         super.init()
+        if let data = UserDefaults.standard.data(forKey: patternDefaultsKey) {
+            do {
+                let saved = try JSONDecoder().decode(PatternDefaultLibrary.self, from: data)
+                try saved.validate()
+                patternDefaults = saved
+            } catch {
+                patternDefaultsAvailable = false
+                errorMessage = "Could not load pattern defaults: \(error.localizedDescription)"
+            }
+        }
         let metronome = UserDefaults.standard.object(forKey: "sequencer-record-metronome") as? Bool ?? true
         recordMetronome = metronome
         ov_seq_set_metronome(metronome ? 1 : 0)
@@ -1034,6 +1047,25 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             return true
         } catch {
             errorMessage = "Could not save presets: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    @discardableResult
+    func persistPatternDefaults(_ updated: PatternDefaultLibrary) -> Bool {
+        guard updated != patternDefaults else { return true }
+        guard patternDefaultsAvailable else {
+            errorMessage = "Pattern defaults could not be loaded and will not be overwritten."
+            return false
+        }
+        do {
+            try updated.validate()
+            let data = try JSONEncoder().encode(updated)
+            UserDefaults.standard.set(data, forKey: patternDefaultsKey)
+            patternDefaults = updated
+            return true
+        } catch {
+            errorMessage = "Could not save pattern defaults: \(error.localizedDescription)"
             return false
         }
     }

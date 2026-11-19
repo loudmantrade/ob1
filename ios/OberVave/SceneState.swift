@@ -614,6 +614,134 @@ struct PatternCell: Hashable {
     var id: Int { slot * 8 + row }
 }
 
+struct PatternDefaultLibrary: Codable, Equatable {
+    private(set) var scenes: [String: [Int: SequencerPattern]] = [:]
+
+    func value(scene: String, cell: PatternCell) -> SequencerPattern? {
+        scenes[scene]?[cell.id]
+    }
+
+    mutating func set(_ pattern: SequencerPattern?, scene: String, cell: PatternCell) throws {
+        guard !scene.isEmpty, (0..<16).contains(cell.slot), (0..<8).contains(cell.row) else {
+            throw SceneError.invalid("Invalid scene or pattern cell for default.")
+        }
+        if let pattern {
+            try pattern.validate()
+            guard pattern.id == cell.id else {
+                throw SceneError.invalid("The pattern default belongs to a different cell.")
+            }
+            scenes[scene, default: [:]][cell.id] = pattern
+        } else {
+            scenes[scene]?[cell.id] = nil
+            if scenes[scene]?.isEmpty == true { scenes[scene] = nil }
+        }
+    }
+
+    mutating func transfer(scene: String, source: PatternCell, destination: PatternCell,
+                           copying: Bool, deleting: Bool) throws {
+        guard (0..<16).contains(source.slot), (0..<8).contains(source.row),
+              (0..<16).contains(destination.slot), (0..<8).contains(destination.row),
+              !(deleting && copying), deleting || source != destination else {
+            throw SceneError.invalid("Invalid pattern default transfer.")
+        }
+        var target = value(scene: scene, cell: source)
+        if !copying || deleting { try set(nil, scene: scene, cell: source) }
+        if !deleting {
+            target?.slot = destination.slot
+            target?.row = destination.row
+            try set(target, scene: scene, cell: destination)
+        }
+    }
+
+    func validate() throws {
+        for (scene, patterns) in scenes {
+            guard !scene.isEmpty, patterns.count <= 128 else {
+                throw SceneError.invalid("Invalid pattern defaults library.")
+            }
+            for (cell, pattern) in patterns {
+                try pattern.validate()
+                guard cell == pattern.id else {
+                    throw SceneError.invalid("A pattern default belongs to a different cell.")
+                }
+            }
+
+        }
+    }
+
+    mutating func copyScene(from source: String, to destination: String) throws {
+        guard !source.isEmpty, !destination.isEmpty else {
+            throw SceneError.invalid("Invalid scene key for pattern defaults.")
+        }
+        scenes[destination] = scenes[source]
+    }
+
+    mutating func replaceScene(_ patterns: [SequencerPattern], scene: String) throws {
+        guard !scene.isEmpty, patterns.count <= 128,
+              Set(patterns.map(\.id)).count == patterns.count else {
+            throw SceneError.invalid("Invalid scene patterns for defaults.")
+        }
+        try patterns.forEach { try $0.validate() }
+        scenes[scene] = patterns.isEmpty ? nil : Dictionary(uniqueKeysWithValues: patterns.map { ($0.id, $0) })
+    }
+}
+
+struct DefaultButtonGesture {
+    static let tapWindow = 0.24
+    static let holdTime = 0.45
+    enum Effect: Equatable { case restore, restoreInstruments, restoreScene, save, saveScene, saveAll }
+    private var pendingCount = 0
+    private var lastUp: Double?
+    private var downAt: Double?
+    private var prefix = 0
+    private var held = false
+
+    mutating func down(at time: Double) -> [Effect] {
+        guard downAt == nil else { return [] }
+        let effects = tick(at: time)
+        prefix = pendingCount
+        pendingCount = 0
+        lastUp = nil
+        downAt = time
+        held = false
+        return effects
+    }
+
+    mutating func tick(at time: Double) -> [Effect] {
+        if let downAt, !held, time - downAt >= Self.holdTime {
+            held = true
+            if prefix == 0 { return [.save] }
+            if prefix == 1 { return [.saveScene] }
+            if prefix == 2 { return [.saveAll] }
+            return []
+        }
+        if let lastUp, time - lastUp >= Self.tapWindow {
+            self.lastUp = nil
+            let count = pendingCount
+            pendingCount = 0
+            if count == 1 { return [.restore] }
+            if count == 2 { return [.restoreInstruments] }
+        }
+        return []
+    }
+
+    mutating func up(at time: Double) -> [Effect] {
+        guard downAt != nil else { return [] }
+        let effects = tick(at: time)
+        downAt = nil
+        guard !held else { prefix = 0; return effects }
+        pendingCount = prefix + 1
+        prefix = 0
+        if pendingCount == 3 {
+            pendingCount = 0
+            return effects + [.restoreScene]
+        }
+        lastUp = time
+        return effects
+    }
+
+    mutating func cancel() { self = Self() }
+}
+
 struct PianoRollViewport: Equatable {
     static let minimumBeatWidth = 24.0
     static let maximumBeatWidth = 480.0
@@ -1235,12 +1363,14 @@ struct SequencerCellSnapshot {
     var cell: PatternCell
     var pattern: SequencerPattern?
     var pianoHistory: PianoRollEditBuffer?
+    var patternDefault: SequencerPattern? = nil
 }
 
 struct SequencerHistoryEntry {
     var before: [SequencerCellSnapshot]
     var after: [SequencerCellSnapshot]
     var title = "Pattern edit"
+    var changesPatternDefaults = false
 }
 
 struct HistoryJump {

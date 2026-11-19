@@ -364,13 +364,24 @@ extension OberVaveModel {
                     if !transfer.deleting && destinationUnchanged {
                         pianoRollHistories[transfer.destination.id] = sourceHistory?.retargeted(to: transfer.destination)
                     }
+                    if sourceUnchanged && destinationUnchanged {
+                        do {
+                            var updated = patternDefaults
+                            try updated.transfer(scene: sceneSessionKey,
+                                source: PatternCell(slot: transfer.source.slot, row: transfer.source.row),
+                                destination: transfer.destination, copying: transfer.copying, deleting: transfer.deleting)
+                            _ = persistPatternDefaults(updated)
+                        } catch {
+                            errorMessage = "Could not move pattern defaults: \(error.localizedDescription)"
+                        }
+                    }
                     patterns = transfer.acknowledged(in: patterns,
                         sourceUnchanged: sourceUnchanged, destinationUnchanged: destinationUnchanged)
                     if sourceUnchanged && destinationUnchanged {
                         let action = transfer.deleting ? "Delete" : transfer.copying ? "Copy" : "Move"
                         sequencerHistory.record(SequencerHistoryEntry(before: pending.before,
                             after: pending.before.map { sequencerSnapshot($0.cell) },
-                            title: "\(action) · \(transfer.source.name)"))
+                            title: "\(action) · \(transfer.source.name)", changesPatternDefaults: true))
                     } else {
                         errorMessage = "The pattern edit was superseded before its history could be saved."
                     }
@@ -386,6 +397,17 @@ extension OberVaveModel {
                     ov_seq_cell_revision(UInt32(snapshot.cell.slot), UInt32(snapshot.cell.row)) == revisions[index]
                 }
                 if editResult.success != 0 && pending.epoch == ov_seq_scene_epoch() && unchanged {
+                    if pending.entry.changesPatternDefaults {
+                        do {
+                            var updated = patternDefaults
+                            for snapshot in target {
+                                try updated.set(snapshot.patternDefault, scene: sceneSessionKey, cell: snapshot.cell)
+                            }
+                            _ = persistPatternDefaults(updated)
+                        } catch {
+                            errorMessage = "Could not restore pattern defaults: \(error.localizedDescription)"
+                        }
+                    }
                     for snapshot in target {
                         patterns.removeAll { $0.id == snapshot.cell.id }
                         if let pattern = snapshot.pattern { patterns.append(pattern) }
@@ -655,6 +677,14 @@ extension OberVaveModel {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let url = try pendingSceneURL ?? scenesFolder().appendingPathComponent("\(UUID().uuidString).obscene.json")
+            let newKey = url.standardizedFileURL.absoluteString
+            if newKey != sceneSessionKey {
+                var updated = patternDefaults
+                try updated.copyScene(from: sceneSessionKey, to: newKey)
+                guard persistPatternDefaults(updated) else {
+                    throw SceneError.invalid("Could not save the scene's pattern defaults.")
+                }
+            }
             try encoder.encode(document).write(to: url, options: .atomic)
             if pendingSceneURL == nil, sceneFileURL != nil {
                 var previous = currentSceneSession()
@@ -816,15 +846,18 @@ extension OberVaveModel {
     private func sequencerSnapshot(_ cell: PatternCell) -> SequencerCellSnapshot {
         let current = pattern(slot: cell.slot, row: cell.row)
         return SequencerCellSnapshot(cell: cell, pattern: current,
-            pianoHistory: pianoRollHistories[cell.id].flatMap { $0.pattern == current ? $0 : nil })
+            pianoHistory: pianoRollHistories[cell.id].flatMap { $0.pattern == current ? $0 : nil },
+            patternDefault: patternDefaults.value(scene: sceneSessionKey, cell: cell))
     }
 
     func applySequencerHistory(undo: Bool) {
         guard var entry = sequencerHistory.next(undo: undo) else { return }
         let expected = undo ? entry.after : entry.before
         let live = expected.map { sequencerSnapshot($0.cell) }
-        guard zip(expected, live).allSatisfy({ $0.pattern == $1.pattern }) else {
-            errorMessage = "The pattern has changed in Piano Roll or another operation. Restore it before using sequencer history."
+        guard zip(expected, live).allSatisfy({
+            $0.pattern == $1.pattern && (!entry.changesPatternDefaults || $0.patternDefault == $1.patternDefault)
+        }) else {
+            errorMessage = "The pattern or its default has changed. Restore it before using sequencer history."
             return
         }
         if undo { entry.after = live } else { entry.before = live }
@@ -895,7 +928,8 @@ extension OberVaveModel {
                 throw SceneError.invalid("This pattern changed while the editor was open. Reopen it before saving.")
             }
             if before.pattern == pattern { return true }
-            let after = SequencerCellSnapshot(cell: cell, pattern: pattern, pianoHistory: nil)
+            let after = SequencerCellSnapshot(cell: cell, pattern: pattern, pianoHistory: nil,
+                                              patternDefault: before.patternDefault)
             submitSequencerHistory(SequencerHistoryEntry(before: [before], after: [after],
                                                         title: "Edit · \(pattern.name)"),
                                    undo: false, recordingNewEntry: true)
