@@ -126,6 +126,7 @@ struct PianoRollView: View {
     private func publish(_ candidate: PianoRollEditBuffer, replacing previous: PianoRollEditBuffer) {
         guard candidate.pattern != previous.pattern else { editor = candidate; return }
         guard !busy, model.pattern(slot: pattern.slot, row: pattern.row) == previous.pattern else {
+            editor = previous
             model.errorMessage = "The pattern changed while editing. Reopen the Piano Roll."
             return
         }
@@ -135,6 +136,8 @@ struct PianoRollView: View {
                                      epoch: epoch, revision: revision) {
             beforePublication = previous
             editor = candidate
+        } else {
+            editor = previous
         }
     }
 
@@ -176,8 +179,10 @@ struct PianoRollView: View {
                 do {
                     switch hit.zone {
                     case .body:
-                        try preview.move(ticks: snapped(viewport.tick(at: Double(point.x))) -
-                                         snapped(viewport.tick(at: Double(active.start.x))),
+                        guard let start = preview.pattern.notes.first(where: { $0.id == hit.id })?.start else {
+                            throw SceneError.invalid("The selected note no longer exists.")
+                        }
+                        try preview.move(ticks: snapped(Double(start) + Double(dx) * 960 / viewport.beatWidth) - start,
                                          semitones: Int((-dy / viewport.pitchHeight).rounded()), copying: active.copy)
                     case .velocity: try preview.changeVelocity(by: Int((-dy / 2).rounded()))
                     case .duration: try preview.changeDuration(by: snapped(Double(dx) * 960 / viewport.beatWidth))
@@ -212,9 +217,9 @@ struct PianoRollView: View {
                 } else if active.hit == nil {
                     command { buffer in
                         let start = snapped(viewport.tick(at: Double(point.x)))
-                        let pitch = Int(viewport.pitch(at: Double(point.y)).rounded(.down))
+                        let pitch = PianoRollNoteHit.pitch(y: Double(point.y), viewport: viewport)
                         try buffer.create(start: start, pitch: pitch, duration: snap == 0 ? 240 : snap,
-                                          velocity: 100, output: true)
+                                          velocity: 100, output: model.recordOutput)
                     }
                 }
                 lastTap = nil

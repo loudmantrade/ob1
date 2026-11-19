@@ -245,6 +245,7 @@ struct SceneChecks {
         let hitViewport = PianoRollViewport()
         let noteRect = PianoRollNoteHit.rectangle(editPattern.notes[1], viewport: hitViewport)
         let y = noteRect.midY
+        precondition(PianoRollNoteHit.pitch(y: y, viewport: hitViewport) == 64)
         precondition(PianoRollNoteHit.hit(point: .init(x: noteRect.minX + 1, y: y),
             notes: editPattern.notes, viewport: hitViewport)?.zone == .velocity)
         precondition(PianoRollNoteHit.hit(point: .init(x: noteRect.midX, y: y),
