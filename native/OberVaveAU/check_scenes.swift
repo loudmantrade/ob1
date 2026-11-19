@@ -164,6 +164,24 @@ struct SceneChecks {
         try removed.validate()
         let instrumentRemoval = SceneRestoreEdit(before: application, after: removed, restoresDevice: false,
                                                  title: "Remove instrument")
+        var removedWithDevice = removed
+        removedWithDevice.device.sustainInverted = true
+        let deviceUndoWithRemovedInstrument = try deviceEdit.applying(to: removedWithDevice, undo: true)
+        precondition(deviceUndoWithRemovedInstrument == removed)
+        var replacedInstrument = deviceAfter
+        replacedInstrument.scene.instruments[0].defaultIdentity = UUID()
+        let deviceUndoWithReplacement = try deviceEdit.applying(to: replacedInstrument, undo: true)
+        precondition(deviceUndoWithReplacement.scene.instruments == replacedInstrument.scene.instruments &&
+                     deviceUndoWithReplacement.device == application.device)
+        var changedPatternTarget = application
+        changedPatternTarget.scene.patterns?[0].name = "Changed pattern"
+        let patternEdit = SceneRestoreEdit(before: application, after: changedPatternTarget, restoresDevice: false)
+        var replacedPatternOwner = changedPatternTarget
+        replacedPatternOwner.scene.instruments[0].defaultIdentity = UUID()
+        do {
+            _ = try patternEdit.applying(to: replacedPatternOwner, undo: true)
+            fatalError("Scene restore history modified a replacement instrument's pattern")
+        } catch { }
         let undoneRemoval = try instrumentRemoval.applying(to: removed, undo: true)
         precondition(undoneRemoval == application)
         let redoneRemoval = try instrumentRemoval.applying(to: undoneRemoval, undo: false)

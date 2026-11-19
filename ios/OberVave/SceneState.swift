@@ -729,8 +729,20 @@ struct SceneRestoreEdit: Equatable {
         var columns = Dictionary(uniqueKeysWithValues: current.sequencer.columns.map { ($0.slot, $0) })
         let oldColumns = Dictionary(uniqueKeysWithValues: expected.sequencer.columns.map { ($0.slot, $0) })
         let newColumns = Dictionary(uniqueKeysWithValues: replacement.sequencer.columns.map { ($0.slot, $0) })
+        guard let oldPatterns = expected.scene.patterns, let newPatterns = replacement.scene.patterns,
+              let currentPatterns = current.scene.patterns else {
+            throw SceneError.invalid("A scene restore history snapshot is missing patterns.")
+        }
+        let oldCells = Dictionary(uniqueKeysWithValues: oldPatterns.map { ($0.id, $0) })
+        let newCells = Dictionary(uniqueKeysWithValues: newPatterns.map { ($0.id, $0) })
+        let changedPatternSlots = Set(Set(oldCells.keys).union(newCells.keys).compactMap { id in
+            oldCells[id] != newCells[id] ? id / 8 : nil
+        })
         for slot in 0..<16 {
             let old = oldInstruments[slot], new = newInstruments[slot]
+            if old == new && oldColumns[slot] == newColumns[slot] && !changedPatternSlots.contains(slot) {
+                continue
+            }
             let structural = old == nil || new == nil ||
                 old?.defaultIdentity != new?.defaultIdentity || old?.engine != new?.engine
             if structural {
@@ -774,12 +786,6 @@ struct SceneRestoreEdit: Equatable {
             instruments[slot] = value
             columns[slot] = column
         }
-        guard let oldPatterns = expected.scene.patterns, let newPatterns = replacement.scene.patterns,
-              let currentPatterns = current.scene.patterns else {
-            throw SceneError.invalid("A scene restore history snapshot is missing patterns.")
-        }
-        let oldCells = Dictionary(uniqueKeysWithValues: oldPatterns.map { ($0.id, $0) })
-        let newCells = Dictionary(uniqueKeysWithValues: newPatterns.map { ($0.id, $0) })
         var cells = Dictionary(uniqueKeysWithValues: currentPatterns.map { ($0.id, $0) })
         for id in Set(oldCells.keys).union(newCells.keys) {
             if oldCells[id] != newCells[id] {
