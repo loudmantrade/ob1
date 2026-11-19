@@ -307,9 +307,11 @@ recorded note timings. Selected-note and end quantization are not yet exposed.
 
 The editor remains incomplete. Controller automation requires bounded,
 versioned events with backward-compatible decoding and audio scheduling.
-Independent loop/tail markers require a versioned migration preserving old
-loop behavior, plus iteration-specific note release and real-time capacity
-tests; the existing v2 `length`/`intro` model cannot represent those semantics.
+The portable player now supports an opt-in region mode with a distinct loop
+start/end and tail endpoint; it tracks releases per iteration and suppresses
+note starts in the tail. Existing clips stay in legacy mode, preserving their
+unbounded releases. This mode is not yet connected to scene serialization or
+the editor; the v2 `length`/`intro` format cannot represent it.
 Acceptance requires portable timing/ownership and scene-migration regressions,
 the existing sequencer and AU suites, a signed iPad build, and the physical
 iPad gesture/audio checklist from the implementation specification.

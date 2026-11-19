@@ -117,6 +117,50 @@ static Event note(Kind kind, uint8_t pitch = 60, uint32_t source = 1)
     return event;
 }
 
+static void checkRegionTails()
+{
+    auto data = std::make_unique<PatternData>();
+    data->id = 1; data->length = 1440; data->regionsEnabled = true;
+    data->loopStart = 240; data->loopEnd = 960; data->loop = true;
+    std::copy_n("Regions", 8, data->name.begin());
+    data->count = 3; data->nextNote = 4;
+    data->notes[0] = {1, 0, 100, {Target::Instruments, 1, Stage::Output}, 0, 60, 100};
+    data->notes[1] = {2, 720, 2000, {Target::Instruments, 1, Stage::Output}, 0, 64, 100};
+    data->notes[2] = {3, 1000, 100, {Target::Instruments, 1, Stage::Output}, 0, 67, 100};
+    Pattern pattern;
+    assert(pattern.restore(*data) == PatternError::None);
+    auto invalid = *data;
+    invalid.loopStart = invalid.loopEnd;
+    assert(validatePattern(invalid) == PatternError::InvalidLength);
+    ClipPlayer player;
+    std::vector<Event> events;
+    auto sink = [&](const Event& e) { events.push_back(e); return true; };
+    player.queue(0, &pattern, 0, LaunchGrid::Free);
+    for (Tick t = 0; t <= 2200; t += 20) assert(player.process(t * tickUnit, t, 0, 0, sink));
+    std::vector<Event> ons, offs;
+    for (const auto& event : events) {
+        assert(event.data1 != 67);
+        if (event.kind == Kind::NoteOn) ons.push_back(event);
+        else offs.push_back(event);
+    }
+    assert(ons.size() == 4 && ons[0].data1 == 60 &&
+           ons[1].time.tick == 720 && ons[2].time.tick == 1440 && ons[3].time.tick == 2160);
+    assert(offs.size() == 3 && offs[0].data1 == 60 && offs[1].note == ons[1].note &&
+           offs[2].note == ons[2].note);
+    assert(player.stop(2201, sink));
+
+    data->loop = false;
+    assert(pattern.restore(*data) == PatternError::None);
+    events.clear(); player.queue(0, &pattern, 0, LaunchGrid::Free);
+    assert(player.process(0, 1, 0, 0, sink));
+    assert(player.process(720 * tickUnit, 2, 0, 0, sink));
+    assert(player.process(1439 * tickUnit, 3, 0, 0, sink) && player.row == 0);
+    assert(player.process(1440 * tickUnit, 4, 0, 0, sink) && player.row == -1);
+    for (const auto& event : events) assert(event.data1 != 67);
+    assert(events.back().kind == Kind::NoteOff && events.back().data1 == 64);
+    std::puts("PASS regions: pre-loop once, exclusive loop end, overlapping same-pitch tails, tail release, one-shot endpoint");
+}
+
 static void checkRecording()
 {
     auto recorder = std::make_unique<ClipRecorder>();
@@ -328,5 +372,5 @@ static void checkRecordingClicks()
 
 int main()
 {
-    checkPosition(); checkPlayback(); checkRecording(); checkRecordModes(); checkBarCompletion(); checkRecordingClicks();
+    checkPosition(); checkPlayback(); checkRegionTails(); checkRecording(); checkRecordModes(); checkBarCompletion(); checkRecordingClicks();
 }

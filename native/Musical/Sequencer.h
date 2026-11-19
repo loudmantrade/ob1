@@ -110,14 +110,24 @@ public:
         if (!clip) return true;
         const auto& data = clip->data();
         const auto length = data.length * tickUnit;
+        const auto loopStart = data.regionsEnabled ? data.loopStart * tickUnit : 0;
+        const auto loopEnd = data.regionsEnabled ? data.loopEnd * tickUnit : length;
+        const auto period = loopEnd - loopStart;
         for (uint32_t i = 0; i < data.count; ++i) {
             const auto& note = data.notes[i];
             if (note.start < 0 && (!data.introEnabled || !playIntro_)) continue;
             PatternTiming timing;
             if (clip->timingAt(i, timing) != PatternError::None) return false;
+            if (data.regionsEnabled && (note.start * tickUnit >= loopEnd ||
+                timing.start * tickUnit >= loopEnd)) continue;
             int64_t onset = origin + timing.start * tickUnit;
-            if (note.start >= 0 && data.loop && onset <= previous)
-                onset += ((previous - onset) / length + 1) * length;
+            const bool repeating = data.loop && (data.regionsEnabled
+                ? timing.start * tickUnit >= loopStart : note.start >= 0);
+            int64_t iteration = 0;
+            if (repeating && onset <= previous) {
+                iteration = (previous - onset) / period + 1;
+                onset += iteration * period;
+            }
             uint32_t emitted = 0;
             while (onset > previous && onset <= now) {
                 if (++emitted > 64 || nextNote_ == UINT64_MAX) return false;
@@ -133,9 +143,13 @@ public:
                 on.routing = {Target::Instruments, uint16_t(1u << slot), note.routing.stage};
                 on.time = {frame, onset / tickUnit, true};
                 if (!sink(on)) return false;
-                *available = {on, onset + timing.duration * tickUnit, true};
-                if (note.start < 0 || !data.loop) break;
-                onset += length;
+                auto off = onset + timing.duration * tickUnit;
+                if (data.regionsEnabled)
+                    off = std::min(off, origin + length + iteration * period);
+                *available = {on, off, true};
+                if (!repeating) break;
+                onset += period;
+                ++iteration;
             }
         }
         previous = now;
