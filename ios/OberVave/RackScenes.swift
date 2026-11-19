@@ -2679,13 +2679,6 @@ struct RackSceneView: View {
                                     Text("CH \(instrument.channel)  |  \(rackNoteName(instrument.lowNote)) - \(rackNoteName(instrument.highNote))\(instrument.muted ? "  |  MUTE" : "")")
                                         .font(.caption.monospaced()).foregroundStyle(.secondary)
                                 }
-                                Section("Application default") {
-                                    Button("Save Application Default") { confirmsApplicationDefault = true }
-                                    Button("Restore Application Default") { confirmsApplicationRestore = true }
-                                        .disabled(model.applicationDefault == nil)
-                                    Text("Saves the current scene, patterns, sequencer and device settings without changing scene or preset libraries.")
-                                        .font(.footnote).foregroundStyle(.secondary)
-                                }
                             }
                             .buttonStyle(.plain)
                             Spacer()
@@ -2702,6 +2695,13 @@ struct RackSceneView: View {
                     } label: { Label("Add Instrument", systemImage: "plus.circle.fill") }
                         .disabled(model.instruments.count >= 16)
                     Text("128 voices with effects can exceed this iPad's CPU. Add only the instances you need. Mute silences a mixer strip; it does not unload the engine.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("Application default") {
+                    Button("Save Application Default") { confirmsApplicationDefault = true }
+                    Button("Restore Application Default") { confirmsApplicationRestore = true }
+                        .disabled(model.applicationDefault == nil)
+                    Text("Saves the current scene, patterns, sequencer and device settings without changing scene or preset libraries.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Saved Scenes") {
