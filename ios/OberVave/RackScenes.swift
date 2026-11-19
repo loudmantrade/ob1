@@ -213,10 +213,9 @@ extension OberVaveModel {
             errorMessage = "Finish the current parameter edit before using history."; return
         }
         guard let entry = undo ? sceneParameterHistory.undoStack.last : sceneParameterHistory.redoStack.last else { return }
-        if case .sound(let before, let after) = entry {
-            let expected = undo ? after : before
-            let target = undo ? before : after
-            submitSoundChange(expected: expected, target: target, undo: undo, recording: false)
+        if case .sounds(let sounds) = entry {
+            submitSoundChanges(sounds.map { undo ? SceneSoundEdit(before: $0.after, after: $0.before) : $0 },
+                               undo: undo, recording: false)
             return
         }
         if case .route(let edit) = entry {
@@ -283,23 +282,36 @@ extension OberVaveModel {
     }
 
     func submitSoundChange(expected: RackInstrument, target: RackInstrument, undo: Bool, recording: Bool) {
+        submitSoundChanges([SceneSoundEdit(before: expected, after: target)], undo: undo, recording: recording)
+    }
+
+    func submitSoundChanges(_ sounds: [SceneSoundEdit], undo: Bool, recording: Bool) {
         guard pendingSceneParameterHistory == nil, !sceneSwitchPending,
-              expected.slot == target.slot,
-              let current = instruments.first(where: { $0.slot == expected.slot }),
-              current.programIndex == expected.programIndex,
-              current.arpMode == expected.arpMode, current.latchMode == expected.latchMode else {
+              !sounds.isEmpty, Set(sounds.map { $0.before.slot }).count == sounds.count,
+              sounds.allSatisfy({ sound in
+                  guard sound.before.slot == sound.after.slot,
+                        let current = instruments.first(where: { $0.slot == sound.before.slot }) else { return false }
+                  return current.programIndex == sound.before.programIndex &&
+                      current.arpMode == sound.before.arpMode && current.latchMode == sound.before.latchMode
+              }) else {
             errorMessage = "The instrument changed; sound was not restored."
             return
         }
-        var old = expected.coreConfig(), replacement = target.coreConfig()
+        let changes = sounds.map {
+            ov_rack_sound_change(slot: UInt32($0.before.slot),
+                                 expected: $0.before.coreConfig(), replacement: $0.after.coreConfig())
+        }
         let epoch = ov_seq_scene_epoch()
         sceneParameterToken &+= 1
-        guard ov_rack_change_sound(UInt32(expected.slot), &old, &replacement, epoch, sceneParameterToken) != 0 else {
+        let queued = changes.withUnsafeBufferPointer {
+            ov_rack_change_sounds($0.baseAddress, UInt32($0.count), epoch, sceneParameterToken)
+        }
+        guard queued != 0 else {
             errorMessage = "Could not queue the sound restore."
             return
         }
         pendingSceneParameterHistory = PendingSceneParameterHistory(token: sceneParameterToken,
-            epoch: epoch, edits: [], undo: undo, sound: (expected, target), recordingSound: recording)
+            epoch: epoch, edits: [], undo: undo, sounds: sounds, recordingSound: recording)
     }
 
     var newInstrumentDraft: RackInstrument? {
@@ -330,15 +342,15 @@ extension OberVaveModel {
                     }
                 } else {
                     sequencerHistoryJump = nil
-                    errorMessage = "The sequencer settings changed; the default was not applied."
+                    errorMessage = "The sequencer settings changed; the requested edit was not applied."
                 }
                 continue
             }
             if let pending = pendingSceneParameterHistory, pending.token == parameterResult.token {
                 pendingSceneParameterHistory = nil
                 if parameterResult.success != 0 && pending.epoch == ov_seq_scene_epoch() {
-                    if let sound = pending.sound, pending.recordingSound {
-                        sceneParameterHistory.recordSound(before: sound.before, after: sound.after)
+                    if let sounds = pending.sounds, pending.recordingSound {
+                        sceneParameterHistory.recordSounds(sounds)
                     } else {
                         sceneParameterHistory.acknowledge(undo: pending.undo)
                     }
@@ -346,8 +358,8 @@ extension OberVaveModel {
                        let index = instruments.firstIndex(where: { $0.slot == route.before.slot }) {
                         route.apply(to: &instruments[index], undo: pending.undo)
                     }
-                    if let sound = pending.sound,
-                       let index = instruments.firstIndex(where: { $0.slot == sound.after.slot }) {
+                    for sound in pending.sounds ?? [] {
+                        guard let index = instruments.firstIndex(where: { $0.slot == sound.after.slot }) else { continue }
                         instruments[index].parameters = sound.after.parameters
                         instruments[index].cc = sound.after.cc
                         instruments[index].arpMode = sound.after.arpMode
@@ -453,9 +465,8 @@ extension OberVaveModel {
                 pendingSequencerHistory = nil
                 let expected = pending.undo ? pending.entry.after : pending.entry.before
                 let target = pending.undo ? pending.entry.before : pending.entry.after
-                let revisions = [editResult.source_revision, editResult.target_revision]
                 let unchanged = expected.enumerated().allSatisfy { index, snapshot in
-                    ov_seq_cell_revision(UInt32(snapshot.cell.slot), UInt32(snapshot.cell.row)) == revisions[index]
+                    ov_seq_cell_revision(UInt32(snapshot.cell.slot), UInt32(snapshot.cell.row)) == pending.revisions[index] &+ 1
                 }
                 if editResult.success != 0 && pending.epoch == ov_seq_scene_epoch() && unchanged {
                     if pending.entry.changesPatternDefaults {
@@ -597,7 +608,11 @@ extension OberVaveModel {
 
     @discardableResult
     func addInstrument(_ instrument: RackInstrument) -> Bool {
-        guard pendingSceneName == nil else { return false }
+        guard pendingSceneName == nil, !sceneSwitchPending, pendingSequencerSettings == nil,
+              activeMixerGestures.isEmpty else {
+            errorMessage = "Finish the pending scene or sequencer edit before adding an instrument."
+            return false
+        }
         do {
             try instrument.validate()
             guard instruments.count < 16, !instruments.contains(where: { $0.slot == instrument.slot }) else {
@@ -617,7 +632,10 @@ extension OberVaveModel {
     }
 
     func configureInstrument(_ instrument: RackInstrument, recordHistory: Bool = true) -> Bool {
-        guard pendingSceneName == nil, pendingSceneParameterHistory == nil else { return false }
+        guard pendingSceneName == nil, pendingSceneParameterHistory == nil, pendingSequencerSettings == nil else {
+            errorMessage = "Wait for the pending scene or sequencer edit."
+            return false
+        }
         do {
             try instrument.validate()
             guard let index = instruments.firstIndex(where: { $0.slot == instrument.slot }) else {
@@ -643,7 +661,10 @@ extension OberVaveModel {
     }
 
     func removeInstrument(_ slot: Int) {
-        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil else { errorMessage = "Wait for the pending pattern edit."; return }
+        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
+              pendingSequencerSettings == nil, activeMixerGestures.isEmpty else {
+            errorMessage = "Finish the pending sequencer edit."; return
+        }
         guard recordingPattern == nil else { errorMessage = "Finish recording before removing an instrument."; return }
         guard pendingSceneName == nil, ov_rack_remove(UInt32(slot)) != 0 else { return }
         instruments.removeAll { $0.slot == slot }
@@ -690,7 +711,10 @@ extension OberVaveModel {
 
     func saveScene(name: String, asNew: Bool = false) {
         syncRackState()
-        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil else { errorMessage = "Wait for the pending pattern edit."; return }
+        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
+              pendingSequencerSettings == nil, activeMixerGestures.isEmpty else {
+            errorMessage = "Finish the pending sequencer edit."; return
+        }
         guard recordingPattern == nil else {
             errorMessage = "Finish pattern recording before saving the scene."; return
         }
@@ -828,7 +852,8 @@ extension OberVaveModel {
             syncExternalParameterHistory(finish: true)
             guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
                   pendingSequencerSettings == nil,
-                  pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty, activeSceneValueEdits.isEmpty, recordingPattern == nil,
+                  pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty, activeSceneValueEdits.isEmpty,
+                  activeMixerGestures.isEmpty, recordingPattern == nil,
                   ov_seq_record_state() == 0, pendingSceneName == nil, !sceneSwitchPending else {
                 throw SceneError.invalid("Finish recording and pending pattern edits before loading a scene.")
             }
@@ -945,10 +970,17 @@ extension OberVaveModel {
     }
 
     func applySequencerHistory(undo: Bool) {
+        guard activeMixerGestures.isEmpty else {
+            errorMessage = "Finish the mixer gesture before using history."
+            return
+        }
         guard var entry = sequencerHistory.next(undo: undo) else { return }
         if let edit = entry.settings {
-            submitSequencerSettings(entry: entry, expected: undo ? edit.after : edit.before,
-                                    target: undo ? edit.before : edit.after, undo: undo, recording: false)
+            let current = currentSequencerSettings()
+            do {
+                let target = try edit.applying(to: current, undo: undo)
+                submitSequencerSettings(entry: entry, expected: current, target: target, undo: undo, recording: false)
+            } catch { errorMessage = error.localizedDescription }
             return
         }
         let expected = undo ? entry.after : entry.before
@@ -976,7 +1008,7 @@ extension OberVaveModel {
         func saveSequencerDefault() {
             guard !sceneSwitchPending, pendingSceneName == nil, pendingSequencerHistory == nil,
                   pendingSequencerSettings == nil, pendingPatternTransfer == nil,
-                  pendingPianoPublication == nil, ov_seq_record_state() == 0 else {
+                  pendingPianoPublication == nil, activeMixerGestures.isEmpty, ov_seq_record_state() == 0 else {
                 errorMessage = "Finish recording and pending edits before saving the sequencer default."
                 return
             }
@@ -998,11 +1030,13 @@ extension OberVaveModel {
         }
 
         private func submitSequencerSettings(entry: SequencerHistoryEntry, expected: SequencerDefault,
-                                             target: SequencerDefault, undo: Bool, recording: Bool) {
+                                             target: SequencerDefault, undo: Bool, recording: Bool,
+                                             allowActiveRecording: Bool = false) {
             guard pendingSceneName == nil, !sceneSwitchPending, pendingPatternTransfer == nil,
                   pendingPianoPublication == nil, pendingSequencerHistory == nil,
                   pendingSequencerSettings == nil, pendingSceneParameterHistory == nil,
-                  ov_seq_record_state() == 0, currentSequencerSettings() == expected,
+                  activeMixerGestures.isEmpty,
+                  (allowActiveRecording || ov_seq_record_state() == 0), currentSequencerSettings() == expected,
                   expected.columns.map(\.slot) == target.columns.map(\.slot) else {
                 errorMessage = "Finish pending edits and ensure the sequencer instruments have not changed."
                 return
@@ -1010,7 +1044,9 @@ extension OberVaveModel {
             do { try target.validate() }
             catch { errorMessage = error.localizedDescription; return }
             guard expected != target else { return }
-            let changes = zip(expected.columns, target.columns).map { old, new in
+            let changes = zip(expected.columns, target.columns).filter { old, new in
+                old.level != new.level || old.pan != new.pan || old.muted != new.muted || old.solo != new.solo
+            }.map { old, new in
                 ov_rack_mixer_change(slot: UInt32(old.slot), expected_level: Float(old.level),
                     expected_pan: Float(old.pan), replacement_level: Float(new.level), replacement_pan: Float(new.pan),
                     expected_mute: old.muted ? 1 : 0, replacement_mute: new.muted ? 1 : 0,
@@ -1048,13 +1084,14 @@ extension OberVaveModel {
         }
     private func submitSequencerHistory(_ entry: SequencerHistoryEntry, undo: Bool, recordingNewEntry: Bool) {
         guard pendingSceneName == nil, !sceneSwitchPending, pendingPatternTransfer == nil,
-              pendingPianoPublication == nil, pendingSequencerHistory == nil, ov_seq_record_state() == 0 else {
+              pendingPianoPublication == nil, pendingSequencerHistory == nil,
+              pendingSequencerSettings == nil, ov_seq_record_state() == 0 else {
             errorMessage = "Finish recording and pending edits before changing sequencer history."
             return
         }
         let expected = undo ? entry.after : entry.before
         let replacement = undo ? entry.before : entry.after
-        guard expected.count == replacement.count, (1...2).contains(expected.count),
+        guard expected.count == replacement.count, (1...128).contains(expected.count),
               zip(expected, replacement).allSatisfy({ $0.cell == $1.cell }),
               expected.allSatisfy({ ov_seq_pad_pending(UInt32($0.cell.slot), UInt32($0.cell.row)) == 0 }) else {
             errorMessage = "The affected pattern cells are busy or invalid."
@@ -1070,11 +1107,14 @@ extension OberVaveModel {
             indices.append((oldIndex, newIndex))
         }
         let epoch = ov_seq_scene_epoch()
+        let revisions = expected.map {
+            ov_seq_cell_revision(UInt32($0.cell.slot), UInt32($0.cell.row))
+        }
         patternTransferToken &+= 1
         let accepted = clips.withUnsafeBufferPointer { buffer in
             let changes = expected.enumerated().map { index, snapshot in
                 ov_seq_cell_change(slot: UInt32(snapshot.cell.slot), row: UInt32(snapshot.cell.row),
-                    revision: ov_seq_cell_revision(UInt32(snapshot.cell.slot), UInt32(snapshot.cell.row)),
+                    revision: revisions[index],
                     expected: indices[index].0.map { buffer.baseAddress!.advanced(by: $0) },
                     replacement: indices[index].1.map { buffer.baseAddress!.advanced(by: $0) })
             }
@@ -1087,13 +1127,13 @@ extension OberVaveModel {
             return
         }
         pendingSequencerHistory = PendingSequencerHistory(token: patternTransferToken, epoch: epoch,
-            entry: entry, undo: undo, recordingNewEntry: recordingNewEntry)
+            entry: entry, revisions: revisions, undo: undo, recordingNewEntry: recordingNewEntry)
     }
 
     @discardableResult
     func storePattern(_ pattern: SequencerPattern, expected: SequencerPattern? = nil) -> Bool {
         guard pendingSceneName == nil, pendingPatternTransfer == nil, pendingPianoPublication == nil,
-              pendingSequencerHistory == nil else {
+              pendingSequencerHistory == nil, pendingSequencerSettings == nil else {
             errorMessage = "Wait for the pending scene or pattern operation."; return false
         }
         guard ov_seq_record_state() == 0 else {
@@ -1123,7 +1163,7 @@ extension OberVaveModel {
     func publishPianoPattern(expected: SequencerPattern, candidate: PianoRollEditBuffer,
                              epoch: UInt64, revision: UInt64) -> Bool {
         guard pendingSceneName == nil, pendingPatternTransfer == nil, pendingPianoPublication == nil,
-              pendingSequencerHistory == nil else {
+              pendingSequencerHistory == nil, pendingSequencerSettings == nil else {
             errorMessage = "Wait for the pending scene or pattern operation."; return false
         }
         do {
@@ -1154,7 +1194,8 @@ extension OberVaveModel {
 
     private func submitPatternTransfer(_ transfer: PatternTransfer) {
         syncRackState()
-        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil, pendingSceneName == nil,
+        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
+              pendingSequencerSettings == nil, pendingSceneName == nil,
               instruments.contains(where: { $0.slot == transfer.destination.slot }),
               recordingPhases[transfer.source.id] == nil && recordingPhases[transfer.destination.id] == nil else {
             errorMessage = "The source or destination is busy recording or editing."; return
@@ -1213,7 +1254,8 @@ extension OberVaveModel {
     }
     func recordPattern(slot: Int, row: Int) {
         syncRackState()
-        guard pendingSequencerHistory == nil, pendingPatternTransfer == nil, pendingPianoPublication == nil else {
+        guard pendingSequencerHistory == nil, pendingSequencerSettings == nil,
+              pendingPatternTransfer == nil, pendingPianoPublication == nil else {
             errorMessage = "Wait for the pending pattern edit."; return
         }
         guard ov_seq_record_state_for_slot(UInt32(slot)) == 0 else {
@@ -1231,7 +1273,8 @@ extension OberVaveModel {
         if ov_seq_finish_record() == 0 { errorMessage = "Could not finish recording.";  }
     }
     func tapPattern(slot: Int, row: Int) {
-        guard pendingSequencerHistory == nil, pendingPatternTransfer == nil, pendingPianoPublication == nil else {
+        guard pendingSequencerHistory == nil, pendingSequencerSettings == nil,
+              pendingPatternTransfer == nil, pendingPianoPublication == nil else {
             errorMessage = "Wait for the pending pattern edit."; return
         }
         guard let instrument = instruments.first(where: { $0.slot == slot }) else {
@@ -1258,28 +1301,95 @@ extension OberVaveModel {
         }
     }
     func setRecordLength(slot: Int, bars: Int) {
-        guard (0...64).contains(bars), let index = instruments.firstIndex(where: { $0.slot == slot }) else {
+        guard (0...64).contains(bars), var instrument = instruments.first(where: { $0.slot == slot }) else {
             errorMessage = "Invalid recording length."; return
         }
-        instruments[index].setRecordBars(bars)
+        instrument.setRecordBars(bars)
+        changeSequencerOptions(title: "Recording length") { settings in
+            if let index = settings.columns.firstIndex(where: { $0.slot == slot }) {
+                settings.columns[index].recordBeats = instrument.recordBeats
+            }
+        }
+    }
+
+    func changeSequencerOptions(title: String, change: (inout SequencerDefault) -> Void) {
+        guard !sceneSwitchPending, pendingSceneName == nil, pendingSequencerSettings == nil,
+              pendingSequencerHistory == nil, pendingSceneParameterHistory == nil,
+              pendingPatternTransfer == nil, pendingPianoPublication == nil,
+              sequencerHistoryJump == nil, activeMixerGestures.isEmpty else {
+            errorMessage = "Finish pending edits before changing sequencer settings."
+            return
+        }
+        let before = currentSequencerSettings()
+        var after = before
+        change(&after)
+        do { try after.validate() }
+        catch { errorMessage = error.localizedDescription; return }
+        guard before != after else { return }
+        applySequencerSettingsLocally(after)
+        sequencerHistory.record(SequencerHistoryEntry(before: [], after: [], title: title,
+            settings: SequencerSettingsEdit(before: before, after: after)))
     }
     func stopColumn(_ slot: Int, arp: Bool) {
         if ov_seq_stop(UInt32(slot), arp ? 1 : 0) == 0 { errorMessage = "Could not stop the instrument.";  }
     }
     func soloColumn(_ slot: Int) {
-        let enabled = !soloSlots.contains(slot)
-        if ov_seq_solo(UInt32(slot), enabled ? 1 : 0) != 0 {
-            if enabled { soloSlots.insert(slot) } else { soloSlots.remove(slot) }
-        } else {
-            errorMessage = "Could not change Solo.";
+        changeMixerSwitch(slot, solo: !soloSlots.contains(slot))
+    }
+
+    func changeMixerSwitch(_ slot: Int, mute: Bool? = nil, solo: Bool? = nil) {
+        guard activeMixerGestures.isEmpty else {
+            errorMessage = "Finish the mixer gesture before changing mute or solo."
+            return
         }
+        let before = currentSequencerSettings()
+        var after = before
+        guard let index = after.columns.firstIndex(where: { $0.slot == slot }) else {
+            errorMessage = "Could not find instrument."
+            return
+        }
+        if let mute { after.columns[index].muted = mute }
+        if let solo { after.columns[index].solo = solo }
+        let title = mute != nil ? "Mixer mute" : "Mixer solo"
+        let entry = SequencerHistoryEntry(before: [], after: [], title: title,
+            settings: SequencerSettingsEdit(before: before, after: after))
+        submitSequencerSettings(entry: entry, expected: before, target: after, undo: false,
+                                recording: true, allowActiveRecording: true)
     }
     func mixColumn(_ slot: Int, level: Double? = nil, pan: Double? = nil, mute: Bool? = nil) {
         guard var instrument = instruments.first(where: { $0.slot == slot }) else { return }
+        let field: SequencerMixerField? = level != nil ? .level : pan != nil ? .pan : nil
+        let gesture = field.map { SequencerMixerGesture(slot: slot, field: $0) }
+        let standalone = gesture.map { activeMixerGestures[$0] == nil } ?? false
+        if let gesture, standalone { beginMixerGesture(gesture) }
         if let level { instrument.levelDB = level }
         if let pan { instrument.pan = pan }
         if let mute { instrument.muted = mute }
         _ = configureInstrument(instrument, recordHistory: false)
+        if let gesture, standalone { finishMixerGesture(gesture) }
+    }
+
+    func beginMixerGesture(_ gesture: SequencerMixerGesture) {
+        guard activeMixerGestures[gesture] == nil,
+              !sceneSwitchPending, pendingSceneName == nil, pendingSequencerSettings == nil,
+              instruments.contains(where: { $0.slot == gesture.slot }) else { return }
+        activeMixerGestures[gesture] = currentSequencerSettings()
+    }
+
+    func finishMixerGesture(_ gesture: SequencerMixerGesture) {
+        guard let before = activeMixerGestures.removeValue(forKey: gesture) else { return }
+        do {
+            let edit = try SequencerSettingsEdit.mixerGesture(gesture, before: before,
+                                                             current: currentSequencerSettings())
+            let title = gesture.field == .level ? "Mixer level" : "Mixer pan"
+            sequencerHistory.record(SequencerHistoryEntry(before: [], after: [], title: title, settings: edit))
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func finishMixerGestures() {
+        for gesture in Array(activeMixerGestures.keys) { finishMixerGesture(gesture) }
     }
 }
 
@@ -1301,18 +1411,27 @@ struct SequencerRecordModeControl: View {
         .popover(isPresented: $showsModes, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Record mode").font(.headline)
-                Picker("Start", selection: $model.recordMode) {
+                Picker("Start", selection: Binding(
+                    get: { model.recordMode },
+                    set: { value in model.changeSequencerOptions(title: "Recording mode") { $0.recordMode = value.rawValue } }
+                )) {
                     ForEach(SequencerRecordMode.allCases, id: \.rawValue) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }.pickerStyle(.segmented)
                 if model.recordMode == .countIn {
-                    Picker("Count-in", selection: $model.recordCountBars) {
+                    Picker("Count-in", selection: Binding(
+                        get: { model.recordCountBars },
+                        set: { value in model.changeSequencerOptions(title: "Count-in") { $0.countBars = value } }
+                    )) {
                         Text("1 bar · 4 ticks").tag(1)
                         Text("2 bars · 8 ticks").tag(2)
                     }.pickerStyle(.segmented)
                 }
-                Picker("Capture", selection: $model.recordOutput) {
+                Picker("Capture", selection: Binding(
+                    get: { model.recordOutput },
+                    set: { value in model.changeSequencerOptions(title: "Recording input") { $0.recordOutput = value } }
+                )) {
                     Text("Output · after ARP").tag(true)
                     Text("Input · before ARP").tag(false)
                 }.pickerStyle(.segmented)
@@ -1470,7 +1589,7 @@ struct SequencerView: View {
         model.pendingSequencerHistory != nil || model.pendingSequencerSettings != nil ||
             model.sequencerHistoryJump != nil || model.pendingPatternTransfer != nil ||
             model.pendingPianoPublication != nil || model.pendingSceneName != nil ||
-            model.sceneSwitchPending || !model.recordingPhases.isEmpty
+            model.sceneSwitchPending || !model.recordingPhases.isEmpty || !model.activeMixerGestures.isEmpty
     }
 
     @ViewBuilder
@@ -1487,7 +1606,10 @@ struct SequencerView: View {
     var body: some View {
         VStack(spacing: 8) {
             HStack {
-                Picker("Launch", selection: $model.launchGrid) {
+                Picker("Launch", selection: Binding(
+                    get: { model.launchGrid },
+                    set: { value in model.changeSequencerOptions(title: "Launch grid") { $0.launchGrid = value } }
+                )) {
                     Text("FREE").tag(0); Text("BEAT").tag(1); Text("BAR").tag(2)
                 }
                 .pickerStyle(.segmented).frame(maxWidth: 290)
@@ -1501,7 +1623,8 @@ struct SequencerView: View {
                 }
                 .disabled(model.sequencerHistory.redoStack.isEmpty || historyBusy)
                 .contextMenu { sequencerHistoryMenu(undo: false) }
-                PatternDefaultButton(enabled: !historyBusy, subject: "Sequencer") { save in
+                PatternDefaultButton(enabled: !historyBusy, subject: "Sequencer",
+                                     extendedAction: model.performExtendedDefault) { save in
                     if save { confirmsDefault = true }
                     else { model.restoreSequencerDefault() }
                 }
@@ -1595,7 +1718,7 @@ struct SequencerView: View {
             }
             cancelGesture(); replacement = nil; deleting = nil; pianoRoll = nil; afterMenu = nil; menuPattern = nil
         }
-        .onDisappear { cancelGesture() }
+        .onDisappear { cancelGesture(); model.finishMixerGestures() }
         .confirmationDialog("Save the current sequencer settings as the default?", isPresented: $confirmsDefault) {
             Button("Update Sequencer Default") { model.saveSequencerDefault() }
             Button("Cancel", role: .cancel) {}
@@ -1814,7 +1937,12 @@ struct SequencerView: View {
                     value: Binding(
                         get: {
                             model.instruments.first { $0.slot == instrument.slot }?.levelDB ?? -48
-                        }, set: { model.mixColumn(instrument.slot, level: $0) }), in: -48...0
+                        }, set: { model.mixColumn(instrument.slot, level: $0) }), in: -48...0,
+                    onEditingChanged: { editing in
+                        let gesture = SequencerMixerGesture(slot: instrument.slot, field: .level)
+                        if editing { model.beginMixerGesture(gesture) }
+                        else { model.finishMixerGesture(gesture) }
+                    }
                 )
                 .frame(width: 90).rotationEffect(.degrees(-90)).frame(width: max(20, width - 14), height: 96)
                 .accessibilityLabel("\(instrument.name) volume")
@@ -1827,10 +1955,14 @@ struct SequencerView: View {
                 }.frame(width: 7, height: 90)
             }
             Text("\(Int(instrument.levelDB)) dB").font(.system(size: 9, design: .monospaced))
-            SequencerPanKnob(value: instrument.pan) { model.mixColumn(instrument.slot, pan: $0) }
+            SequencerPanKnob(value: instrument.pan, editing: { editing in
+                let gesture = SequencerMixerGesture(slot: instrument.slot, field: .pan)
+                if editing { model.beginMixerGesture(gesture) }
+                else { model.finishMixerGesture(gesture) }
+            }) { model.mixColumn(instrument.slot, pan: $0) }
                 .accessibilityLabel("\(instrument.name) pan")
             HStack(spacing: 2) {
-                Button("M") { model.mixColumn(instrument.slot, mute: !instrument.muted) }
+                Button("M") { model.changeMixerSwitch(instrument.slot, mute: !instrument.muted) }
                     .frame(maxWidth: .infinity, minHeight: 28)
                     .background(instrument.muted ? Color.orange : Color.gray.opacity(0.25), in: RoundedRectangle(cornerRadius: 4))
                 Button("S") { model.soloColumn(instrument.slot) }
@@ -1852,8 +1984,10 @@ struct SequencerView: View {
 
 private struct SequencerPanKnob: View {
     let value: Double
+    let editing: (Bool) -> Void
     let change: (Double) -> Void
     @State private var origin: Double?
+    @GestureState private var dragging = false
     var body: some View {
         VStack(spacing: 1) {
             ZStack {
@@ -1865,11 +1999,14 @@ private struct SequencerPanKnob: View {
                 .font(.system(size: 8, design: .monospaced))
         }
         .gesture(
-            DragGesture(minimumDistance: 0).onChanged {
-                if origin == nil { origin = value }
+            DragGesture(minimumDistance: 0).updating($dragging) { _, state, _ in state = true }.onChanged {
+                if origin == nil { origin = value; editing(true) }
                 change(min(1, max(-1, (origin ?? value) - Double($0.translation.height) / 70)))
-            }.onEnded { _ in origin = nil }
+            }.onEnded { _ in origin = nil; editing(false) }
         )
+        .onChange(of: dragging) { active in
+            if !active && origin != nil { origin = nil; editing(false) }
+        }
         .onTapGesture(count: 2) { change(0) }
         .accessibilityElement().accessibilityValue("\(Int(value * 100))")
         .accessibilityAdjustableAction { direction in

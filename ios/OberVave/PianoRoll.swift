@@ -93,7 +93,8 @@ struct PianoRollView: View {
                     .contextMenu { historyMenu(undo: true) }
                 Button("Redo") { command { $0.redo() } }.disabled(editor?.canRedo != true || busy)
                     .contextMenu { historyMenu(undo: false) }
-                PatternDefaultButton(enabled: !busy && editor != nil) { save in
+                PatternDefaultButton(enabled: !busy && editor != nil,
+                                     extendedAction: model.performExtendedDefault) { save in
                     if save {
                         confirmsPatternDefault = true
                     } else {
@@ -272,13 +273,18 @@ struct PianoRollView: View {
         }
     }
 
-    private var busy: Bool { model.pendingPianoPublication != nil || beforePublication != nil }
+    private var busy: Bool {
+        model.pendingPianoPublication != nil || beforePublication != nil ||
+            model.sceneSwitchPending || model.pendingSceneParameterHistory != nil ||
+            model.pendingSequencerSettings != nil
+    }
 
     private func savePatternDefault() {
         guard !busy, model.sequencerInteractionEpoch == sceneEpoch,
               let current = editor?.pattern,
               !model.sceneSwitchPending, model.pendingSceneName == nil,
               model.pendingPatternTransfer == nil, model.pendingSequencerHistory == nil,
+              model.pendingSequencerSettings == nil,
               ov_seq_record_state_for_slot(UInt32(current.slot)) == 0,
               ov_seq_pad_pending(UInt32(current.slot), UInt32(current.row)) == 0,
               model.pattern(slot: current.slot, row: current.row) == current else {
@@ -833,6 +839,7 @@ struct PianoRollRegionsSheet: View {
 struct PatternDefaultButton: UIViewRepresentable {
     let enabled: Bool
     var subject = "Pattern"
+    var extendedAction: ((DefaultButtonGesture.Effect) -> Void)? = nil
     let action: (Bool) -> Void
 
     func makeUIView(context: Context) -> PatternDefaultControl {
@@ -842,24 +849,27 @@ struct PatternDefaultButton: UIViewRepresentable {
     func updateUIView(_ control: PatternDefaultControl, context: Context) {
         control.isEnabled = enabled
         control.subject = subject
+        control.extendedAction = extendedAction
         control.action = action
     }
 }
 
 final class PatternDefaultControl: UIButton {
     var action: ((Bool) -> Void)?
+    var extendedAction: ((DefaultButtonGesture.Effect) -> Void)? {
+        didSet { updateAccessibility() }
+    }
     var subject = "Pattern" {
-        didSet {
-            accessibilityLabel = "\(subject) default"
-            accessibilityCustomActions = [
-                UIAccessibilityCustomAction(name: "Save \(subject.lowercased()) default", target: self,
-                                            selector: #selector(saveAccessibility))
-            ]
-        }
+        didSet { updateAccessibility() }
+    }
+    override var isEnabled: Bool {
+        didSet { if !isEnabled { cancelSequence() } }
     }
     private var holdTimer: Timer?
+    private var tapTimer: Timer?
     private var holdTriggered = false
     private var trackingTouch = false
+    private var gesture = DefaultButtonGesture()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -867,29 +877,79 @@ final class PatternDefaultControl: UIButton {
         titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
         backgroundColor = .tertiarySystemFill
         layer.cornerRadius = 7
-        accessibilityLabel = "Pattern default"
-        accessibilityHint = "Tap to restore, or hold to save a new default."
-        accessibilityCustomActions = [
-            UIAccessibilityCustomAction(name: "Save pattern default", target: self,
+        updateAccessibility()
+    }
+    private func updateAccessibility() {
+        accessibilityLabel = "\(subject) default"
+        accessibilityHint = extendedAction == nil
+            ? "Tap to restore, or hold to save a new default."
+            : "Tap to restore, hold to save, or double tap to restore all instruments."
+        var actions = [
+            UIAccessibilityCustomAction(name: "Save \(subject.lowercased()) default", target: self,
                                         selector: #selector(saveAccessibility))
         ]
+        if extendedAction != nil {
+            actions.append(UIAccessibilityCustomAction(name: "Restore all instrument defaults", target: self,
+                                                       selector: #selector(restoreAllAccessibility)))
+        }
+        accessibilityCustomActions = actions
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     @objc private func saveAccessibility() -> Bool {
         guard isEnabled else { return false }
+        cancelSequence()
         action?(true)
+        return true
+    }
+
+    @objc private func restoreAllAccessibility() -> Bool {
+        guard isEnabled, let extendedAction else { return false }
+        cancelSequence()
+        extendedAction(.restoreInstruments)
         return true
     }
 
     override func accessibilityActivate() -> Bool {
         guard isEnabled else { return false }
+        cancelSequence()
         action?(false)
         return true
     }
 
+    private func dispatch(_ effects: [DefaultButtonGesture.Effect]) {
+        for effect in effects {
+            guard isEnabled, window != nil else { return }
+            switch effect {
+            case .restore: action?(false)
+            case .save: action?(true)
+            default: extendedAction?(effect)
+            }
+        }
+    }
+
+    private func cancelSequence() {
+        holdTimer?.invalidate(); holdTimer = nil
+        tapTimer?.invalidate(); tapTimer = nil
+        trackingTouch = false
+        gesture.cancel()
+    }
+
     override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
         guard isEnabled else { return false }
+        if extendedAction != nil {
+            tapTimer?.invalidate(); tapTimer = nil
+            dispatch(gesture.down(at: ProcessInfo.processInfo.systemUptime))
+            guard isEnabled else { return false }
+            trackingTouch = true
+            let timer = Timer(timeInterval: DefaultButtonGesture.holdTime, repeats: false) { [weak self] _ in
+                guard let self, self.trackingTouch, self.isEnabled else { return }
+                self.dispatch(self.gesture.tick(at: ProcessInfo.processInfo.systemUptime))
+            }
+            holdTimer?.invalidate(); holdTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+            return true
+        }
         holdTriggered = false
         trackingTouch = true
         let timer = Timer(timeInterval: DefaultButtonGesture.holdTime, repeats: false) { [weak self] _ in
@@ -905,26 +965,37 @@ final class PatternDefaultControl: UIButton {
 
     override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
         if !bounds.insetBy(dx: -10, dy: -10).contains(touch.location(in: self)) {
-            holdTimer?.invalidate()
-            trackingTouch = false
+            cancelSequence()
         }
         return trackingTouch
     }
 
     override func endTracking(_ touch: UITouch?, with event: UIEvent?) {
         holdTimer?.invalidate()
+        if extendedAction != nil {
+            guard trackingTouch && isEnabled else { cancelSequence(); return }
+            trackingTouch = false
+            dispatch(gesture.up(at: ProcessInfo.processInfo.systemUptime))
+            guard isEnabled else { cancelSequence(); return }
+            let timer = Timer(timeInterval: DefaultButtonGesture.tapWindow, repeats: false) { [weak self] _ in
+                guard let self, self.isEnabled else { return }
+                self.dispatch(self.gesture.tick(at: ProcessInfo.processInfo.systemUptime))
+            }
+            tapTimer?.invalidate(); tapTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+            return
+        }
         if trackingTouch && !holdTriggered && isEnabled { action?(false) }
         trackingTouch = false
     }
 
     override func cancelTracking(with event: UIEvent?) {
-        holdTimer?.invalidate()
-        trackingTouch = false
+        cancelSequence()
     }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window == nil { holdTimer?.invalidate(); trackingTouch = false }
+        if window == nil { cancelSequence() }
     }
 }
 

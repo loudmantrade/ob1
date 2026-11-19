@@ -89,6 +89,50 @@ struct SceneChecks {
         var history = SequencerHistory()
         let entry = SequencerHistoryEntry(before: [], after: [], title: "Restore sequencer default",
             settings: SequencerSettingsEdit(before: baseline, after: after))
+        let edit = SequencerSettingsEdit(before: baseline, after: after)
+        var current = after
+        current.columns[0].pan = -0.5
+        current.countBars = 3
+        current.columns.append(SequencerDefault.Column(slot: 1, level: -3, pan: 0,
+                                                       muted: false, recordBeats: 4))
+        let undone = try edit.applying(to: current, undo: true)
+        precondition(undone.columns[0].muted == false && undone.launchGrid == baseline.launchGrid)
+        precondition(undone.columns[0].pan == -0.5 && undone.countBars == 3 && undone.columns.count == 2)
+        let redone = try edit.applying(to: undone, undo: false)
+        precondition(redone == current)
+        let gesture = SequencerMixerGesture(slot: 0, field: .pan)
+        let panEdit = try SequencerSettingsEdit.mixerGesture(gesture, before: baseline, current: current)
+        precondition(panEdit.after.columns[0].pan == -0.5)
+        precondition(panEdit.after.columns[0].muted == baseline.columns[0].muted)
+        precondition(panEdit.after.countBars == baseline.countBars && panEdit.after.columns.count == 1)
+        let panUndo = try panEdit.applying(to: current, undo: true)
+        precondition(panUndo.columns[0].pan == baseline.columns[0].pan)
+        precondition(panUndo.columns[0].muted == current.columns[0].muted && panUndo.countBars == current.countBars)
+        var longer = baseline
+        longer.columns[0].recordBeats = 32
+        let lengthEdit = SequencerSettingsEdit(before: baseline, after: longer)
+        var longerWithOtherChanges = longer
+        longerWithOtherChanges.columns[0].pan = -0.5
+        longerWithOtherChanges.recordOutput = false
+        let lengthUndo = try lengthEdit.applying(to: longerWithOtherChanges, undo: true)
+        precondition(lengthUndo.columns[0].recordBeats == 16)
+        precondition(lengthUndo.columns[0].pan == -0.5 && !lengthUndo.recordOutput)
+        let unchanged = try SequencerSettingsEdit.mixerGesture(gesture, before: baseline, current: baseline)
+        var noOpHistory = SequencerHistory()
+        noOpHistory.record(SequencerHistoryEntry(before: [], after: [], settings: unchanged))
+        precondition(noOpHistory.undoStack.isEmpty)
+        var conflicting = current
+        conflicting.launchGrid = 0
+        do {
+            _ = try edit.applying(to: conflicting, undo: true)
+            fatalError("Changed sequencer setting accepted")
+        } catch { }
+        conflicting = current
+        conflicting.columns.removeFirst()
+        do {
+            _ = try edit.applying(to: conflicting, undo: true)
+            fatalError("Missing mixer column accepted")
+        } catch { }
         history.record(entry)
         precondition(history.undoStack.count == 1)
         history.acknowledge(entry, undo: true)
@@ -139,6 +183,20 @@ struct SceneChecks {
         precondition(gesture.down(at: 8).isEmpty)
         gesture.cancel()
         precondition(gesture.tick(at: 9).isEmpty)
+        precondition(gesture.down(at: 10).isEmpty)
+        precondition(gesture.up(at: 10.05).isEmpty)
+        gesture.cancel()
+        precondition(gesture.tick(at: 11).isEmpty)
+        precondition(gesture.down(at: 12).isEmpty)
+        precondition(gesture.up(at: 12.05).isEmpty)
+        precondition(gesture.down(at: 12.4) == [.restore])
+        precondition(gesture.up(at: 12.45).isEmpty)
+        precondition(gesture.tick(at: 12.7) == [.restore])
+        precondition(gesture.down(at: 13).isEmpty)
+        precondition(gesture.up(at: 13.05).isEmpty)
+        precondition(gesture.down(at: 13.1).isEmpty)
+        gesture.cancel()
+        precondition(gesture.tick(at: 14).isEmpty)
         print("PASS default gestures: single, double, triple, hold, tap-hold, double-tap-hold and cancellation")
     }
 
@@ -530,11 +588,23 @@ struct SceneChecks {
         presetHistory.recordSound(before: priorSound, after: priorSound)
         precondition(presetHistory.undoStack.isEmpty)
         presetHistory.recordSound(before: priorSound, after: savedSound)
-        precondition(presetHistory.undoStack == [.sound(before: priorSound, after: savedSound)])
+        precondition(presetHistory.undoStack == [.sounds([SceneSoundEdit(before: priorSound, after: savedSound)])])
         presetHistory.acknowledge(undo: true)
-        precondition(presetHistory.redoStack == [.sound(before: priorSound, after: savedSound)])
+        precondition(presetHistory.redoStack == [.sounds([SceneSoundEdit(before: priorSound, after: savedSound)])])
         presetHistory.acknowledge(undo: false)
         precondition(presetHistory.undoStack.count == 1 && presetHistory.redoStack.isEmpty)
+        let otherBefore = RackInstrument.oberVave(slot: 1, channel: 2)
+        var otherAfter = otherBefore
+        otherAfter.parameters[SynthParameter.cutoff.rawValue] = 37
+        let group = [SceneSoundEdit(before: priorSound, after: savedSound),
+                     SceneSoundEdit(before: otherBefore, after: otherAfter)]
+        var groupedHistory = SceneParameterHistory()
+        groupedHistory.recordSounds(group + [SceneSoundEdit(before: otherBefore, after: otherBefore)])
+        precondition(groupedHistory.undoStack == [.sounds(group)])
+        groupedHistory.acknowledge(undo: true)
+        precondition(groupedHistory.redoStack == [.sounds(group)])
+        groupedHistory.acknowledge(undo: false)
+        precondition(groupedHistory.undoStack == [.sounds(group)] && groupedHistory.redoStack.isEmpty)
         let soundEdit = SceneParameterEdit(slot: 0, parameter: 1, before: 10, after: 40)
         soundHistory.record([soundEdit])
         precondition(soundHistory.undoStack == [.parameters([soundEdit])] && soundHistory.redoStack.isEmpty)

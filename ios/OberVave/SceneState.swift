@@ -269,11 +269,21 @@ struct SceneRouteEdit: Equatable {
     }
 }
 
+struct SceneSoundEdit: Equatable {
+    var before: RackInstrument
+    var after: RackInstrument
+
+    var changed: Bool {
+        before.parameters != after.parameters || before.cc != after.cc ||
+            before.arpMode != after.arpMode || before.latchMode != after.latchMode
+    }
+}
+
 enum SceneHistoryEntry: Equatable {
     case parameters([SceneParameterEdit])
     case value(SceneValueEdit)
     case route(SceneRouteEdit)
-    case sound(before: RackInstrument, after: RackInstrument)
+    case sounds([SceneSoundEdit])
 
     var title: String {
         switch self {
@@ -292,7 +302,8 @@ enum SceneHistoryEntry: Equatable {
             case .keyboardChannels: return "Keyboard channels"
             }
         case .route(let edit): return "Instrument · \(edit.after.name)"
-        case .sound(_, let after): return "Sound · \(after.name)"
+        case .sounds(let edits):
+            return edits.count == 1 ? "Sound · \(edits[0].after.name)" : "Sounds · \(edits.count) instruments"
         }
     }
 }
@@ -319,9 +330,13 @@ struct SceneParameterHistory {
     }
 
     mutating func recordSound(before: RackInstrument, after: RackInstrument) {
-        guard before.parameters != after.parameters || before.cc != after.cc ||
-              before.arpMode != after.arpMode || before.latchMode != after.latchMode else { return }
-        append(.sound(before: before, after: after))
+        recordSounds([SceneSoundEdit(before: before, after: after)])
+    }
+
+    mutating func recordSounds(_ edits: [SceneSoundEdit]) {
+        let changed = edits.filter(\.changed)
+        guard !changed.isEmpty else { return }
+        append(.sounds(changed))
     }
 
     private mutating func append(_ entry: SceneHistoryEntry) {
@@ -342,7 +357,7 @@ struct PendingSceneParameterHistory {
     var edits: [SceneParameterEdit]
     var undo: Bool
     var route: SceneRouteEdit? = nil
-    var sound: (before: RackInstrument, after: RackInstrument)? = nil
+    var sounds: [SceneSoundEdit]? = nil
     var recordingSound = false
 }
 
@@ -428,6 +443,62 @@ struct SequencerDefault: Codable, Equatable {
 struct SequencerSettingsEdit: Equatable {
     var before: SequencerDefault
     var after: SequencerDefault
+
+    static func mixerGesture(_ gesture: SequencerMixerGesture, before: SequencerDefault,
+                             current: SequencerDefault) throws -> SequencerSettingsEdit {
+        guard let index = before.columns.firstIndex(where: { $0.slot == gesture.slot }),
+              let column = current.columns.first(where: { $0.slot == gesture.slot }) else {
+            throw SceneError.invalid("The instrument changed before the mixer gesture finished.")
+        }
+        var after = before
+        switch gesture.field {
+        case .level: after.columns[index].level = column.level
+        case .pan: after.columns[index].pan = column.pan
+        }
+        return SequencerSettingsEdit(before: before, after: after)
+    }
+
+    func applying(to current: SequencerDefault, undo: Bool) throws -> SequencerDefault {
+        let expected = undo ? after : before
+        let replacement = undo ? before : after
+        var result = current
+
+        func replace<T: Equatable>(_ value: inout T, _ old: T, _ new: T) throws {
+            guard old != new else { return }
+            guard value == old else {
+                throw SceneError.invalid("A sequencer setting changed since this history step.")
+            }
+            value = new
+        }
+
+        try replace(&result.launchGrid, expected.launchGrid, replacement.launchGrid)
+        try replace(&result.recordMode, expected.recordMode, replacement.recordMode)
+        try replace(&result.countBars, expected.countBars, replacement.countBars)
+        try replace(&result.recordOutput, expected.recordOutput, replacement.recordOutput)
+        guard expected.columns.map(\.slot) == replacement.columns.map(\.slot) else {
+            throw SceneError.invalid("The instruments in this history step do not match.")
+        }
+        for (old, new) in zip(expected.columns, replacement.columns) where old != new {
+            guard let index = result.columns.firstIndex(where: { $0.slot == old.slot }) else {
+                throw SceneError.invalid("An instrument in this history step no longer exists.")
+            }
+            try replace(&result.columns[index].level, old.level, new.level)
+            try replace(&result.columns[index].pan, old.pan, new.pan)
+            try replace(&result.columns[index].muted, old.muted, new.muted)
+            try replace(&result.columns[index].solo, old.solo, new.solo)
+            try replace(&result.columns[index].recordBeats, old.recordBeats, new.recordBeats)
+        }
+        return result
+    }
+}
+
+enum SequencerMixerField: Hashable {
+    case level, pan
+}
+
+struct SequencerMixerGesture: Hashable {
+    var slot: Int
+    var field: SequencerMixerField
 }
 
 struct NoteQuantization: Codable, Equatable {
@@ -1489,6 +1560,7 @@ struct PendingSequencerHistory {
     var token: UInt64
     var epoch: UInt64
     var entry: SequencerHistoryEntry
+    var revisions: [UInt64]
     var undo: Bool
     var recordingNewEntry: Bool
 }

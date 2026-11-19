@@ -83,11 +83,12 @@ int ov_seq_read_edit(ov_seq_edit_result* result);
    transport position; already sounding notes retain their original Note Off. */
 int ov_seq_replace_pattern(const ov_seq_clip* expected, const ov_seq_clip* replacement,
                            uint64_t epoch, uint64_t revision, uint64_t token);
-/* Atomically replace one or two distinct cells. A null expected or replacement
+/* Atomically replace up to 128 distinct cells. A null expected or replacement
    represents an empty cell; both may not be null for the same change.
    The audio owner checks the scene epoch, cell revisions and expected contents
    before changing any cell. Completion is reported by ov_seq_read_edit: its
-   source and target revisions refer to the first and last cells respectively.
+   source and target revisions refer to the first and last cells respectively;
+   on success every affected cell's revision increments exactly once.
    Clips are copied before this function returns. */
 typedef struct {
     uint32_t slot, row;

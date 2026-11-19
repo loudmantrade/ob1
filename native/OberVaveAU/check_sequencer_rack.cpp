@@ -288,6 +288,70 @@ static void checkAtomicMixer()
     assert(ov_seq_active(1) == 0);
     std::puts("PASS atomic mixer: multi-slot restore, conflict and epoch rejection, playback continuity");
 }
+static void checkAtomicSounds()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
+    auto backing = std::make_unique<ov_seq_clip>(clip(1, 0));
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(backing.get()) && ov_seq_launch(1, 0, 0)); render();
+    const auto epoch = ov_seq_scene_epoch();
+    ov_rack_sound_change changes[] {
+        {0, scene->slots[0].config, scene->slots[0].config},
+        {1, scene->slots[1].config, scene->slots[1].config}
+    };
+    changes[0].replacement.parameters[rack::P_CUTOFF] = 17;
+    changes[0].replacement.cc[rack::P_CUTOFF] = 74;
+    changes[1].replacement.parameters[rack::P_CUTOFF] = 33;
+    changes[1].replacement.cc[rack::P_CUTOFF] = 75;
+    changes[0].replacement.level_db = -20;
+    ov_rack_parameter_result result {};
+    assert(ov_rack_change_sounds(changes, 2, epoch, 301)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.success && result.token == 301);
+    auto& first = rack::scene->slots[0]->config;
+    auto& second = rack::scene->slots[1]->config;
+    assert(first.parameters[rack::P_CUTOFF] == 17 && first.cc[rack::P_CUTOFF] == 74);
+    assert(second.parameters[rack::P_CUTOFF] == 33 && second.cc[rack::P_CUTOFF] == 75);
+    assert(first.level_db == -6 && ov_seq_active(1) == 0);
+
+    changes[0].expected = first; changes[1].expected = second;
+    changes[0].replacement.parameters[rack::P_CUTOFF] = 18;
+    changes[1].expected.cc[rack::P_CUTOFF] = 76;
+    assert(ov_rack_change_sounds(changes, 2, epoch, 302)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    assert(first.parameters[rack::P_CUTOFF] == 17 && second.parameters[rack::P_CUTOFF] == 33);
+    changes[1].expected = second;
+    assert(ov_rack_change_sounds(changes, 2, epoch - 1, 303)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    assert(first.parameters[rack::P_CUTOFF] == 17);
+    changes[1].slot = 2;
+    assert(ov_rack_change_sounds(changes, 2, epoch, 304)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    assert(first.parameters[rack::P_CUTOFF] == 17);
+    changes[1].slot = 0;
+    assert(!ov_rack_change_sounds(changes, 2, epoch, 305));
+    assert(ov_rack_take_error() == 2);
+    changes[1].slot = 1;
+    changes[1].replacement.cc[rack::P_CUTOFF] = 200;
+    assert(!ov_rack_change_sounds(changes, 2, epoch, 306));
+    assert(ov_rack_take_error() == 2);
+    assert(ov_seq_active(1) == 0);
+
+    changes[1].replacement = second;
+    for (uint32_t i = 0; i < rack::parameterResultCapacity; ++i)
+        assert(ov_rack_change_sounds(changes, 2, epoch, 400 + i));
+    assert(!ov_rack_change_sounds(changes, 2, epoch, 500));
+    assert(ov_rack_take_error() == 4);
+    render();
+    for (uint32_t i = 0; i < rack::parameterResultCapacity; ++i) {
+        assert(ov_rack_read_parameter_result(&result) && result.token == 400 + i);
+        assert(result.success == (i == 0));
+    }
+    assert(!ov_rack_read_parameter_result(&result));
+    assert(first.parameters[rack::P_CUTOFF] == 18 && second.parameters[rack::P_CUTOFF] == 33);
+    assert(ov_seq_active(1) == 0);
+    std::puts("PASS atomic sounds: multi-slot success, no partial updates, conflicts, epoch and playback");
+}
 
 static void checkRack()
 {
@@ -1205,6 +1269,43 @@ static void checkAtomicCellHistory()
     std::puts("PASS atomic cell history: empty restoration and stale two-cell rejection");
 }
 
+static void checkAtomicFullCellGrid()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120;
+    for (uint32_t slot = 0; slot < rack::capacity; ++slot) scene->slots[slot] = {1, config()};
+    assert(ov_rack_load(scene.get())); render();
+    const auto epoch = ov_seq_scene_epoch();
+    constexpr uint32_t count = rack::capacity * OV_SEQ_ROWS;
+    auto clips = std::make_unique<ov_seq_clip[]>(count);
+    auto changes = std::make_unique<ov_seq_cell_change[]>(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto slot = i / OV_SEQ_ROWS, row = i % OV_SEQ_ROWS;
+        clips[i] = clip(slot, row);
+        changes[i] = {slot, row, ov_seq_cell_revision(slot, row), nullptr, &clips[i]};
+    }
+    const auto last = changes[count - 1];
+    changes[count - 1] = changes[1];
+    assert(!ov_seq_change_cells(changes.get(), count, epoch, 720));
+    assert(ov_rack_take_error() == 2);
+    changes[count - 1] = last;
+    ++changes[count - 1].revision;
+    assert(ov_seq_change_cells(changes.get(), count, epoch, 721)); render();
+    ov_seq_edit_result result {};
+    assert(ov_seq_read_edit(&result) && !result.success);
+    for (uint32_t i = 0; i < count; ++i)
+        assert(!rack::clips[changes[i].slot][changes[i].row]);
+    changes[count - 1] = last;
+    assert(ov_seq_change_cells(changes.get(), count, epoch, 722)); render();
+    assert(ov_seq_read_edit(&result) && result.success && result.token == 722);
+    for (uint32_t i = 0; i < count; ++i) {
+        assert(rack::clips[changes[i].slot][changes[i].row]);
+        assert(ov_seq_cell_revision(changes[i].slot, changes[i].row) == changes[i].revision + 1);
+    }
+    assert(!ov_rack_take_error());
+    std::puts("PASS atomic full grid: 128 cells, duplicate and stale last-cell rejection, exact revisions");
+}
+
 static void checkGroupedRecording()
 {
     for (uint32_t output : {0u, 1u}) {
@@ -1376,5 +1477,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkAtomicMixer(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicCellHistory(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkAtomicSounds(); checkAtomicMixer(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicCellHistory(); checkAtomicFullCellGrid(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

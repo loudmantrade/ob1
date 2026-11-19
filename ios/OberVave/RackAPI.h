@@ -76,6 +76,14 @@ int ov_rack_change_route(uint32_t slot, uint32_t mask,
    The acknowledgement uses the parameter-result queue. */
 int ov_rack_change_sound(uint32_t slot, const ov_instrument_config *expected,
                          const ov_instrument_config *replacement, uint64_t epoch, uint64_t token);
+/* Atomically check and replace sounds for distinct slots. Either every sound
+   is changed or none are; results use the parameter-result queue. */
+typedef struct {
+    uint32_t slot;
+    ov_instrument_config expected, replacement;
+} ov_rack_sound_change;
+int ov_rack_change_sounds(const ov_rack_sound_change *changes, uint32_t count,
+                          uint64_t epoch, uint64_t token);
 /* Atomically check and replace the mixer fields of distinct instruments. */
 typedef struct {
     uint32_t slot;

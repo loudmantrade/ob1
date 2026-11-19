@@ -317,8 +317,12 @@ closing and reopening the editor. Moving a pattern transfers its history;
 copying it creates an independent copy of that history. Re-recording or
 replacing a pattern through the numeric pattern editor clears its history.
 The sequencer has a separate, per-scene history for recording, numeric edits,
-MOVE, COPY and DELETE, limited to 32 actions. Its Undo and Redo buttons wait
-for an audio acknowledgement before changing history. Restoring a deleted or
+MOVE, COPY, DELETE, launch and recording options, recording length, and mixer
+level, pan, mute and solo, limited to 32 actions.
+Each completed level or pan gesture is one action; mute and solo switches are
+individual actions. Undo only changes the settings affected by that action and
+rejects conflicting changes. Undo and Redo wait for an audio acknowledgement
+when an action changes audio-owned state. Restoring a deleted or
 replaced pattern also restores its Piano Roll history; a later Piano Roll edit
 that changes an affected pattern causes sequencer Undo/Redo to reject the
 operation rather than overwrite that edit. Revert the Piano Roll change first.
@@ -344,7 +348,7 @@ atomically; conflicts are rejected
 without changing any parameter or restarting playback. If the external MIDI
 event queue overflows, the parameter history is cleared and an error is shown
 rather than preserving an incomplete history. This parameter history does not
-yet cover preset selection, instrument management, all scene settings or mixer operations.
+yet cover preset selection, instrument management or all scene settings.
 
 The sequencer's DEFAULT button saves its launch and recording options, column
 mixer levels, pan, mute, solo and recording lengths when held and confirmed. Tap it
@@ -362,7 +366,13 @@ and MIDI assignments; hold it and confirm to update that default from an
 audio-owned snapshot. This does not overwrite the saved preset. Until a
 separate default is saved, the saved preset (or its factory sound) is used.
 The restore is one scene-history action, checked and applied on the audio
-thread without restarting the sequencer. Defaults are local to the device.
+thread without restarting the sequencer. Double-tap DEFAULT on the synth,
+sequencer or Piano Roll screen to restore all instruments' current preset
+defaults together as one scene-history action. All sounds are checked before
+any are changed; a missing default or concurrent edit rejects the whole
+operation. Defaults are local to the device and keyed by preset, so instruments
+using the same preset share that preset default. Triple-tap and the multi-tap
+hold scene-default operations are not yet available.
 
 Copy/Paste retains relative timing and routing, with the most recent empty-grid
 tap as the paste anchor (initially tick zero). Paste creates new note IDs and

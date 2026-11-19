@@ -298,7 +298,7 @@ struct CellChangeRequest final : Retired {
         uint64_t revision = 0;
         std::unique_ptr<SequencerClip> expected, replacement;
     };
-    std::array<Cell, 2> cells {};
+    std::array<Cell, capacity * music::sequencerRows> cells {};
     uint32_t count = 0;
     uint64_t epoch = 0, token = 0;
 };
@@ -321,8 +321,8 @@ struct RouteChangeRequest final : Retired {
     uint64_t epoch = 0, token = 0;
 };
 struct SoundChangeRequest final : Retired {
-    ov_instrument_config expected {}, replacement {};
-    uint32_t slot = 0;
+    std::array<ov_rack_sound_change, capacity> changes {};
+    uint32_t count = 0;
     uint64_t epoch = 0, token = 0;
 };
 struct MixerChangeRequest final : Retired {
@@ -949,29 +949,32 @@ void apply(const Command& c)
     }
     if (c.kind == Kind::SoundChange) {
         auto* request = static_cast<SoundChangeRequest*>(c.object);
-        auto& pointer = scene->slots[request->slot];
-        bool valid = request->epoch == sceneEpoch.load() && bool(pointer);
-        if (valid) {
+        bool valid = request->epoch == sceneEpoch.load();
+        for (uint32_t i = 0; i < request->count && valid; ++i) {
+            const auto& change = request->changes[i];
+            const auto& pointer = scene->slots[change.slot];
+            if (!pointer) { valid = false; break; }
             const auto& current = pointer->config;
-            valid = current.engine == request->expected.engine && current.program == request->expected.program;
+            valid = current.engine == change.expected.engine && current.program == change.expected.program;
             for (uint32_t p = 0; p < NPARAM && valid; ++p) {
-                valid = (current.parameters[p] == request->expected.parameters[p] || pointer->automatedParameters[p]) &&
-                    current.cc[p] == request->expected.cc[p];
+                valid = (current.parameters[p] == change.expected.parameters[p] || pointer->automatedParameters[p]) &&
+                    current.cc[p] == change.expected.cc[p];
             }
         }
-        if (valid) {
-            auto& inst = *pointer;
+        if (valid) for (uint32_t i = 0; i < request->count; ++i) {
+            const auto& change = request->changes[i];
+            auto& inst = *scene->slots[change.slot];
             inst.engine->boundary({processedFrames});
             for (uint32_t p = 0; p < NPARAM; ++p) {
-                const auto replacement = request->replacement.parameters[p];
+                const auto replacement = change.replacement.parameters[p];
                 if (inst.config.parameters[p] != replacement) {
                     inst.config.parameters[p] = replacement;
                     inst.engine->parameter(p, replacement);
                 }
-                inst.config.cc[p] = request->replacement.cc[p];
+                inst.config.cc[p] = change.replacement.cc[p];
                 inst.automatedParameters[p] = false;
             }
-            publish(request->slot);
+            publish(change.slot);
         }
         const auto write = parameterWrite.load(std::memory_order_relaxed);
         parameterResults[write % parameterResultCapacity] = {request->token, valid ? 1u : 0u};
@@ -1790,19 +1793,21 @@ int ov_seq_replace_pattern(const ov_seq_clip* expected, const ov_seq_clip* repla
 int ov_seq_change_cells(const ov_seq_cell_change* changes, uint32_t count, uint64_t epoch, uint64_t token)
 {
     using namespace rack;
-    if (!changes || !count || count > 2) { error.store(2); return 0; }
+    if (!changes || !count || count > capacity * music::sequencerRows) { error.store(2); return 0; }
     try {
         auto request = std::make_unique<CellChangeRequest>();
         request->count = count; request->epoch = epoch; request->token = token;
+        std::array<std::array<bool, music::sequencerRows>, capacity> seen {};
         for (uint32_t i = 0; i < count; ++i) {
             const auto& input = changes[i];
             if (input.slot >= capacity || input.row >= OV_SEQ_ROWS ||
                 (!input.expected && !input.replacement) ||
-                (i && input.slot == changes[0].slot && input.row == changes[0].row) ||
+                seen[input.slot][input.row] ||
                 (input.expected && (input.expected->slot != input.slot || input.expected->row != input.row)) ||
                 (input.replacement && (input.replacement->slot != input.slot || input.replacement->row != input.row))) {
                 error.store(2); return 0;
             }
+            seen[input.slot][input.row] = true;
             auto& cell = request->cells[i];
             cell.slot = input.slot; cell.row = input.row; cell.revision = input.revision;
             if (input.expected) cell.expected = prepareClip(*input.expected);
@@ -2038,15 +2043,30 @@ int ov_rack_change_route(uint32_t slot, uint32_t mask, const ov_instrument_confi
 int ov_rack_change_sound(uint32_t slot, const ov_instrument_config* expected,
                          const ov_instrument_config* replacement, uint64_t epoch, uint64_t token)
 {
+    if (!expected || !replacement) { rack::error.store(2); return 0; }
+    const ov_rack_sound_change change {slot, *expected, *replacement};
+    return ov_rack_change_sounds(&change, 1, epoch, token);
+}
+int ov_rack_change_sounds(const ov_rack_sound_change* changes, uint32_t count,
+                          uint64_t epoch, uint64_t token)
+{
     using namespace rack;
-    if (slot >= capacity || !expected || !replacement || !valid(*expected) || !valid(*replacement) ||
-        expected->engine != replacement->engine || expected->program != replacement->program) {
-        error.store(2); return 0;
-    }
+    if (!changes || !count || count > capacity) { error.store(2); return 0; }
     try {
         auto request = std::make_unique<SoundChangeRequest>();
-        request->slot = slot; request->epoch = epoch; request->token = token;
-        request->expected = *expected; request->replacement = *replacement;
+        uint32_t seen = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& change = changes[i];
+            if (change.slot >= capacity || (seen & (1u << change.slot)) ||
+                !valid(change.expected) || !valid(change.replacement) ||
+                change.expected.engine != change.replacement.engine ||
+                change.expected.program != change.replacement.program) {
+                error.store(2); return 0;
+            }
+            seen |= 1u << change.slot;
+            request->changes[i] = change;
+        }
+        request->count = count; request->epoch = epoch; request->token = token;
         if (parameterOutstanding.fetch_add(1) >= parameterResultCapacity) {
             parameterOutstanding.fetch_sub(1); error.store(4); return 0;
         }
