@@ -91,10 +91,35 @@ struct SceneChecks {
         precondition(restoreHistory.next(undo: true)?.before.count == 2)
         restoreHistory.acknowledge(restore, undo: true)
         precondition(restoreHistory.next(undo: false)?.after.count == 2)
+        let removal = try SequencerHistoryEntry.restoringDefault(beforeSettings: settings, targetSettings: settings,
+                                                                  cells: [currentCells[0]], defaults: [])
+        precondition(removal.before[0].pattern == laterPattern && removal.after[0].pattern == nil)
+        precondition(removal.before[0].pianoHistory?.pattern == laterPattern && removal.after[0].pianoHistory == nil)
+        let noChange = try SequencerHistoryEntry.restoringDefault(beforeSettings: settings, targetSettings: settings,
+                                                                   cells: [currentCells[0]], defaults: [laterPattern])
+        var emptyHistory = SequencerHistory()
+        emptyHistory.record(noChange)
+        precondition(emptyHistory.undoStack.isEmpty)
+        var changedSettings = settings
+        changedSettings.launchGrid = 1
+        let settingsOnly = try SequencerHistoryEntry.restoringDefault(beforeSettings: settings,
+            targetSettings: changedSettings, cells: [currentCells[0]], defaults: [laterPattern])
+        emptyHistory.record(settingsOnly)
+        precondition(emptyHistory.undoStack.count == 1 && settingsOnly.before.isEmpty)
         do {
             _ = try SequencerHistoryEntry.restoringDefault(beforeSettings: settings, targetSettings: settings,
                                                             cells: [currentCells[0]], defaults: savedPatterns)
             fatalError("Sequencer restore accepted missing cells")
+        } catch { }
+        do {
+            _ = try SequencerHistoryEntry.restoringDefault(beforeSettings: settings, targetSettings: settings,
+                cells: [currentCells[0], currentCells[0]], defaults: [laterPattern])
+            fatalError("Sequencer restore accepted duplicate cells")
+        } catch { }
+        do {
+            _ = try SequencerHistoryEntry.restoringDefault(beforeSettings: settings, targetSettings: settings,
+                cells: [currentCells[0]], defaults: [laterPattern, laterPattern])
+            fatalError("Sequencer restore accepted duplicate patterns")
         } catch { }
         var invalid = again
         invalid.sequencers[""] = invalid.sequencers["one"]
