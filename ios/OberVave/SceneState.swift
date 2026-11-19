@@ -489,7 +489,7 @@ enum SceneHistoryEntry: Equatable {
         case .sounds(let edits):
             return edits.count == 1 ? "Sound · \(edits[0].after.name)" : "Sounds · \(edits.count) instruments"
         case .restore(let edit):
-            return edit.restoresDevice ? "Application default" : "Scene default"
+            return edit.title ?? (edit.restoresDevice ? "Application default" : "Scene default")
         }
     }
 }
@@ -681,6 +681,7 @@ struct SceneRestoreEdit: Equatable {
     let after: ApplicationDefault
     let restoresDevice: Bool
     var patternHistories: SceneRestorePatternHistories? = nil
+    var title: String? = nil
 
     func applying(to current: ApplicationDefault, undo: Bool) throws -> ApplicationDefault {
         let expected = undo ? after : before

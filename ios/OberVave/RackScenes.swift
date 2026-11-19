@@ -357,8 +357,8 @@ extension OberVaveModel {
                     sceneSwitchPending = false
                     sceneHistoryJump = nil
                     errorMessage = parameterResult.success == 0
-                        ? "The scene changed; the default restore was not applied."
-                        : "The scene restore was applied but superseded before synchronization."
+                        ? "The scene changed; the requested operation was not applied."
+                        : "The scene operation was applied but superseded before synchronization."
                     continue
                 }
                 if keyboardChannelMask != pending.target.scene.keyboardMask {
@@ -384,7 +384,11 @@ extension OberVaveModel {
                 showSelectedInstrument()
                 if pending.recording { sceneParameterHistory.recordRestore(pending.edit) }
                 else { sceneParameterHistory.acknowledge(undo: pending.undo, replacing: .restore(pending.edit)) }
-                sceneStatus = "Restored \(pending.edit.restoresDevice ? "application" : "scene") default"
+                if let title = pending.edit.title {
+                    sceneStatus = pending.recording ? title : "\(pending.undo ? "Undid" : "Redid") \(title)"
+                } else {
+                    sceneStatus = "Restored \(pending.edit.restoresDevice ? "application" : "scene") default"
+                }
                 sceneSwitchPending = false
                 if sceneHistoryJump != nil {
                     sceneHistoryJump?.remaining -= 1
@@ -688,26 +692,21 @@ extension OberVaveModel {
 
     @discardableResult
     func addInstrument(_ instrument: RackInstrument) -> Bool {
-        guard pendingSceneName == nil, !sceneSwitchPending, pendingSequencerSettings == nil,
-              activeMixerGestures.isEmpty else {
-            errorMessage = "Finish the pending scene or sequencer edit before adding an instrument."
-            return false
-        }
+        syncSequencerState()
         do {
             try instrument.validate()
             guard instruments.count < 16, !instruments.contains(where: { $0.slot == instrument.slot }) else {
                 throw SceneError.invalid("A scene supports at most 16 instruments; this slot is already occupied.")
             }
-            var c = instrument.coreConfig()
-            guard ov_rack_add(UInt32(instrument.slot), &c) != 0 else {
-                throw SceneError.invalid("Could not add instrument. Check available memory and the audio rack.")
-            }
-            rememberSelectedInstrument()
-            instruments.append(instrument)
-            selectedSlot = instrument.slot
-            ov_rack_select(UInt32(selectedSlot))
-            showSelectedInstrument()
-            return true
+            let baseline = currentRestoreState()
+            var target = baseline
+            target.scene.instruments.append(instrument)
+            target.scene.selectedSlot = instrument.slot
+            target.sequencer.columns.append(SequencerDefault.Column(slot: instrument.slot,
+                level: Double(Float(instrument.levelDB)), pan: Double(Float(instrument.pan)),
+                muted: instrument.muted, recordBeats: instrument.recordBeats))
+            return startSceneRestore(target: target, history: nil, undo: false,
+                                     title: "Add · \(instrument.name)", expectedBaseline: baseline)
         } catch { errorMessage = error.localizedDescription; return false }
     }
 
@@ -741,20 +740,21 @@ extension OberVaveModel {
     }
 
     func removeInstrument(_ slot: Int) {
-        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
-              pendingSequencerSettings == nil, activeMixerGestures.isEmpty else {
-            errorMessage = "Finish the pending sequencer edit."; return
+        syncSequencerState()
+        guard let instrument = instruments.first(where: { $0.slot == slot }) else {
+            errorMessage = "The instrument no longer exists."
+            return
         }
-        guard recordingPattern == nil else { errorMessage = "Finish recording before removing an instrument."; return }
-        guard pendingSceneName == nil, ov_rack_remove(UInt32(slot)) != 0 else { return }
-        instruments.removeAll { $0.slot == slot }
-        patterns.removeAll { $0.slot == slot }
-        soloSlots.remove(slot)
-        if selectedSlot == slot {
-            selectedSlot = instruments.first?.slot ?? 0
-            ov_rack_select(UInt32(selectedSlot))
-            showSelectedInstrument()
+        let baseline = currentRestoreState()
+        var target = baseline
+        target.scene.instruments.removeAll { $0.slot == slot }
+        target.scene.patterns?.removeAll { $0.slot == slot }
+        target.sequencer.columns.removeAll { $0.slot == slot }
+        if target.scene.selectedSlot == slot {
+            target.scene.selectedSlot = target.scene.instruments.first?.slot
         }
+        startSceneRestore(target: target, history: nil, undo: false,
+                          title: "Remove · \(instrument.name)", expectedBaseline: baseline)
     }
 
     func toggleKeyboardChannel(_ channel: Int) {
@@ -1068,8 +1068,10 @@ extension OberVaveModel {
         startSceneRestore(target: target, history: nil, undo: false, restoresDevice: true)
     }
 
+    @discardableResult
     private func startSceneRestore(target: ApplicationDefault?, history: SceneRestoreEdit?,
-                                   undo: Bool, restoresDevice: Bool = false) {
+                                   undo: Bool, restoresDevice: Bool = false, title: String? = nil,
+                                   expectedBaseline: ApplicationDefault? = nil) -> Bool {
         syncSequencerState()
         if history == nil { syncExternalParameterHistory(finish: true) }
         guard !sceneSwitchPending, pendingSceneName == nil, pendingSceneParameterHistory == nil,
@@ -1079,21 +1081,25 @@ extension OberVaveModel {
               externalParameterGestures.isEmpty, recordingPattern == nil,
               ov_seq_record_state() == 0, ov_seq_record_ready() == 0,
               (0..<128).allSatisfy({ ov_seq_pad_pending(UInt32($0 / 8), UInt32($0 % 8)) == 0 }) else {
-            errorMessage = "Finish recording and pending edits before restoring defaults."
-            return
+            errorMessage = "Finish recording and pending edits before changing the scene."
+            return false
         }
         let baseline = currentRestoreState()
+        guard expectedBaseline == nil || expectedBaseline == baseline else {
+            errorMessage = "The scene changed; try the instrument operation again."
+            return false
+        }
         let sceneKey = sceneSessionKey
         let revisionsBeforeCapture = (0..<128).map {
             ov_seq_cell_revision(UInt32($0 / 8), UInt32($0 % 8))
         }
         guard let generationsBeforeCapture = rackSlotGenerations() else {
             errorMessage = "An instrument is changing; try restoring defaults again."
-            return
+            return false
         }
         guard ov_rack_snapshot_request() != 0 else {
             errorMessage = "Could not request an audio scene snapshot."
-            return
+            return false
         }
         sceneSwitchPending = true
         sceneSwitchMonitor.start { [weak self] in
@@ -1136,6 +1142,7 @@ extension OberVaveModel {
                     guard let target else { throw SceneError.invalid("A scene restore target is missing.") }
                     destination = target
                     edit = SceneRestoreEdit(before: baseline, after: target, restoresDevice: restoresDevice)
+                    edit.title = title
                     edit.patternHistories = try SceneRestorePatternHistories.prepare(before: baseline, after: target,
                                                                                      histories: self.pianoRollHistories)
                 }
@@ -1160,7 +1167,7 @@ extension OberVaveModel {
             } catch {
                 self.sceneSwitchPending = false
                 self.sceneHistoryJump = nil
-                self.errorMessage = "Could not restore defaults: \(error.localizedDescription)"
+                self.errorMessage = "Could not change the scene: \(error.localizedDescription)"
             }
             return true
         } onTimeout: { [weak self] in
@@ -1168,6 +1175,7 @@ extension OberVaveModel {
             self?.sceneHistoryJump = nil
             self?.errorMessage = "The audio engine did not provide a snapshot. Resume audio and try again."
         }
+        return true
     }
 
     func saveSceneDefault(all: Bool = false, application: Bool = false) {

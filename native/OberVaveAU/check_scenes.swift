@@ -140,6 +140,23 @@ struct SceneChecks {
         precondition(sceneHistory.redoStack == [.restore(deviceEdit)])
         sceneHistory.acknowledge(undo: false)
         precondition(sceneHistory.undoStack == [.restore(deviceEdit)])
+        var removed = application
+        removed.scene.instruments.removeAll()
+        removed.scene.patterns?.removeAll()
+        removed.scene.selectedSlot = nil
+        removed.sequencer.columns.removeAll()
+        try removed.validate()
+        let instrumentRemoval = SceneRestoreEdit(before: application, after: removed, restoresDevice: false,
+                                                 title: "Remove instrument")
+        let undoneRemoval = try instrumentRemoval.applying(to: removed, undo: true)
+        precondition(undoneRemoval == application)
+        let redoneRemoval = try instrumentRemoval.applying(to: undoneRemoval, undo: false)
+        precondition(redoneRemoval == removed)
+        precondition(SceneHistoryEntry.restore(instrumentRemoval).title == "Remove instrument")
+        let removalHistories = try SceneRestorePatternHistories.prepare(before: application, after: removed,
+            histories: [pattern.id: PianoRollEditBuffer(pattern: pattern)])
+        precondition(removalHistories.before.first?.pianoHistory?.pattern == pattern &&
+                     removalHistories.after.first?.pianoHistory == nil)
         let originalEditor = try PianoRollEditBuffer(pattern: pattern)
         let unrelatedPattern = SequencerPattern(slot: 0, row: 4, name: "Later")
         let unrelatedEditor = try PianoRollEditBuffer(pattern: unrelatedPattern)
@@ -722,6 +739,24 @@ struct SceneChecks {
         precondition(ov_rack_read_parameter_result(&result) != 0 && result.token == 4006 && result.success != 0)
         captured = snapshot()
         precondition(captured.scene.slots.0.config.program == UInt32(instrument.programIndex) && captured.solo_mask == 0)
+        var empty = before
+        empty.scene.instruments = []
+        empty.scene.patterns = []
+        empty.scene.selectedSlot = nil
+        empty.sequencer.columns = []
+        let remove = try SceneRestorePlan(before: before, after: empty)
+        try remove.enqueue(snapshot: captured, token: 4010)
+        render()
+        precondition(ov_rack_read_parameter_result(&result) != 0 && result.token == 4010 && result.success != 0)
+        captured = snapshot()
+        precondition(captured.scene.slots.0.present == 0)
+        let addBack = try SceneRestorePlan(before: empty, after: before)
+        try addBack.enqueue(snapshot: captured, token: 4011)
+        render()
+        precondition(ov_rack_read_parameter_result(&result) != 0 && result.token == 4011 && result.success != 0)
+        captured = snapshot()
+        precondition(captured.scene.slots.0.present == 1 &&
+                     captured.scene.slots.0.config.program == UInt32(instrument.programIndex))
         ov_rack_collect()
         print("PASS Swift scene restore bridge: structural slots, sound, route, mixer, cells, tempo and conflict")
     }
