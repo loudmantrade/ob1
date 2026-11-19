@@ -305,7 +305,9 @@ Within the current scene, the Piano Roll history remains available after
 closing and reopening the editor. Moving a pattern transfers its history;
 copying it creates an independent copy of that history. Re-recording or
 replacing a pattern through the numeric pattern editor clears its history.
-History currently resets when a scene is loaded.
+When switching scenes during the session, their unsaved state, Piano Roll
+histories and viewports can be restored from Scenes in this session, including
+untitled and imported scenes. These session states are not saved to disk.
 
 Copy/Paste retains relative timing and routing, with the most recent empty-grid
 tap as the paste anchor (initially tick zero). Paste creates new note IDs and

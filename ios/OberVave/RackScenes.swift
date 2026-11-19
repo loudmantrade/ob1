@@ -422,7 +422,13 @@ extension OberVaveModel {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let url = try pendingSceneURL ?? scenesFolder().appendingPathComponent("\(UUID().uuidString).obscene.json")
             try encoder.encode(document).write(to: url, options: .atomic)
+            if pendingSceneURL == nil, sceneFileURL != nil {
+                sceneSessions[sceneSessionKey] = currentSceneSession()
+            } else {
+                sceneSessions.removeValue(forKey: sceneSessionKey)
+            }
             sceneName = name; sceneFileURL = url
+            sceneSessionKey = url.standardizedFileURL.absoluteString
             sceneStatus = "Saved \(name)"
             refreshSavedScenes()
         } catch { errorMessage = "Could not save scene: \(error.localizedDescription)" }
@@ -433,11 +439,54 @@ extension OberVaveModel {
         let granted = url.startAccessingSecurityScopedResource()
         defer { if granted { url.stopAccessingSecurityScopedResource() } }
         do {
-            let document = try RackSceneDocument.read(from: url)
+            let key = url.standardizedFileURL.absoluteString
+            if key == sceneSessionKey { return }
+            syncRackState()
+            guard pendingPatternTransfer == nil, pendingPianoPublication == nil, recordingPattern == nil,
+                  ov_seq_record_state() == 0 else {
+                throw SceneError.invalid("Finish recording and pending pattern edits before loading a scene.")
+            }
+            let previous = currentSceneSession()
+            let saved = sceneSessions[key]
+            let document = try saved?.document ?? RackSceneDocument.read(from: url)
             let folder = try scenesFolder()
             try applyScene(document)
+            sceneSessions[sceneSessionKey] = previous
+            sceneSessions.removeValue(forKey: key)
+            sceneSessionKey = key
+            if let saved {
+                pianoRollHistories = saved.pianoRollHistories
+                pianoRollViewports = saved.pianoRollViewports
+            }
             sceneFileURL = url.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL ? url : nil
         } catch { errorMessage = "Could not load scene: \(error.localizedDescription)" }
+    }
+
+    private func currentSceneSession() -> SceneSessionState {
+        let document = RackSceneDocument(name: sceneName, instruments: instruments, tempo: tempo,
+            masterDB: masterLevelDB, masterPan: masterPan, keyboardMask: keyboardChannelMask,
+            selectedSlot: instruments.isEmpty ? nil : selectedSlot, patterns: patterns)
+        return SceneSessionState(document: document, pianoRollHistories: pianoRollHistories,
+                                 pianoRollViewports: pianoRollViewports, fileURL: sceneFileURL)
+    }
+
+    func restoreSessionScene(_ key: String) {
+        guard key != sceneSessionKey, let saved = sceneSessions[key], pendingSceneName == nil else { return }
+        do {
+            syncRackState()
+            guard pendingPatternTransfer == nil, pendingPianoPublication == nil, recordingPattern == nil,
+                  ov_seq_record_state() == 0 else {
+                throw SceneError.invalid("Finish recording and pending pattern edits before loading a scene.")
+            }
+            let previous = currentSceneSession()
+            try applyScene(saved.document)
+            sceneSessions[sceneSessionKey] = previous
+            sceneSessions.removeValue(forKey: key)
+            sceneSessionKey = key
+            pianoRollHistories = saved.pianoRollHistories
+            pianoRollViewports = saved.pianoRollViewports
+            sceneFileURL = saved.fileURL
+        } catch { errorMessage = "Could not restore scene: \(error.localizedDescription)" }
     }
 
     private func applyScene(_ document: RackSceneDocument) throws {
@@ -480,9 +529,17 @@ extension OberVaveModel {
     func newScene() {
         guard pendingSceneName == nil else { return }
         do {
+            syncRackState()
+            guard pendingPatternTransfer == nil, pendingPianoPublication == nil, recordingPattern == nil,
+                  ov_seq_record_state() == 0 else {
+                throw SceneError.invalid("Finish recording and pending pattern edits before creating a scene.")
+            }
+            let previous = currentSceneSession()
             let empty = RackSceneDocument(name: "Untitled Scene", instruments: [], tempo: tempo,
                 masterDB: masterLevelDB, masterPan: masterPan, keyboardMask: keyboardChannelMask, selectedSlot: nil)
             try applyScene(empty)
+            sceneSessions[sceneSessionKey] = previous
+            sceneSessionKey = UUID().uuidString
             sceneFileURL = nil
         } catch { errorMessage = error.localizedDescription }
     }
@@ -1421,6 +1478,18 @@ struct RackSceneView: View {
                             Spacer()
                             ShareLink(item: scene.url) { Image(systemName: "square.and.arrow.up") }
                         }
+                        if !model.sceneSessions.isEmpty {
+                            Section("Scenes in this session") {
+                                ForEach(model.sceneSessions.keys.sorted(), id: \.self) { key in
+                                    if let scene = model.sceneSessions[key] {
+                                        Button("\(scene.document.name) · unsaved session") {
+                                            model.restoreSessionScene(key)
+                                            name = model.sceneName
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1440,10 +1509,10 @@ struct RackSceneView: View {
                 case .failure(let error): model.errorMessage = "Could not import scene: \(error.localizedDescription)"
                 }
             }
-            .confirmationDialog("Replace the current scene? Unsaved edits will be lost.", isPresented: $confirmsNew) {
+            .confirmationDialog("Create a new scene? Current unsaved edits remain available during this session.", isPresented: $confirmsNew) {
                 Button("New Empty Scene", role: .destructive) { model.newScene() }
             }
-            .confirmationDialog("Load this scene? Unsaved edits will be lost.", isPresented: Binding(
+            .confirmationDialog("Load this scene? Current unsaved edits remain available during this session.", isPresented: Binding(
                 get: { loadsScene != nil }, set: { if !$0 { loadsScene = nil } })) {
                 if let scene = loadsScene {
                     Button("Load \(scene.name)") { model.loadScene(from: scene.url); loadsScene = nil }

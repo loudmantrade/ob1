@@ -369,6 +369,8 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var pendingPianoPublication: PendingPianoPublication?
     var pianoRollViewports: [Int: PianoRollViewport] = [:]
     var pianoRollHistories: [Int: PianoRollEditBuffer] = [:]
+    var sceneSessionKey = UUID().uuidString
+    @Published var sceneSessions: [String: SceneSessionState] = [:]
     var patternTransferToken: UInt64 = 0
     @Published var sequencerInteractionEpoch: UInt64 = 0
     @Published var soloSlots: Set<Int> = []

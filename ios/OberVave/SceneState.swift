@@ -216,6 +216,13 @@ struct RackSceneDocument: Codable {
     }
 }
 
+struct SceneSessionState {
+    var document: RackSceneDocument
+    var pianoRollHistories: [Int: PianoRollEditBuffer]
+    var pianoRollViewports: [Int: PianoRollViewport]
+    var fileURL: URL?
+}
+
 enum SequencerRecordMode: Int, CaseIterable {
     case waitForNote, countIn, immediate
     var title: String {
