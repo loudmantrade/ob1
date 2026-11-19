@@ -632,11 +632,6 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     }
 
     func restoreCurrentPresetDefaults() {
-        let key = presetKey(bank: bank, program: program)
-        var updatedLibrary = presetLibrary
-        updatedLibrary.presets.removeValue(forKey: key)
-        updatedLibrary.ccMappings.removeValue(forKey: key)
-        guard persistPresetLibrary(updatedLibrary) else { return }
         selectPreset(bank: bank, program: program)
         presetRevision &+= 1
     }
@@ -1775,8 +1770,8 @@ struct ContentView: View {
             )
             .preferredColorScheme(.dark)
         }
-        .confirmationDialog("Restore this preset's default sound and CC assignments?", isPresented: $showsDefaultResetConfirmation) {
-            Button("Restore Defaults", role: .destructive) {
+        .confirmationDialog("Restore this preset's saved sound and CC assignments?", isPresented: $showsDefaultResetConfirmation) {
+            Button("Restore Saved Preset", role: .destructive) {
                 model.restoreCurrentPresetDefaults()
             }
             Button("Cancel", role: .cancel) {}

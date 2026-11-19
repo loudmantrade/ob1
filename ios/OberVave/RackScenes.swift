@@ -678,12 +678,13 @@ extension OberVaveModel {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let url = try pendingSceneURL ?? scenesFolder().appendingPathComponent("\(UUID().uuidString).obscene.json")
             let newKey = url.standardizedFileURL.absoluteString
+            var updated = patternDefaults
             if newKey != sceneSessionKey {
-                var updated = patternDefaults
                 try updated.copyScene(from: sceneSessionKey, to: newKey)
-                guard persistPatternDefaults(updated) else {
-                    throw SceneError.invalid("Could not save the scene's pattern defaults.")
-                }
+            }
+            try updated.seedMissing(document.patterns ?? [], scene: newKey)
+            guard persistPatternDefaults(updated) else {
+                throw SceneError.invalid("Could not save the scene's pattern defaults.")
             }
             try encoder.encode(document).write(to: url, options: .atomic)
             if pendingSceneURL == nil, sceneFileURL != nil {
@@ -710,6 +711,13 @@ extension OberVaveModel {
             if key == sceneSessionKey { return }
             let saved = sceneSessions[key]
             let document = try saved?.document ?? RackSceneDocument.read(from: url)
+            if saved == nil {
+                var updated = patternDefaults
+                try updated.seedMissing(document.patterns ?? [], scene: key)
+                guard persistPatternDefaults(updated) else {
+                    throw SceneError.invalid("Could not load the scene's pattern defaults.")
+                }
+            }
             let folder = try scenesFolder()
             let fileURL = url.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL ? url : nil
             switchScene(to: saved ?? SceneSessionState(document: document, pianoRollHistories: [:],

@@ -683,6 +683,15 @@ struct PatternDefaultLibrary: Codable, Equatable {
         try patterns.forEach { try $0.validate() }
         scenes[scene] = patterns.isEmpty ? nil : Dictionary(uniqueKeysWithValues: patterns.map { ($0.id, $0) })
     }
+
+    mutating func seedMissing(_ patterns: [SequencerPattern], scene: String) throws {
+        for pattern in patterns {
+            let cell = PatternCell(slot: pattern.slot, row: pattern.row)
+            if value(scene: scene, cell: cell) == nil {
+                try set(pattern, scene: scene, cell: cell)
+            }
+        }
+    }
 }
 
 struct DefaultButtonGesture {
@@ -1033,6 +1042,15 @@ struct PianoRollEditBuffer {
         redoStack.removeAll()
         pattern = candidate
         selection.formIntersection(Set(pattern.notes.map(\.id)))
+    }
+
+    mutating func restoreDefault(_ candidate: SequencerPattern) throws {
+        guard candidate.id == pattern.id else {
+            throw SceneError.invalid("The pattern default belongs to a different cell.")
+        }
+        try commit(candidate)
+        nextNoteID = max(nextNoteID, (pattern.notes.map(\.id).max() ?? 0) + 1)
+        nextAutomationID = max(nextAutomationID, (pattern.automation.map(\.id).max() ?? 0) + 1)
     }
 
     mutating func undo() {

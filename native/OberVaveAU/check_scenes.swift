@@ -12,6 +12,12 @@ struct SceneChecks {
         pattern.notes = [SequencerNote(id: 1, start: 0, duration: 240, pitch: 60, velocity: 100)]
         var library = PatternDefaultLibrary()
         try library.set(pattern, scene: "one", cell: a)
+        var savedVersion = pattern
+        savedVersion.name = "Saved scene version"
+        try library.seedMissing([savedVersion], scene: "one")
+        precondition(library.value(scene: "one", cell: a) == pattern)
+        try library.seedMissing([savedVersion], scene: "fresh")
+        precondition(library.value(scene: "fresh", cell: a) == savedVersion)
         try library.transfer(scene: "one", source: a, destination: b, copying: true, deleting: false)
         precondition(library.value(scene: "one", cell: a) == pattern)
         var copy = try { () throws -> SequencerPattern in
@@ -43,6 +49,21 @@ struct SceneChecks {
             fatalError("Duplicate defaults accepted")
         } catch { }
         precondition(library.value(scene: "one", cell: b)?.name == "New individual default")
+        var editor = try PianoRollEditBuffer(pattern: pattern)
+        var restored = pattern
+        restored.notes = [SequencerNote(id: 50, start: 120, duration: 240, pitch: 65, velocity: 90)]
+        try editor.restoreDefault(restored)
+        precondition(editor.pattern == restored && editor.canUndo)
+        editor.undo()
+        precondition(editor.pattern == pattern)
+        editor.redo()
+        precondition(editor.pattern == restored)
+        try editor.create(start: 480, pitch: 67, duration: 240, velocity: 100, output: false)
+        precondition(editor.pattern.notes.contains { $0.id == 51 })
+        do {
+            try editor.restoreDefault(copy)
+            fatalError("A different cell default was accepted")
+        } catch { }
         try library.transfer(scene: "one", source: c, destination: c, copying: false, deleting: true)
         precondition(library.value(scene: "one", cell: c) == nil)
         do {

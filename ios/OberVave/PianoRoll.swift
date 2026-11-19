@@ -36,6 +36,7 @@ struct PianoRollView: View {
     @State private var laneGesture: AutomationGesture?
     @State private var velocityGesture: VelocityGesture?
     @State private var markerGesture: MarkerGesture?
+    @State private var confirmsPatternDefault = false
 
     private enum Lane: String, CaseIterable { case none = "Off", velocity = "Velocity", cc = "CC", bend = "Pitch Bend" }
     private enum LaneMode: String, CaseIterable { case points = "Points", draw = "Freehand" }
@@ -92,6 +93,14 @@ struct PianoRollView: View {
                     .contextMenu { historyMenu(undo: true) }
                 Button("Redo") { command { $0.redo() } }.disabled(editor?.canRedo != true || busy)
                     .contextMenu { historyMenu(undo: false) }
+                PatternDefaultButton(enabled: !busy && editor != nil) { save in
+                    if save {
+                        confirmsPatternDefault = true
+                    } else {
+                        restorePatternDefault()
+                    }
+                }
+                .frame(width: 76, height: 36)
                 Button("Copy") {
                     do { clipboard = try editor?.copySelection() ?? [] }
                     catch { model.errorMessage = error.localizedDescription }
@@ -203,6 +212,10 @@ struct PianoRollView: View {
             }
         }
         .padding()
+        .confirmationDialog("Save the current pattern as its default?", isPresented: $confirmsPatternDefault) {
+            Button("Update Pattern Default") { savePatternDefault() }
+            Button("Cancel", role: .cancel) {}
+        }
         .sheet(isPresented: $showRegions) {
             PianoRollRegionsSheet(pattern: displayedPattern) { start, loopStart, loopEnd, tailEnd, loop in
                 command { try $0.regions(patternStart: start, loopStart: loopStart, loopEnd: loopEnd,
@@ -260,6 +273,38 @@ struct PianoRollView: View {
     }
 
     private var busy: Bool { model.pendingPianoPublication != nil || beforePublication != nil }
+
+    private func savePatternDefault() {
+        guard !busy, model.sequencerInteractionEpoch == sceneEpoch,
+              let current = editor?.pattern,
+              !model.sceneSwitchPending, model.pendingSceneName == nil,
+              model.pendingPatternTransfer == nil, model.pendingSequencerHistory == nil,
+              ov_seq_record_state_for_slot(UInt32(current.slot)) == 0,
+              ov_seq_pad_pending(UInt32(current.slot), UInt32(current.row)) == 0,
+              model.pattern(slot: current.slot, row: current.row) == current else {
+            model.errorMessage = "Finish recording and pending edits before saving the pattern default."
+            return
+        }
+        do {
+            var updated = model.patternDefaults
+            try updated.set(current, scene: model.sceneSessionKey,
+                            cell: PatternCell(slot: current.slot, row: current.row))
+            if model.persistPatternDefaults(updated) { model.sceneStatus = "Saved pattern default" }
+        } catch { model.errorMessage = "Could not save pattern default: \(error.localizedDescription)" }
+    }
+
+    private func restorePatternDefault() {
+        guard model.sequencerInteractionEpoch == sceneEpoch else {
+            model.errorMessage = "The scene changed. Reopen the Piano Roll."
+            return
+        }
+        let cell = PatternCell(slot: pattern.slot, row: pattern.row)
+        guard let value = model.patternDefaults.value(scene: model.sceneSessionKey, cell: cell) else {
+            model.errorMessage = "This pattern has no saved default. Hold DEFAULT to save one."
+            return
+        }
+        command { try $0.restoreDefault(value) }
+    }
 
     @ViewBuilder
     private func historyMenu(undo: Bool) -> some View {
@@ -782,6 +827,93 @@ struct PianoRollRegionsSheet: View {
             Spacer()
             TextField(title, text: value).keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing)
         }
+    }
+}
+
+private struct PatternDefaultButton: UIViewRepresentable {
+    let enabled: Bool
+    let action: (Bool) -> Void
+
+    func makeUIView(context: Context) -> PatternDefaultControl {
+        PatternDefaultControl()
+    }
+
+    func updateUIView(_ control: PatternDefaultControl, context: Context) {
+        control.isEnabled = enabled
+        control.action = action
+    }
+}
+
+private final class PatternDefaultControl: UIButton {
+    var action: ((Bool) -> Void)?
+    private var holdTimer: Timer?
+    private var holdTriggered = false
+    private var trackingTouch = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setTitle("DEFAULT", for: .normal)
+        titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+        backgroundColor = .tertiarySystemFill
+        layer.cornerRadius = 7
+        accessibilityLabel = "Pattern default"
+        accessibilityHint = "Tap to restore, or hold to save a new default."
+        accessibilityCustomActions = [
+            UIAccessibilityCustomAction(name: "Save pattern default", target: self,
+                                        selector: #selector(saveAccessibility))
+        ]
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    @objc private func saveAccessibility() -> Bool {
+        guard isEnabled else { return false }
+        action?(true)
+        return true
+    }
+
+    override func accessibilityActivate() -> Bool {
+        guard isEnabled else { return false }
+        action?(false)
+        return true
+    }
+
+    override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+        guard isEnabled else { return false }
+        holdTriggered = false
+        trackingTouch = true
+        let timer = Timer(timeInterval: DefaultButtonGesture.holdTime, repeats: false) { [weak self] _ in
+            guard let self, self.trackingTouch, self.isEnabled else { return }
+            self.holdTriggered = true
+            self.action?(true)
+        }
+        holdTimer?.invalidate()
+        holdTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        return true
+    }
+
+    override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+        if !bounds.insetBy(dx: -10, dy: -10).contains(touch.location(in: self)) {
+            holdTimer?.invalidate()
+            trackingTouch = false
+        }
+        return trackingTouch
+    }
+
+    override func endTracking(_ touch: UITouch?, with event: UIEvent?) {
+        holdTimer?.invalidate()
+        if trackingTouch && !holdTriggered && isEnabled { action?(false) }
+        trackingTouch = false
+    }
+
+    override func cancelTracking(with event: UIEvent?) {
+        holdTimer?.invalidate()
+        trackingTouch = false
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { holdTimer?.invalidate(); trackingTouch = false }
     }
 }
 

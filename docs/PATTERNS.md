@@ -301,6 +301,12 @@ the finger must be lifted before another edit can start.
 Undo and Redo operate on whole gestures. Audio publication is revision-checked
 and does not restart active or queued playback. Already-sounding notes retain
 their original release times; future onsets use the new data.
+In Piano Roll, tap DEFAULT to restore the pattern default as one undoable edit.
+Hold DEFAULT and confirm to save the current pattern as its new default. The
+first saved scene supplies defaults for its patterns when no explicit default
+exists; an unsaved pattern without a default reports that one must be saved.
+Defaults follow pattern moves and independent copies, and are stored locally on
+the device rather than in exported scene files.
 Hold Undo or Redo to show the corresponding history, newest available step
 first. Selecting an entry applies every step through that entry. Piano Roll
 publishes the resulting pattern once; scene and sequencer history wait for
