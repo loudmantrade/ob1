@@ -334,6 +334,20 @@ struct SceneChecks {
         precondition(pasted.pattern == editPattern)
         pasted.redo()
         precondition(pasted.pattern.notes.count == 5)
+        precondition(pasted.historyTitles(undo: true) == ["Notes · 5 → 3"])
+        var historyJump = pasted
+        historyJump.undo()
+        precondition(historyJump.historyTitles(undo: false) == ["Notes · 3 → 5"])
+        historyJump.redo()
+        precondition(historyJump.pattern == pasted.pattern)
+        try historyJump.transpose(by: 1)
+        let latestJumpPattern = historyJump.pattern
+        precondition(historyJump.historyTitles(undo: true) == ["Edit notes", "Notes · 5 → 3"])
+        historyJump.undo(); historyJump.undo()
+        precondition(historyJump.pattern == editPattern)
+        precondition(historyJump.historyTitles(undo: false) == ["Notes · 3 → 5", "Edit notes"])
+        historyJump.redo(); historyJump.redo()
+        precondition(historyJump.pattern == latestJumpPattern)
         var copiedHistory = pasted.retargeted(to: PatternCell(slot: 2, row: 3))
         precondition(copiedHistory.pattern.slot == 2 && copiedHistory.pattern.row == 3 && copiedHistory.canUndo)
         copiedHistory.undo()
@@ -386,6 +400,19 @@ struct SceneChecks {
         precondition(soundHistory.undoStack.last == .value(masterEdit) && soundHistory.undoStack.count == 32)
         soundHistory.acknowledge(undo: true)
         precondition(soundHistory.redoStack.last == .value(masterEdit))
+        var routeBefore = RackInstrument.oberVave(slot: 0, channel: 1)
+        routeBefore.name = "Original"
+        var routeAfter = routeBefore
+        routeAfter.channel = 2
+        routeAfter.name = "Edited"
+        let routeEdit = SceneRouteEdit(before: routeBefore, after: routeAfter)
+        precondition(routeEdit.mask == 1)
+        var currentRoute = routeAfter
+        currentRoute.levelDB = -12
+        routeEdit.apply(to: &currentRoute, undo: true)
+        precondition(currentRoute.channel == 1 && currentRoute.name == "Original" && currentRoute.levelDB == -12)
+        soundHistory.record(routeEdit)
+        precondition(soundHistory.undoStack.last == .route(routeEdit) && soundHistory.redoStack.isEmpty)
         var midiGesture = ExternalParameterGesture(epoch: 1, source: 7, status: 0xB0,
                                                    controller: 74, frame: 100)
         midiGesture.merge(slot: 0, before: [10, 5], after: [20, 5])

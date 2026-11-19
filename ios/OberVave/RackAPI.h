@@ -59,6 +59,18 @@ typedef struct { uint64_t token; uint32_t success; } ov_rack_parameter_result;
 int ov_rack_change_parameters(const ov_rack_parameter_change *changes, uint32_t count,
                               uint64_t epoch, uint64_t token);
 int ov_rack_read_parameter_result(ov_rack_parameter_result *result);
+/* UI parameter commands can report queue failure and preserve ordering when
+   reading a value most recently changed by pattern automation. */
+int ov_rack_set_parameter(uint32_t slot, uint32_t parameter, uint32_t value);
+/* 1: value is automation-owned, 0: it is not or a UI command is pending,
+   -1: the coherent snapshot was unavailable. */
+int ov_rack_automated_parameter(uint32_t slot, uint32_t parameter, uint32_t *value);
+/* Route masks address channel, low note, high note, level, pan and mute in
+   bits 0..5. Unselected fields are neither checked nor changed. Completion
+   uses the parameter-result queue. */
+int ov_rack_change_route(uint32_t slot, uint32_t mask,
+                         const ov_instrument_config *expected, const ov_instrument_config *replacement,
+                         uint64_t epoch, uint64_t token);
 /* Post-instrument level/pan/mute stereo peak, normalized to 0...65535; read clears it. */
 uint32_t ov_rack_take_level(uint32_t slot);
 uint32_t ov_rack_stop_generation(void);

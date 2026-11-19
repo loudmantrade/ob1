@@ -112,8 +112,47 @@ struct RackInstanceSidebar: View {
 }
 
 extension OberVaveModel {
+    func jumpSceneHistory(undo: Bool, steps: Int) {
+        guard sceneHistoryJump == nil, steps > 0 else { return }
+        syncExternalParameterHistory()
+        guard externalParameterGestures.isEmpty, pendingSceneParameterHistory == nil else {
+            errorMessage = "Finish the external controller movement before using history."
+            return
+        }
+        sceneHistoryJump = HistoryJump(undo: undo, remaining: steps)
+        advanceSceneHistoryJump()
+    }
+
+    private func advanceSceneHistoryJump() {
+        while let jump = sceneHistoryJump, jump.remaining > 0 {
+            let count = jump.undo ? sceneParameterHistory.undoStack.count : sceneParameterHistory.redoStack.count
+            guard count > 0 else { sceneHistoryJump = nil; return }
+            applySceneParameterHistory(undo: jump.undo)
+            if pendingSceneParameterHistory != nil { return }
+            let after = jump.undo ? sceneParameterHistory.undoStack.count : sceneParameterHistory.redoStack.count
+            guard after == count - 1 else { sceneHistoryJump = nil; return }
+            sceneHistoryJump?.remaining -= 1
+        }
+        sceneHistoryJump = nil
+    }
+
+    func jumpSequencerHistory(undo: Bool, steps: Int) {
+        guard sequencerHistoryJump == nil, steps > 0 else { return }
+        sequencerHistoryJump = HistoryJump(undo: undo, remaining: steps)
+        advanceSequencerHistoryJump()
+    }
+
+    private func advanceSequencerHistoryJump() {
+        guard let jump = sequencerHistoryJump, jump.remaining > 0 else {
+            sequencerHistoryJump = nil
+            return
+        }
+        applySequencerHistory(undo: jump.undo)
+        if pendingSequencerHistory == nil { sequencerHistoryJump = nil }
+    }
+
     func syncExternalParameterHistory(finish: Bool = false) {
-        guard pendingSceneParameterHistory == nil else { return }
+        guard pendingSceneParameterHistory == nil, sceneHistoryJump == nil else { return }
         let lost = ov_rack_external_history_lost()
         if lost != 0 {
             externalParameterGestures.removeAll()
@@ -170,6 +209,32 @@ extension OberVaveModel {
             errorMessage = "Finish the current parameter edit before using history."; return
         }
         guard let entry = undo ? sceneParameterHistory.undoStack.last : sceneParameterHistory.redoStack.last else { return }
+        if case .route(let edit) = entry {
+            let old = undo ? edit.after : edit.before
+            let next = undo ? edit.before : edit.after
+            guard let current = instruments.first(where: { $0.slot == old.slot }),
+                  edit.before.name == edit.after.name || current.name == old.name else {
+                errorMessage = "The instrument changed; history was not applied."
+                return
+            }
+            if edit.mask == 0 {
+                guard let index = instruments.firstIndex(where: { $0.slot == old.slot }) else { return }
+                edit.apply(to: &instruments[index], undo: undo)
+                sceneParameterHistory.acknowledge(undo: undo)
+                return
+            }
+            var oldConfig = old.coreConfig(), newConfig = next.coreConfig()
+            let epoch = ov_seq_scene_epoch()
+            sceneParameterToken &+= 1
+            guard ov_rack_change_route(UInt32(old.slot), edit.mask, &oldConfig, &newConfig,
+                                       epoch, sceneParameterToken) != 0 else {
+                errorMessage = "Could not queue the instrument history operation."
+                return
+            }
+            pendingSceneParameterHistory = PendingSceneParameterHistory(token: sceneParameterToken,
+                epoch: epoch, edits: [], undo: undo, route: edit)
+            return
+        }
         if case .value(let edit) = entry {
             let expected = undo ? edit.after : edit.before
             let replacement = undo ? edit.before : edit.after
@@ -221,16 +286,25 @@ extension OberVaveModel {
         var parameterResult = ov_rack_parameter_result()
         while ov_rack_read_parameter_result(&parameterResult) != 0 {
             if let pending = pendingSceneParameterHistory, pending.token == parameterResult.token {
-                defer { pendingSceneParameterHistory = nil }
+                pendingSceneParameterHistory = nil
                 if parameterResult.success != 0 && pending.epoch == ov_seq_scene_epoch() {
                     sceneParameterHistory.acknowledge(undo: pending.undo)
+                    if let route = pending.route,
+                       let index = instruments.firstIndex(where: { $0.slot == route.before.slot }) {
+                        route.apply(to: &instruments[index], undo: pending.undo)
+                    }
                     for edit in pending.edits {
                         guard let index = instruments.firstIndex(where: { $0.slot == edit.slot }) else { continue }
                         let value = pending.undo ? edit.before : edit.after
                         instruments[index].parameters[edit.parameter] = value
                         if edit.slot == selectedSlot { parameterValues[edit.parameter] = value }
                     }
+                    if sceneHistoryJump != nil {
+                        sceneHistoryJump?.remaining -= 1
+                        advanceSceneHistoryJump()
+                    }
                 } else {
+                    sceneHistoryJump = nil
                     errorMessage = "The parameter history operation was rejected because the scene or parameter changed."
                 }
             }
@@ -253,7 +327,7 @@ extension OberVaveModel {
                             patterns.removeAll { $0.id == pattern.id }
                             patterns.append(pattern)
                             sequencerHistory.record(SequencerHistoryEntry(before: [before],
-                                                                          after: [sequencerSnapshot(cell)]))
+                                after: [sequencerSnapshot(cell)], title: "Record · \(pattern.name)"))
                         }
                     } catch { errorMessage = error.localizedDescription }
                 }
@@ -293,8 +367,10 @@ extension OberVaveModel {
                     patterns = transfer.acknowledged(in: patterns,
                         sourceUnchanged: sourceUnchanged, destinationUnchanged: destinationUnchanged)
                     if sourceUnchanged && destinationUnchanged {
+                        let action = transfer.deleting ? "Delete" : transfer.copying ? "Copy" : "Move"
                         sequencerHistory.record(SequencerHistoryEntry(before: pending.before,
-                            after: pending.before.map { sequencerSnapshot($0.cell) }))
+                            after: pending.before.map { sequencerSnapshot($0.cell) },
+                            title: "\(action) · \(transfer.source.name)"))
                     } else {
                         errorMessage = "The pattern edit was superseded before its history could be saved."
                     }
@@ -302,7 +378,7 @@ extension OberVaveModel {
                     errorMessage = "The pattern edit was rejected because a cell, scene or recording changed. No patterns were modified."
                 }
             } else if let pending = pendingSequencerHistory, pending.token == editResult.token {
-                defer { pendingSequencerHistory = nil }
+                pendingSequencerHistory = nil
                 let expected = pending.undo ? pending.entry.after : pending.entry.before
                 let target = pending.undo ? pending.entry.before : pending.entry.after
                 let revisions = [editResult.source_revision, editResult.target_revision]
@@ -319,8 +395,13 @@ extension OberVaveModel {
                         sequencerHistory.record(pending.entry)
                     } else {
                         sequencerHistory.acknowledge(pending.entry, undo: pending.undo)
+                        if sequencerHistoryJump != nil {
+                            sequencerHistoryJump?.remaining -= 1
+                            advanceSequencerHistoryJump()
+                        }
                     }
                 } else {
+                    sequencerHistoryJump = nil
                     errorMessage = "The sequencer history operation was rejected or superseded because a cell, scene or recording changed."
                 }
             } else if let pending = pendingPianoPublication, pending.token == editResult.token {
@@ -452,11 +533,15 @@ extension OberVaveModel {
         } catch { errorMessage = error.localizedDescription; return false }
     }
 
-    func configureInstrument(_ instrument: RackInstrument) -> Bool {
-        guard pendingSceneName == nil else { return false }
+    func configureInstrument(_ instrument: RackInstrument, recordHistory: Bool = true) -> Bool {
+        guard pendingSceneName == nil, pendingSceneParameterHistory == nil else { return false }
         do {
             try instrument.validate()
-            guard let index = instruments.firstIndex(where: { $0.slot == instrument.slot }),
+            guard let index = instruments.firstIndex(where: { $0.slot == instrument.slot }) else {
+                throw SceneError.invalid("Could not find instrument.")
+            }
+            let previous = instruments[index]
+            guard
                   ov_rack_configure(UInt32(instrument.slot), UInt32(instrument.channel),
                                     UInt32(instrument.lowNote), UInt32(instrument.highNote),
                                     Float(instrument.levelDB), Float(instrument.pan), instrument.muted ? 1 : 0) != 0 else {
@@ -469,6 +554,7 @@ extension OberVaveModel {
             instruments[index].levelDB = instrument.levelDB
             instruments[index].pan = instrument.pan
             instruments[index].muted = instrument.muted
+            if recordHistory { sceneParameterHistory.record(SceneRouteEdit(before: previous, after: instruments[index])) }
             return true
         } catch { errorMessage = error.localizedDescription; return false }
     }
@@ -810,7 +896,8 @@ extension OberVaveModel {
             }
             if before.pattern == pattern { return true }
             let after = SequencerCellSnapshot(cell: cell, pattern: pattern, pianoHistory: nil)
-            submitSequencerHistory(SequencerHistoryEntry(before: [before], after: [after]),
+            submitSequencerHistory(SequencerHistoryEntry(before: [before], after: [after],
+                                                        title: "Edit · \(pattern.name)"),
                                    undo: false, recordingNewEntry: true)
             return pendingSequencerHistory != nil
         } catch { errorMessage = error.localizedDescription; return false }
@@ -976,7 +1063,7 @@ extension OberVaveModel {
         if let level { instrument.levelDB = level }
         if let pan { instrument.pan = pan }
         if let mute { instrument.muted = mute }
-        _ = configureInstrument(instrument)
+        _ = configureInstrument(instrument, recordHistory: false)
     }
 }
 
@@ -1163,9 +1250,20 @@ struct SequencerView: View {
     private var width: CGFloat { max(1, model.keyboardChannelWidth) }
     private var padHeight: CGFloat { width }
     private var historyBusy: Bool {
-        model.pendingSequencerHistory != nil || model.pendingPatternTransfer != nil ||
+        model.pendingSequencerHistory != nil || model.sequencerHistoryJump != nil || model.pendingPatternTransfer != nil ||
             model.pendingPianoPublication != nil || model.pendingSceneName != nil ||
             model.sceneSwitchPending || !model.recordingPhases.isEmpty
+    }
+
+    @ViewBuilder
+    private func sequencerHistoryMenu(undo: Bool) -> some View {
+        let stack = undo ? model.sequencerHistory.undoStack : model.sequencerHistory.redoStack
+        let entries = Array(stack.reversed())
+        ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
+            Button("\(index + 1). \(entry.title)") {
+                model.jumpSequencerHistory(undo: undo, steps: index + 1)
+            }
+        }
     }
 
     var body: some View {
@@ -1179,10 +1277,12 @@ struct SequencerView: View {
                     Label("Undo", systemImage: "arrow.uturn.backward")
                 }
                 .disabled(model.sequencerHistory.undoStack.isEmpty || historyBusy)
+                .contextMenu { sequencerHistoryMenu(undo: true) }
                 Button { model.applySequencerHistory(undo: false) } label: {
                     Label("Redo", systemImage: "arrow.uturn.forward")
                 }
                 .disabled(model.sequencerHistory.redoStack.isEmpty || historyBusy)
+                .contextMenu { sequencerHistoryMenu(undo: false) }
                 Spacer()
                 if !model.recordingPhases.isEmpty {
                     Button {
@@ -1192,6 +1292,7 @@ struct SequencerView: View {
                               systemImage: "record.circle.fill").foregroundStyle(.red)
                     }.buttonStyle(.bordered)
                 }
+
                 Text(model.pendingPatternTransfer == nil && model.pendingSequencerHistory == nil ? "DRAG CENTER: MOVE · HOLD: COPY · EDGES: SCROLL" : "APPLYING EDIT · WAITING FOR AUDIO")
                     .font(.caption2.monospaced()).foregroundStyle(.secondary)
             }
@@ -1675,6 +1776,37 @@ private struct SequencerPatternEditor: View {
     }
 }
 
+struct SceneHistoryButton: View {
+    @ObservedObject var model: OberVaveModel
+    let undo: Bool
+
+    private var entries: [SceneHistoryEntry] {
+        Array((undo ? model.sceneParameterHistory.undoStack : model.sceneParameterHistory.redoStack).reversed())
+    }
+
+    private var busy: Bool {
+        model.pendingSceneParameterHistory != nil || model.sceneHistoryJump != nil ||
+        model.pendingSceneName != nil || model.sceneSwitchPending ||
+        !model.activeParameterEdits.isEmpty || !model.activeSceneValueEdits.isEmpty ||
+        !model.externalParameterGestures.isEmpty
+    }
+
+    var body: some View {
+        Button { model.applySceneParameterHistory(undo: undo) } label: {
+            Image(systemName: undo ? "arrow.uturn.backward" : "arrow.uturn.forward")
+        }
+        .disabled(entries.isEmpty || busy)
+        .accessibilityLabel(undo ? "Undo scene edit" : "Redo scene edit")
+        .contextMenu {
+            ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
+                Button("\(index + 1). \(entry.title)") {
+                    model.jumpSceneHistory(undo: undo, steps: index + 1)
+                }
+            }
+        }
+    }
+}
+
 struct RackSceneView: View {
     @ObservedObject var model: OberVaveModel
     @Environment(\.dismiss) private var dismiss
@@ -1765,16 +1897,8 @@ struct RackSceneView: View {
             .disabled(model.sceneSwitchPending)
             .toolbar {
                 ToolbarItemGroup(placement: .navigationBarLeading) {
-                    Button { model.applySceneParameterHistory(undo: true) } label: {
-                        Image(systemName: "arrow.uturn.backward")
-                    }
-                    .accessibilityLabel("Undo scene edit")
-                    .disabled(model.sceneParameterHistory.undoStack.isEmpty || sceneHistoryBusy)
-                    Button { model.applySceneParameterHistory(undo: false) } label: {
-                        Image(systemName: "arrow.uturn.forward")
-                    }
-                    .accessibilityLabel("Redo scene edit")
-                    .disabled(model.sceneParameterHistory.redoStack.isEmpty || sceneHistoryBusy)
+                    SceneHistoryButton(model: model, undo: true)
+                    SceneHistoryButton(model: model, undo: false)
                 }
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
@@ -1812,11 +1936,6 @@ struct RackSceneView: View {
         .preferredColorScheme(.dark)
     }
 
-    private var sceneHistoryBusy: Bool {
-        model.pendingSceneParameterHistory != nil || model.pendingSceneName != nil ||
-        model.sceneSwitchPending || !model.activeParameterEdits.isEmpty ||
-        !model.activeSceneValueEdits.isEmpty || !model.externalParameterGestures.isEmpty
-    }
 }
 
 private struct RackInstrumentEditor: View {

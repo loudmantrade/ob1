@@ -89,7 +89,9 @@ struct PianoRollView: View {
                 Text("Piano Roll · \(pattern.name)").font(.headline)
                 Spacer()
                 Button("Undo") { command { $0.undo() } }.disabled(editor?.canUndo != true || busy)
+                    .contextMenu { historyMenu(undo: true) }
                 Button("Redo") { command { $0.redo() } }.disabled(editor?.canRedo != true || busy)
+                    .contextMenu { historyMenu(undo: false) }
                 Button("Copy") {
                     do { clipboard = try editor?.copySelection() ?? [] }
                     catch { model.errorMessage = error.localizedDescription }
@@ -259,8 +261,28 @@ struct PianoRollView: View {
 
     private var busy: Bool { model.pendingPianoPublication != nil || beforePublication != nil }
 
+    @ViewBuilder
+    private func historyMenu(undo: Bool) -> some View {
+        let titles = editor?.historyTitles(undo: undo) ?? []
+        ForEach(Array(titles.enumerated()), id: \.offset) { index, title in
+            Button("\(index + 1). \(title)") {
+                command { candidate in
+                    for _ in 0...index {
+                        if undo { candidate.undo() } else { candidate.redo() }
+                    }
+                }
+            }
+        }
+    }
+
     private func publish(_ candidate: PianoRollEditBuffer, replacing previous: PianoRollEditBuffer) {
-        guard candidate.pattern != previous.pattern else { editor = candidate; return }
+        guard candidate.pattern != previous.pattern else {
+            editor = candidate
+            if model.pattern(slot: pattern.slot, row: pattern.row) == candidate.pattern {
+                model.pianoRollHistories[pattern.id] = candidate
+            }
+            return
+        }
         guard !busy, model.pattern(slot: pattern.slot, row: pattern.row) == previous.pattern else {
             editor = previous
             model.errorMessage = "The pattern changed while editing. Reopen the Piano Roll."

@@ -254,6 +254,7 @@ struct Instrument final : Retired {
     uint8_t bankMSB = 0, bankLSB = 0;
     int32_t learn = -1;
     uint8_t activeNotes[16][128] {};
+    std::array<bool, NPARAM> automatedParameters {};
     music::NoteOwnership noteOwners;
     float leftGain = 1, rightGain = 1;
     explicit Instrument(const ov_instrument_config& c, uint32_t slot = 0)
@@ -312,6 +313,11 @@ constexpr uint32_t parameterChangeLimit = capacity * OV_RACK_PARAMETERS;
 struct ParameterChangeRequest final : Retired {
     std::array<ov_rack_parameter_change, parameterChangeLimit> changes {};
     uint32_t count = 0;
+    uint64_t epoch = 0, token = 0;
+};
+struct RouteChangeRequest final : Retired {
+    ov_instrument_config expected {}, replacement {};
+    uint32_t slot = 0, mask = 0;
     uint64_t epoch = 0, token = 0;
 };
 constexpr uint32_t parameterResultCapacity = 16;
@@ -414,11 +420,13 @@ struct Snapshot {
     std::atomic<uint32_t> peak {0};
     std::atomic<uint32_t> sequencerPeak {0};
     std::array<std::atomic<uint8_t>, NPARAM> parameters {}, cc {};
+    std::array<std::atomic<uint8_t>, NPARAM> automated {};
     std::array<std::atomic<uint32_t>, 8> levels {};
     std::atomic<uint32_t> program {17}, learned {0}, sync {0}, grid {2};
     std::atomic<uint32_t> sequence {0};
 };
 std::array<Snapshot, capacity> snapshots;
+std::array<std::array<std::atomic<uint32_t>, NPARAM>, capacity> pendingUIParameters {};
 std::atomic<uint32_t> selected {0}, audioFrame {0}, midiBuffer {20};
 std::atomic<uint32_t> tempo {120}, internalTempo {120}, externalClock {0}, error {0};
 std::atomic<uint32_t> stopGeneration {0};
@@ -468,12 +476,13 @@ void forgetPedals(uint32_t slot)
 }
 
 enum class Kind { MIDI, Audition, StopAll, SeqClip, SeqEdit, SeqChangeCells, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
-    SeqFinish, SourceClose, Parameter, ParameterChange, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
+    SeqFinish, SourceClose, Parameter, ParameterChange, RouteChange, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
 struct Command {
     Kind kind = Kind::MIDI;
     uint32_t slot = 0, a = 0, b = 0, c = 0, due = 0;
     bool scheduled = false;
     bool padAcknowledgement = false;
+    bool parameterAcknowledgement = false;
     music::Source source {};
     uint64_t epoch = 0;
     Retired* object = nullptr;
@@ -516,6 +525,7 @@ void publish(uint32_t slot)
     for (uint32_t p = 0; p < NPARAM; ++p) {
         out.parameters[p].store(c.parameters[p], std::memory_order_relaxed);
         out.cc[p].store(c.cc[p], std::memory_order_relaxed);
+        out.automated[p].store(scene->slots[slot]->automatedParameters[p], std::memory_order_relaxed);
     }
     out.program.store(c.program);
     out.sync.store(c.sync);
@@ -544,9 +554,9 @@ void setProgram(uint32_t slot, uint32_t index)
     inst.config.program = index;
     for (uint32_t p = 0; p < NPARAM; ++p) {
         inst.config.parameters[p] = patch.v[p];
+        inst.automatedParameters[p] = false;
         inst.engine->parameter(p, patch.v[p]);
     }
-    publish(slot);
 }
 void stopAll()
 {
@@ -791,8 +801,9 @@ void routeEvent(const music::Event& event)
         const bool captureExternal = externalHistoryEnabled.load(std::memory_order_relaxed) &&
             event.source.kind == music::SourceKind::ExternalMIDI &&
             (kind == 0xB0 || kind == 0xC0 || kind == 0xD0 || kind == 0xE0);
+        const bool trackParameters = kind == 0xB0 || kind == 0xC0 || kind == 0xD0 || kind == 0xE0;
         ov_instrument_config before;
-        if (captureExternal) before = inst->config;
+        if (trackParameters) before = inst->config;
         const auto source = Engine::controller_source(status, d1);
         const bool overridden = inst->engine->controllerOverride(source);
         if (source) {
@@ -842,11 +853,15 @@ void routeEvent(const music::Event& event)
                 inst->config.parameters[p] = value;
                 inst->engine->parameter(p, value);
             }
-            publish(slot);
         } else {
             deliver(*inst, routed);
-            publish(slot);
         }
+        if (trackParameters) {
+            for (uint32_t p = 0; p < NPARAM; ++p)
+                if (before.parameters[p] != inst->config.parameters[p])
+                    inst->automatedParameters[p] = event.source.kind == music::SourceKind::Pattern;
+        }
+        publish(slot);
         if (captureExternal) {
             const auto write = externalHistoryWrite.load(std::memory_order_relaxed);
             if (write - externalHistoryRead.load(std::memory_order_acquire) >= externalHistoryCapacity) {
@@ -896,13 +911,49 @@ bool samePattern(const music::PatternData& a, const music::PatternData& b)
 void apply(const Command& c)
 {
     if (c.padAcknowledgement) padCommands[c.slot][c.a].fetch_sub(1);
+    if (c.kind == Kind::RouteChange) {
+        auto* request = static_cast<RouteChangeRequest*>(c.object);
+        auto& pointer = scene->slots[request->slot];
+        bool valid = request->epoch == sceneEpoch.load() && bool(pointer);
+        if (valid) {
+            const auto& current = pointer->config;
+            const auto& old = request->expected;
+            const auto& next = request->replacement;
+            const auto mask = request->mask;
+            valid = (!(mask & 1) || current.channel == old.channel) &&
+                (!(mask & 2) || current.low_note == old.low_note) &&
+                (!(mask & 4) || current.high_note == old.high_note) &&
+                (!(mask & 8) || current.level_db == old.level_db) &&
+                (!(mask & 16) || current.pan == old.pan) &&
+                (!(mask & 32) || current.muted == old.muted);
+            const auto low = (mask & 2) ? next.low_note : current.low_note;
+            const auto high = (mask & 4) ? next.high_note : current.high_note;
+            valid = valid && low <= high;
+            if (valid) {
+                auto& target = pointer->config;
+                if (mask & 1) target.channel = next.channel;
+                if (mask & 2) target.low_note = next.low_note;
+                if (mask & 4) target.high_note = next.high_note;
+                if (mask & 8) target.level_db = next.level_db;
+                if (mask & 16) target.pan = next.pan;
+                if (mask & 32) target.muted = next.muted;
+                publish(request->slot);
+            }
+        }
+        const auto write = parameterWrite.load(std::memory_order_relaxed);
+        parameterResults[write % parameterResultCapacity] = {request->token, valid ? 1u : 0u};
+        parameterWrite.store(write + 1, std::memory_order_release);
+        retire(request);
+        return;
+    }
     if (c.kind == Kind::ParameterChange) {
         auto* request = static_cast<ParameterChangeRequest*>(c.object);
         bool valid = request->epoch == sceneEpoch.load();
         for (uint32_t i = 0; i < request->count; ++i) {
             const auto& change = request->changes[i];
             const auto& inst = scene->slots[change.slot];
-            valid = valid && inst && inst->config.parameters[change.parameter] == change.expected;
+            valid = valid && inst && (inst->config.parameters[change.parameter] == change.expected ||
+                                      inst->automatedParameters[change.parameter]);
         }
         uint16_t affected = 0;
         if (valid) for (uint32_t i = 0; i < request->count; ++i) {
@@ -910,6 +961,7 @@ void apply(const Command& c)
             auto& inst = *scene->slots[change.slot];
             inst.engine->boundary({processedFrames});
             inst.config.parameters[change.parameter] = change.replacement;
+            inst.automatedParameters[change.parameter] = false;
             inst.engine->parameter(change.parameter, change.replacement);
             affected |= uint16_t(1u << change.slot);
         }
@@ -1217,12 +1269,16 @@ void apply(const Command& c)
         publish(c.slot);
         return;
     }
-    if (!pointer) return;
+    if (!pointer) {
+        if (c.parameterAcknowledgement) pendingUIParameters[c.slot][c.a].fetch_sub(1, std::memory_order_release);
+        return;
+    }
     auto& inst = *pointer;
     inst.engine->boundary({processedFrames});
     switch (c.kind) {
     case Kind::Parameter:
         inst.config.parameters[c.a] = c.b;
+        inst.automatedParameters[c.a] = false;
         inst.engine->parameter(c.a, c.b);
         break;
     case Kind::CC: inst.config.cc[c.a] = c.b; break;
@@ -1250,6 +1306,7 @@ void apply(const Command& c)
     default: break;
     }
     publish(c.slot);
+    if (c.parameterAcknowledgement) pendingUIParameters[c.slot][c.a].fetch_sub(1, std::memory_order_release);
 }
 void drain()
 {
@@ -1892,6 +1949,24 @@ int ov_rack_change_parameters(const ov_rack_parameter_change* changes, uint32_t 
         request.release(); return 1;
     } catch (const std::bad_alloc&) { error.store(3); return 0; }
 }
+int ov_rack_change_route(uint32_t slot, uint32_t mask, const ov_instrument_config* expected,
+                         const ov_instrument_config* replacement, uint64_t epoch, uint64_t token)
+{
+    using namespace rack;
+    if (slot >= capacity || !mask || (mask & ~63u) || !expected || !replacement ||
+        !valid(*expected) || !valid(*replacement)) { error.store(2); return 0; }
+    try {
+        auto request = std::make_unique<RouteChangeRequest>();
+        request->slot = slot; request->mask = mask; request->epoch = epoch; request->token = token;
+        request->expected = *expected; request->replacement = *replacement;
+        if (parameterOutstanding.fetch_add(1) >= parameterResultCapacity) {
+            parameterOutstanding.fetch_sub(1); error.store(4); return 0;
+        }
+        Command command; command.kind = Kind::RouteChange; command.object = request.get();
+        if (!enqueue(command)) { parameterOutstanding.fetch_sub(1); return 0; }
+        request.release(); return 1;
+    } catch (const std::bad_alloc&) { error.store(3); return 0; }
+}
 int ov_rack_read_parameter_result(ov_rack_parameter_result* result)
 {
     using namespace rack;
@@ -1901,6 +1976,40 @@ int ov_rack_read_parameter_result(ov_rack_parameter_result* result)
     parameterRead.store(read + 1, std::memory_order_release);
     parameterOutstanding.fetch_sub(1);
     return 1;
+}
+int ov_rack_set_parameter(uint32_t slot, uint32_t parameter, uint32_t value)
+{
+    using namespace rack;
+    if (slot >= capacity || parameter >= NPARAM || value > PDEF[parameter].max) {
+        error.store(2); return 0;
+    }
+    Command command; command.kind = Kind::Parameter; command.slot = slot;
+    command.a = parameter; command.b = value; command.parameterAcknowledgement = true;
+    pendingUIParameters[slot][parameter].fetch_add(1, std::memory_order_relaxed);
+    if (!enqueue(command)) {
+        pendingUIParameters[slot][parameter].fetch_sub(1, std::memory_order_release);
+        return 0;
+    }
+    return 1;
+}
+int ov_rack_automated_parameter(uint32_t slot, uint32_t parameter, uint32_t* value)
+{
+    using namespace rack;
+    if (slot >= capacity || parameter >= NPARAM || !value) return -1;
+    auto& snapshot = snapshots[slot];
+    for (uint32_t retry = 0; retry < 8; ++retry) {
+        if (pendingUIParameters[slot][parameter].load(std::memory_order_acquire)) return 0;
+        const auto before = snapshot.sequence.load(std::memory_order_acquire);
+        if (before & 1) continue;
+        const auto automated = snapshot.automated[parameter].load(std::memory_order_relaxed);
+        const auto current = snapshot.parameters[parameter].load(std::memory_order_relaxed);
+        if (before == snapshot.sequence.load(std::memory_order_acquire) &&
+            !pendingUIParameters[slot][parameter].load(std::memory_order_acquire)) {
+            if (automated) *value = current;
+            return automated ? 1 : 0;
+        }
+    }
+    return -1;
 }
 uint32_t ov_rack_take_error(void) { return rack::error.exchange(0); }
 uint32_t ov_program_count(void) { return 768; }

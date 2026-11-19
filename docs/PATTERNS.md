@@ -301,6 +301,11 @@ the finger must be lifted before another edit can start.
 Undo and Redo operate on whole gestures. Audio publication is revision-checked
 and does not restart active or queued playback. Already-sounding notes retain
 their original release times; future onsets use the new data.
+Hold Undo or Redo to show the corresponding history, newest available step
+first. Selecting an entry applies every step through that entry. Piano Roll
+publishes the resulting pattern once; scene and sequencer history wait for
+each audio confirmation and stop at the first conflict, keeping earlier
+successfully applied steps.
 Within the current scene, the Piano Roll history remains available after
 closing and reopening the editor. Moving a pattern transfers its history;
 copying it creates an independent copy of that history. Re-recording or
@@ -325,8 +330,11 @@ reset is one action. Tempo, master level and pan, and keyboard channel
 selection share that history. External MIDI CC,
 channel pressure and pitch bend changes to synth parameters are grouped by
 source, channel and controller until 500 ms of audio time without a matching
-message. Pattern automation is excluded. Applying parameter history checks
-the current audio values and scene epoch atomically; conflicts are rejected
+message. Pattern automation is excluded; a new manual edit starts from the
+current audio-owned automated value. Parameter history may override a
+subsequent automation value, but not a subsequent manual or external change.
+Applying parameter history checks the current audio values and scene epoch
+atomically; conflicts are rejected
 without changing any parameter or restarting playback. If the external MIDI
 event queue overflows, the parameter history is cleared and an error is shown
 rather than preserving an incomplete history. This parameter history does not

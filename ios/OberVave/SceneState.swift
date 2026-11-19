@@ -242,9 +242,57 @@ struct SceneValueEdit: Equatable {
     var after: Double
 }
 
+struct SceneRouteEdit: Equatable {
+    var before: RackInstrument
+    var after: RackInstrument
+
+    var mask: UInt32 {
+        var value: UInt32 = 0
+        if before.channel != after.channel { value |= 1 }
+        if before.lowNote != after.lowNote { value |= 2 }
+        if before.highNote != after.highNote { value |= 4 }
+        if before.levelDB != after.levelDB { value |= 8 }
+        if before.pan != after.pan { value |= 16 }
+        if before.muted != after.muted { value |= 32 }
+        return value
+    }
+
+    func apply(to current: inout RackInstrument, undo: Bool) {
+        let target = undo ? before : after
+        if before.name != after.name { current.name = target.name }
+        if mask & 1 != 0 { current.channel = target.channel }
+        if mask & 2 != 0 { current.lowNote = target.lowNote }
+        if mask & 4 != 0 { current.highNote = target.highNote }
+        if mask & 8 != 0 { current.levelDB = target.levelDB }
+        if mask & 16 != 0 { current.pan = target.pan }
+        if mask & 32 != 0 { current.muted = target.muted }
+    }
+}
+
 enum SceneHistoryEntry: Equatable {
     case parameters([SceneParameterEdit])
     case value(SceneValueEdit)
+    case route(SceneRouteEdit)
+
+    var title: String {
+        switch self {
+        case .parameters(let edits):
+            guard let first = edits.first else { return "Parameters" }
+            if edits.count > 1 { return "Parameters · \(edits.count) changes" }
+            if let parameter = SynthParameter(rawValue: first.parameter) {
+                return "Instrument \(first.slot + 1) · \(parameter)"
+            }
+            return "Instrument \(first.slot + 1) · parameter \(first.parameter + 1)"
+        case .value(let edit):
+            switch edit.field {
+            case .tempo: return "Tempo"
+            case .masterLevel: return "Master volume"
+            case .masterPan: return "Master pan"
+            case .keyboardChannels: return "Keyboard channels"
+            }
+        case .route(let edit): return "Instrument · \(edit.after.name)"
+        }
+    }
 }
 
 struct SceneParameterHistory {
@@ -261,6 +309,11 @@ struct SceneParameterHistory {
     mutating func record(_ edit: SceneValueEdit) {
         guard edit.before != edit.after else { return }
         append(.value(edit))
+    }
+
+    mutating func record(_ edit: SceneRouteEdit) {
+        guard edit.mask != 0 || edit.before.name != edit.after.name else { return }
+        append(.route(edit))
     }
 
     private mutating func append(_ entry: SceneHistoryEntry) {
@@ -280,6 +333,7 @@ struct PendingSceneParameterHistory {
     var epoch: UInt64
     var edits: [SceneParameterEdit]
     var undo: Bool
+    var route: SceneRouteEdit? = nil
 }
 
 struct ExternalParameterGesture {
@@ -809,6 +863,25 @@ struct PianoRollEditBuffer {
 
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
+    func historyTitles(undo: Bool) -> [String] {
+        let snapshots = (undo ? undoStack : redoStack).reversed()
+        var current = pattern
+        return snapshots.map { target in
+            let title = Self.describeChange(current, target)
+            current = target
+            return title
+        }
+    }
+
+    private static func describeChange(_ a: SequencerPattern, _ b: SequencerPattern) -> String {
+        if a.notes.count != b.notes.count {
+            return "Notes · \(a.notes.count) → \(b.notes.count)"
+        }
+        if a.notes != b.notes { return "Edit notes" }
+        if a.automation != b.automation { return "Edit automation" }
+        if a.name != b.name { return "Rename pattern" }
+        return "Pattern settings or regions"
+    }
 
     func retargeted(to cell: PatternCell) -> PianoRollEditBuffer {
         var result = self
@@ -1167,6 +1240,12 @@ struct SequencerCellSnapshot {
 struct SequencerHistoryEntry {
     var before: [SequencerCellSnapshot]
     var after: [SequencerCellSnapshot]
+    var title = "Pattern edit"
+}
+
+struct HistoryJump {
+    var undo: Bool
+    var remaining: Int
 }
 
 struct SequencerHistory {

@@ -369,9 +369,12 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var pendingPianoPublication: PendingPianoPublication?
     @Published var pendingSequencerHistory: PendingSequencerHistory?
     @Published var sequencerHistory = SequencerHistory()
+    @Published var sequencerHistoryJump: HistoryJump?
     @Published var sceneParameterHistory = SceneParameterHistory()
+    @Published var sceneHistoryJump: HistoryJump?
     @Published var pendingSceneParameterHistory: PendingSceneParameterHistory?
     @Published var activeParameterEdits: [Int: SceneParameterEdit] = [:]
+    var startedParameterEdits: Set<Int> = []
     @Published var activeSceneValueEdits: [SceneValueField: SceneValueEdit] = [:]
     var restoringSceneHistory = false
     @Published var externalParameterGestures: [ExternalParameterGesture] = []
@@ -747,12 +750,25 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         guard pendingSceneParameterHistory == nil else {
             errorMessage = "Wait for the pending parameter history operation."; return
         }
-        let before = parameterValues[parameter.rawValue]
-        ov_set_parameter(UInt32(parameter.rawValue), UInt32(value))
+        let index = parameter.rawValue
+        let beginning = activeParameterEdits[index] == nil || !startedParameterEdits.contains(index)
+        var before = parameterValues[index]
+        if beginning {
+            var automated: UInt32 = 0
+            let status = ov_rack_automated_parameter(UInt32(selectedSlot), UInt32(index), &automated)
+            guard status >= 0 else {
+                errorMessage = "The audio parameter snapshot is busy. Try the edit again."; return
+            }
+            if status == 1 { before = Int(automated) }
+        }
+        guard ov_rack_set_parameter(UInt32(selectedSlot), UInt32(index), UInt32(value)) != 0 else {
+            errorMessage = "Could not queue the parameter change."; return
+        }
         parameterValues[parameter.rawValue] = value
-        if var edit = activeParameterEdits[parameter.rawValue], edit.slot == selectedSlot {
+        if var edit = activeParameterEdits[index], edit.slot == selectedSlot {
+            if beginning { edit.before = before; startedParameterEdits.insert(index) }
             edit.after = value
-            activeParameterEdits[parameter.rawValue] = edit
+            activeParameterEdits[index] = edit
         } else {
             sceneParameterHistory.record([SceneParameterEdit(slot: selectedSlot, parameter: parameter.rawValue,
                                                               before: before, after: value)])
@@ -768,7 +784,9 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             guard activeParameterEdits[index] == nil, parameterValues.indices.contains(index) else { return }
             activeParameterEdits[index] = SceneParameterEdit(slot: selectedSlot, parameter: index,
                 before: parameterValues[index], after: parameterValues[index])
+            startedParameterEdits.remove(index)
         } else if let edit = activeParameterEdits.removeValue(forKey: index) {
+            startedParameterEdits.remove(index)
             sceneParameterHistory.record([edit])
         }
     }
@@ -779,13 +797,28 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             errorMessage = "Finish the current parameter edit before resetting controls."; return
         }
         syncExternalParameterHistory()
+        var previous: [Int] = []
+        for (parameter, _) in values {
+            var automated: UInt32 = 0
+            let status = ov_rack_automated_parameter(UInt32(selectedSlot), UInt32(parameter.rawValue), &automated)
+            guard status >= 0 else {
+                errorMessage = "The audio parameter snapshot is busy. Try the reset again."; return
+            }
+            previous.append(status == 1 ? Int(automated) : parameterValues[parameter.rawValue])
+        }
         var edits: [SceneParameterEdit] = []
-        for (parameter, proposed) in values {
+        for (position, pair) in values.enumerated() {
+            let (parameter, proposed) = pair
             let index = parameter.rawValue
             let value = min(parameterMax(parameter), max(0, proposed))
+            guard ov_rack_set_parameter(UInt32(selectedSlot), UInt32(index), UInt32(value)) != 0 else {
+                sceneParameterHistory.record(edits)
+                rememberSelectedInstrument()
+                errorMessage = "Could not queue all parameter changes; the applied controls are in history."
+                return
+            }
             edits.append(SceneParameterEdit(slot: selectedSlot, parameter: index,
-                                            before: parameterValues[index], after: value))
-            ov_set_parameter(UInt32(index), UInt32(value))
+                                            before: previous[position], after: value))
             parameterValues[index] = value
             rememberPerformanceMode(parameter, value: value)
         }
@@ -1744,18 +1777,8 @@ struct ContentView: View {
             }
             .buttonStyle(.bordered)
             if selectedScreen != .sequencer {
-                Button { model.applySceneParameterHistory(undo: true) } label: {
-                    Image(systemName: "arrow.uturn.backward")
-                }
-                .disabled(model.sceneParameterHistory.undoStack.isEmpty || model.pendingSceneParameterHistory != nil ||
-                          !model.activeParameterEdits.isEmpty || !model.activeSceneValueEdits.isEmpty || !model.externalParameterGestures.isEmpty)
-                .accessibilityLabel("Undo scene edit")
-                Button { model.applySceneParameterHistory(undo: false) } label: {
-                    Image(systemName: "arrow.uturn.forward")
-                }
-                .disabled(model.sceneParameterHistory.redoStack.isEmpty || model.pendingSceneParameterHistory != nil ||
-                          !model.activeParameterEdits.isEmpty || !model.activeSceneValueEdits.isEmpty || !model.externalParameterGestures.isEmpty)
-                .accessibilityLabel("Redo scene edit")
+                SceneHistoryButton(model: model, undo: true)
+                SceneHistoryButton(model: model, undo: false)
             }
             Menu {
                 ForEach(model.instruments) { instrument in
