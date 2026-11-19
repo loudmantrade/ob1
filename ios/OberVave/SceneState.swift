@@ -701,8 +701,10 @@ struct SceneRestorePlan {
         var after: SequencerPattern?
     }
 
-    var slots: [Slot]
-    var cells: [Cell]
+    private let before: ApplicationDefault
+    private let after: ApplicationDefault
+    private(set) var slots: [Slot]
+    private(set) var cells: [Cell]
 
     init(before: ApplicationDefault, after: ApplicationDefault) throws {
         try before.validate()
@@ -735,14 +737,15 @@ struct SceneRestorePlan {
                 if !structural { plannedCells.append(contentsOf: changedCells) }
             }
         }
+        self.before = before
+        self.after = after
         slots = plannedSlots
         cells = plannedCells
     }
 }
 
 extension SceneRestorePlan {
-    func enqueue(before: ApplicationDefault, after: ApplicationDefault,
-                 snapshot: ov_seq_scene_snapshot, token: UInt64) throws {
+    func enqueue(snapshot: ov_seq_scene_snapshot, token: UInt64) throws {
         let generations = withUnsafeBytes(of: snapshot.generations) { Array($0.bindMemory(to: UInt64.self)) }
         let revisions = withUnsafeBytes(of: snapshot.revisions) { Array($0.bindMemory(to: UInt64.self)) }
         let oldColumns = Dictionary(uniqueKeysWithValues: before.sequencer.columns.map { ($0.slot, $0) })
