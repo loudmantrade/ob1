@@ -727,6 +727,17 @@ struct PendingPatternTransfer {
     var transfer: PatternTransfer
 }
 
+struct PendingPianoPublication {
+    var token: UInt64
+    var epoch: UInt64
+    var replacement: SequencerPattern
+
+    func acknowledged(in patterns: [SequencerPattern], epoch: UInt64, revisionMatches: Bool) -> [SequencerPattern] {
+        guard self.epoch == epoch && revisionMatches else { return patterns }
+        return patterns.filter { $0.id != replacement.id } + [replacement]
+    }
+}
+
 struct CircularNoteLayout: Equatable {
     struct Arc: Equatable {
         var lane: Int

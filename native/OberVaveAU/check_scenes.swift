@@ -295,6 +295,13 @@ struct SceneChecks {
         musicalEditor.undo()
         precondition(musicalEditor.pattern == beforeInvalid)
         print("PASS piano roll musical edits: note creation, all/selected transpose, bounds rejection, directional scale mapping and lower-pitch tie break")
+        let publication = PendingPianoPublication(token: 42, epoch: 5, replacement: musicalEditor.pattern)
+        var newer = editPattern
+        newer.notes[0].pitch = 85
+        precondition(publication.acknowledged(in: [newer], epoch: 6, revisionMatches: true) == [newer])
+        precondition(publication.acknowledged(in: [newer], epoch: 5, revisionMatches: false) == [newer])
+        precondition(publication.acknowledged(in: [newer], epoch: 5, revisionMatches: true) == [musicalEditor.pattern])
+        print("PASS piano roll publication acknowledgement: newer scene and cell revisions are never overwritten")
         var testedCells = Set<PatternCell>()
         for offset in [CoreGraphics.CGPoint.zero, CoreGraphics.CGPoint(x: -118 * 8, y: 0),
                        CoreGraphics.CGPoint(x: 0, y: -240), CoreGraphics.CGPoint(x: -118 * 8, y: -240)] {

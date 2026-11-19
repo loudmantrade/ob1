@@ -366,6 +366,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     }
     private(set) var noteLayouts: [Int: CircularNoteLayout] = [:]
     @Published var pendingPatternTransfer: PendingPatternTransfer?
+    @Published var pendingPianoPublication: PendingPianoPublication?
     var patternTransferToken: UInt64 = 0
     @Published var sequencerInteractionEpoch: UInt64 = 0
     @Published var soloSlots: Set<Int> = []
