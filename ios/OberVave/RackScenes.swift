@@ -332,8 +332,19 @@ extension OberVaveModel {
         while ov_rack_read_parameter_result(&parameterResult) != 0 {
             if let pending = pendingSequencerSettings, pending.token == parameterResult.token {
                 pendingSequencerSettings = nil
-                if parameterResult.success != 0 && pending.epoch == ov_seq_scene_epoch() {
+                let expectedCells = pending.undo ? pending.entry.after : pending.entry.before
+                let targetCells = pending.undo ? pending.entry.before : pending.entry.after
+                let unchanged = expectedCells.enumerated().allSatisfy { index, snapshot in
+                    ov_seq_cell_revision(UInt32(snapshot.cell.slot), UInt32(snapshot.cell.row)) ==
+                        pending.revisions[index] &+ 1
+                }
+                if parameterResult.success != 0 && pending.epoch == ov_seq_scene_epoch() && unchanged {
                     applySequencerSettingsLocally(pending.target)
+                    for snapshot in targetCells {
+                        patterns.removeAll { $0.id == snapshot.cell.id }
+                        if let pattern = snapshot.pattern { patterns.append(pattern) }
+                        pianoRollHistories[snapshot.cell.id] = snapshot.pianoHistory
+                    }
                     if pending.recording {
                         sequencerHistory.record(pending.entry)
                     } else {
@@ -345,7 +356,9 @@ extension OberVaveModel {
                     }
                 } else {
                     sequencerHistoryJump = nil
-                    errorMessage = "The sequencer settings changed; the requested edit was not applied."
+                    errorMessage = parameterResult.success == 0
+                        ? "The sequencer changed; the requested edit was not applied."
+                        : "The sequencer edit was superseded before its result could be synchronized."
                 }
                 continue
             }
@@ -1085,14 +1098,6 @@ extension OberVaveModel {
             return
         }
         guard var entry = sequencerHistory.next(undo: undo) else { return }
-        if let edit = entry.settings {
-            let current = currentSequencerSettings()
-            do {
-                let target = try edit.applying(to: current, undo: undo)
-                submitSequencerSettings(entry: entry, expected: current, target: target, undo: undo, recording: false)
-            } catch { errorMessage = error.localizedDescription }
-            return
-        }
         let expected = undo ? entry.after : entry.before
         let live = expected.map { sequencerSnapshot($0.cell) }
         guard zip(expected, live).allSatisfy({
@@ -1103,6 +1108,14 @@ extension OberVaveModel {
             return
         }
         if undo { entry.after = live } else { entry.before = live }
+        if let edit = entry.settings {
+            let current = currentSequencerSettings()
+            do {
+                let target = try edit.applying(to: current, undo: undo)
+                submitSequencerSettings(entry: entry, expected: current, target: target, undo: undo, recording: false)
+            } catch { errorMessage = error.localizedDescription }
+            return
+        }
         submitSequencerHistory(entry, undo: undo, recordingNewEntry: false)
     }
 
@@ -1139,14 +1152,22 @@ extension OberVaveModel {
         }
 
         func restoreSequencerDefault() {
+            syncSequencerState()
             guard let value = sequencerDefaults[sceneSessionKey] else {
                 errorMessage = "This scene has no saved sequencer default. Hold DEFAULT to save one."
                 return
             }
-            let before = currentSequencerSettings()
-            let entry = SequencerHistoryEntry(before: [], after: [], title: "Restore sequencer default",
-                settings: SequencerSettingsEdit(before: before, after: value))
-            submitSequencerSettings(entry: entry, expected: before, target: value, undo: false, recording: true)
+            do {
+                let defaults = try currentDefaultLibraries().defaultPatterns(scene: sceneSessionKey, instruments: instruments)
+                let ids = Set(patterns.map(\.id)).union(defaults.map(\.id)).sorted()
+                let cells = ids.map { sequencerSnapshot(PatternCell(slot: $0 / 8, row: $0 % 8)) }
+                let before = currentSequencerSettings()
+                let entry = try SequencerHistoryEntry.restoringDefault(beforeSettings: before, targetSettings: value,
+                                                                       cells: cells, defaults: defaults)
+                submitSequencerSettings(entry: entry, expected: before, target: value, undo: false, recording: true)
+            } catch {
+                errorMessage = "Could not restore sequencer default: \(error.localizedDescription)"
+            }
         }
 
         private func submitSequencerSettings(entry: SequencerHistoryEntry, expected: SequencerDefault,
@@ -1163,7 +1184,15 @@ extension OberVaveModel {
             }
             do { try target.validate() }
             catch { errorMessage = error.localizedDescription; return }
-            guard expected != target else { return }
+            let oldCells = undo ? entry.after : entry.before
+            let newCells = undo ? entry.before : entry.after
+            guard oldCells.count == newCells.count,
+                  zip(oldCells, newCells).allSatisfy({ $0.cell == $1.cell }),
+                  oldCells.allSatisfy({ ov_seq_pad_pending(UInt32($0.cell.slot), UInt32($0.cell.row)) == 0 }) else {
+                errorMessage = "The affected pattern cells are busy or invalid."
+                return
+            }
+            guard expected != target || !oldCells.isEmpty else { return }
             let changes = zip(expected.columns, target.columns).filter { old, new in
                 old.level != new.level || old.pan != new.pan || old.muted != new.muted || old.solo != new.solo
             }.map { old, new in
@@ -1172,7 +1201,7 @@ extension OberVaveModel {
                     expected_mute: old.muted ? 1 : 0, replacement_mute: new.muted ? 1 : 0,
                     expected_solo: old.solo ? 1 : 0, replacement_solo: new.solo ? 1 : 0)
             }
-            if changes.isEmpty {
+            if changes.isEmpty && oldCells.isEmpty {
                 applySequencerSettingsLocally(target)
                 if recording { sequencerHistory.record(entry) }
                 else { sequencerHistory.acknowledge(entry, undo: undo) }
@@ -1180,12 +1209,36 @@ extension OberVaveModel {
             }
             sceneParameterToken &+= 1
             let epoch = ov_seq_scene_epoch()
-            let accepted = changes.withUnsafeBufferPointer {
-                ov_rack_change_mixer($0.baseAddress, UInt32($0.count), epoch, sceneParameterToken)
+            let revisions = oldCells.map { ov_seq_cell_revision(UInt32($0.cell.slot), UInt32($0.cell.row)) }
+            var clips: [ov_seq_clip] = []
+            var indices: [(Int?, Int?)] = []
+            for (old, new) in zip(oldCells, newCells) {
+                let oldIndex: Int?
+                if let pattern = old.pattern { oldIndex = clips.count; clips.append(pattern.coreClip()) } else { oldIndex = nil }
+                let newIndex: Int?
+                if let pattern = new.pattern { newIndex = clips.count; clips.append(pattern.coreClip()) } else { newIndex = nil }
+                indices.append((oldIndex, newIndex))
+            }
+            let accepted = changes.withUnsafeBufferPointer { mixer in
+                if oldCells.isEmpty {
+                    return ov_rack_change_mixer(mixer.baseAddress, UInt32(mixer.count), epoch, sceneParameterToken)
+                }
+                return clips.withUnsafeBufferPointer { buffer in
+                    let cells = oldCells.enumerated().map { index, snapshot in
+                        ov_seq_cell_change(slot: UInt32(snapshot.cell.slot), row: UInt32(snapshot.cell.row),
+                            revision: revisions[index],
+                            expected: indices[index].0.map { buffer.baseAddress!.advanced(by: $0) },
+                            replacement: indices[index].1.map { buffer.baseAddress!.advanced(by: $0) })
+                    }
+                    return cells.withUnsafeBufferPointer {
+                        ov_seq_change_bundle(nil, 0, mixer.baseAddress, UInt32(mixer.count),
+                                             $0.baseAddress, UInt32($0.count), epoch, sceneParameterToken)
+                    }
+                }
             }
             guard accepted != 0 else { errorMessage = "Could not queue sequencer settings."; return }
             pendingSequencerSettings = PendingSequencerSettings(token: sceneParameterToken, epoch: epoch,
-                entry: entry, target: target, undo: undo, recording: recording)
+                entry: entry, target: target, undo: undo, recording: recording, revisions: revisions)
         }
 
         private func applySequencerSettingsLocally(_ settings: SequencerDefault) {

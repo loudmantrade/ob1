@@ -73,6 +73,29 @@ struct SceneChecks {
         try savedLayout.setPatternLayout([laterPattern, newPattern], scene: "one")
         let savedPatterns = try savedLayout.defaultPatterns(scene: "one", instruments: [instrument])
         precondition(savedPatterns == [pattern, newPattern])
+        guard let settings = again.sequencers["one"] else { fatalError("Missing sequencer settings") }
+        let priorEditor = try PianoRollEditBuffer(pattern: laterPattern)
+        let currentCells = [
+            SequencerCellSnapshot(cell: PatternCell(slot: 0, row: 0), pattern: laterPattern, pianoHistory: priorEditor),
+            SequencerCellSnapshot(cell: PatternCell(slot: 0, row: 2), pattern: nil, pianoHistory: nil)
+        ]
+        let restore = try SequencerHistoryEntry.restoringDefault(beforeSettings: settings, targetSettings: settings,
+                                                                  cells: currentCells, defaults: savedPatterns)
+        precondition(restore.before.count == 2 && restore.after.map(\.pattern) == [pattern, newPattern])
+        var restoredEditor = restore.after[0].pianoHistory
+        precondition(restoredEditor?.canUndo == true)
+        restoredEditor?.undo()
+        precondition(restoredEditor?.pattern == laterPattern)
+        var restoreHistory = SequencerHistory()
+        restoreHistory.record(restore)
+        precondition(restoreHistory.next(undo: true)?.before.count == 2)
+        restoreHistory.acknowledge(restore, undo: true)
+        precondition(restoreHistory.next(undo: false)?.after.count == 2)
+        do {
+            _ = try SequencerHistoryEntry.restoringDefault(beforeSettings: settings, targetSettings: settings,
+                                                            cells: [currentCells[0]], defaults: savedPatterns)
+            fatalError("Sequencer restore accepted missing cells")
+        } catch { }
         var invalid = again
         invalid.sequencers[""] = invalid.sequencers["one"]
         do {

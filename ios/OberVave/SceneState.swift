@@ -1762,6 +1762,37 @@ struct SequencerHistoryEntry {
     var title = "Pattern edit"
     var changesPatternDefaults = false
     var settings: SequencerSettingsEdit? = nil
+
+    static func restoringDefault(beforeSettings: SequencerDefault, targetSettings: SequencerDefault,
+                                 cells: [SequencerCellSnapshot], defaults: [SequencerPattern]) throws -> Self {
+        guard Set(cells.map { $0.cell.id }).count == cells.count,
+              Set(defaults.map(\.id)).count == defaults.count,
+              Set(defaults.map(\.id)).isSubset(of: Set(cells.map { $0.cell.id })) else {
+            throw SceneError.invalid("Invalid cells for sequencer default restore.")
+        }
+        try beforeSettings.validate()
+        try targetSettings.validate()
+        try defaults.forEach { try $0.validate() }
+        let desired = Dictionary(uniqueKeysWithValues: defaults.map { ($0.id, $0) })
+        var before: [SequencerCellSnapshot] = []
+        var after: [SequencerCellSnapshot] = []
+        for old in cells {
+            let replacement = desired[old.cell.id]
+            guard old.pattern != replacement else { continue }
+            var history = old.pianoHistory
+            if let replacement, var editor = history {
+                try editor.restoreDefault(replacement)
+                history = editor
+            } else {
+                history = nil
+            }
+            before.append(old)
+            after.append(SequencerCellSnapshot(cell: old.cell, pattern: replacement, pianoHistory: history,
+                patternDefault: old.patternDefault, inDefaultLayout: old.inDefaultLayout))
+        }
+        return Self(before: before, after: after, title: "Restore sequencer default",
+                    settings: SequencerSettingsEdit(before: beforeSettings, after: targetSettings))
+    }
 }
 
 struct HistoryJump {
@@ -1815,6 +1846,7 @@ struct PendingSequencerSettings {
     var target: SequencerDefault
     var undo: Bool
     var recording: Bool
+    var revisions: [UInt64] = []
 }
 
 struct PendingPianoPublication {
