@@ -52,6 +52,13 @@ typedef struct {
 void ov_rack_external_history_enable(uint32_t enabled);
 int ov_rack_read_external_change(ov_rack_external_change *change);
 uint32_t ov_rack_external_history_lost(void);
+/* Checked, atomic parameter changes; completion is consumed on the control
+   thread. Changes are copied before return and must address distinct fields. */
+typedef struct { uint32_t slot, parameter, expected, replacement; } ov_rack_parameter_change;
+typedef struct { uint64_t token; uint32_t success; } ov_rack_parameter_result;
+int ov_rack_change_parameters(const ov_rack_parameter_change *changes, uint32_t count,
+                              uint64_t epoch, uint64_t token);
+int ov_rack_read_parameter_result(ov_rack_parameter_result *result);
 /* Post-instrument level/pan/mute stereo peak, normalized to 0...65535; read clears it. */
 uint32_t ov_rack_take_level(uint32_t slot);
 uint32_t ov_rack_stop_generation(void);

@@ -366,6 +366,34 @@ struct SceneChecks {
         for _ in 0..<40 { sequenceHistory.record(deletedEntry) }
         precondition(sequenceHistory.undoStack.count == 32)
         print("PASS sequencer history: acknowledged undo/redo, restored piano history, branching and bounded storage")
+        var soundHistory = SceneParameterHistory()
+        let soundEdit = SceneParameterEdit(slot: 0, parameter: 1, before: 10, after: 40)
+        soundHistory.record([soundEdit])
+        precondition(soundHistory.undoStack == [[soundEdit]] && soundHistory.redoStack.isEmpty)
+        soundHistory.acknowledge(undo: true)
+        precondition(soundHistory.undoStack.isEmpty && soundHistory.redoStack == [[soundEdit]])
+        soundHistory.acknowledge(undo: false)
+        precondition(soundHistory.undoStack == [[soundEdit]] && soundHistory.redoStack.isEmpty)
+        soundHistory.acknowledge(undo: true)
+        soundHistory.record([SceneParameterEdit(slot: 0, parameter: 1, before: 10, after: 20)])
+        precondition(soundHistory.redoStack.isEmpty)
+        soundHistory.record([SceneParameterEdit(slot: 0, parameter: 1, before: 20, after: 20)])
+        precondition(soundHistory.undoStack.count == 1)
+        for _ in 0..<40 { soundHistory.record([soundEdit]) }
+        precondition(soundHistory.undoStack.count == 32)
+        var midiGesture = ExternalParameterGesture(epoch: 1, source: 7, status: 0xB0,
+                                                   controller: 74, frame: 100)
+        midiGesture.merge(slot: 0, before: [10, 5], after: [20, 5])
+        midiGesture.merge(slot: 1, before: [2, 5], after: [9, 5])
+        midiGesture.merge(slot: 0, before: [20, 5], after: [30, 5])
+        precondition(midiGesture.edits == [
+            SceneParameterEdit(slot: 0, parameter: 0, before: 10, after: 30),
+            SceneParameterEdit(slot: 1, parameter: 0, before: 2, after: 9)])
+        precondition(!midiGesture.expired(at: 100 + 22_049))
+        precondition(midiGesture.expired(at: 100 + 22_050))
+        midiGesture.frame = UInt32.max - 10
+        precondition(midiGesture.expired(at: 22_039))
+        print("PASS parameter history: acknowledged undo/redo, no-op filtering, branching and bounded storage")
         let beforeInvalidPaste = pasted.pattern
         do {
             try pasted.paste(copiedNotes, at: editPattern.length - 1)

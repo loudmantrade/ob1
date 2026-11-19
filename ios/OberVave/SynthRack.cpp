@@ -308,6 +308,15 @@ constexpr uint32_t externalHistoryCapacity = 256;
 std::array<ov_rack_external_change, externalHistoryCapacity> externalHistory {};
 std::atomic<uint32_t> externalHistoryRead {0}, externalHistoryWrite {0}, externalHistoryLost {0};
 std::atomic<bool> externalHistoryEnabled {false};
+constexpr uint32_t parameterChangeLimit = capacity * OV_RACK_PARAMETERS;
+struct ParameterChangeRequest final : Retired {
+    std::array<ov_rack_parameter_change, parameterChangeLimit> changes {};
+    uint32_t count = 0;
+    uint64_t epoch = 0, token = 0;
+};
+constexpr uint32_t parameterResultCapacity = 16;
+std::array<ov_rack_parameter_result, parameterResultCapacity> parameterResults {};
+std::atomic<uint32_t> parameterRead {0}, parameterWrite {0}, parameterOutstanding {0};
 std::unique_ptr<SequencerClip> prepareClip(const ov_seq_clip& input)
 {
     if (input.slot >= capacity || input.row >= music::sequencerRows ||
@@ -459,7 +468,7 @@ void forgetPedals(uint32_t slot)
 }
 
 enum class Kind { MIDI, Audition, StopAll, SeqClip, SeqEdit, SeqChangeCells, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
-    SeqFinish, SourceClose, Parameter, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
+    SeqFinish, SourceClose, Parameter, ParameterChange, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
 struct Command {
     Kind kind = Kind::MIDI;
     uint32_t slot = 0, a = 0, b = 0, c = 0, due = 0;
@@ -887,6 +896,31 @@ bool samePattern(const music::PatternData& a, const music::PatternData& b)
 void apply(const Command& c)
 {
     if (c.padAcknowledgement) padCommands[c.slot][c.a].fetch_sub(1);
+    if (c.kind == Kind::ParameterChange) {
+        auto* request = static_cast<ParameterChangeRequest*>(c.object);
+        bool valid = request->epoch == sceneEpoch.load();
+        for (uint32_t i = 0; i < request->count; ++i) {
+            const auto& change = request->changes[i];
+            const auto& inst = scene->slots[change.slot];
+            valid = valid && inst && inst->config.parameters[change.parameter] == change.expected;
+        }
+        uint16_t affected = 0;
+        if (valid) for (uint32_t i = 0; i < request->count; ++i) {
+            const auto& change = request->changes[i];
+            auto& inst = *scene->slots[change.slot];
+            inst.engine->boundary({processedFrames});
+            inst.config.parameters[change.parameter] = change.replacement;
+            inst.engine->parameter(change.parameter, change.replacement);
+            affected |= uint16_t(1u << change.slot);
+        }
+        for (uint32_t slot = 0; slot < capacity; ++slot)
+            if (affected & (1u << slot)) publish(slot);
+        const auto write = parameterWrite.load(std::memory_order_relaxed);
+        parameterResults[write % parameterResultCapacity] = {request->token, valid ? 1u : 0u};
+        parameterWrite.store(write + 1, std::memory_order_release);
+        retire(request);
+        return;
+    }
     if (c.kind == Kind::SeqChangeCells) {
         auto* edit = static_cast<CellChangeRequest*>(c.object);
         bool valid = edit->epoch == sceneEpoch.load();
@@ -1832,6 +1866,41 @@ int ov_rack_read_external_change(ov_rack_external_change* change)
 uint32_t ov_rack_external_history_lost(void)
 {
     return rack::externalHistoryLost.exchange(0, std::memory_order_relaxed);
+}
+int ov_rack_change_parameters(const ov_rack_parameter_change* changes, uint32_t count,
+                              uint64_t epoch, uint64_t token)
+{
+    using namespace rack;
+    if (!changes || !count || count > parameterChangeLimit) { error.store(2); return 0; }
+    try {
+        auto request = std::make_unique<ParameterChangeRequest>();
+        std::array<std::array<bool, NPARAM>, capacity> seen {};
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& change = changes[i];
+            if (change.slot >= capacity || change.parameter >= NPARAM ||
+                change.expected > PDEF[change.parameter].max || change.replacement > PDEF[change.parameter].max ||
+                seen[change.slot][change.parameter]) { error.store(2); return 0; }
+            seen[change.slot][change.parameter] = true;
+            request->changes[i] = change;
+        }
+        request->count = count; request->epoch = epoch; request->token = token;
+        if (parameterOutstanding.fetch_add(1) >= parameterResultCapacity) {
+            parameterOutstanding.fetch_sub(1); error.store(4); return 0;
+        }
+        Command command; command.kind = Kind::ParameterChange; command.object = request.get();
+        if (!enqueue(command)) { parameterOutstanding.fetch_sub(1); return 0; }
+        request.release(); return 1;
+    } catch (const std::bad_alloc&) { error.store(3); return 0; }
+}
+int ov_rack_read_parameter_result(ov_rack_parameter_result* result)
+{
+    using namespace rack;
+    const auto read = parameterRead.load(std::memory_order_relaxed);
+    if (!result || read == parameterWrite.load(std::memory_order_acquire)) return 0;
+    *result = parameterResults[read % parameterResultCapacity];
+    parameterRead.store(read + 1, std::memory_order_release);
+    parameterOutstanding.fetch_sub(1);
+    return 1;
 }
 uint32_t ov_rack_take_error(void) { return rack::error.exchange(0); }
 uint32_t ov_program_count(void) { return 768; }

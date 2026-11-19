@@ -369,6 +369,11 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     @Published var pendingPianoPublication: PendingPianoPublication?
     @Published var pendingSequencerHistory: PendingSequencerHistory?
     @Published var sequencerHistory = SequencerHistory()
+    @Published var sceneParameterHistory = SceneParameterHistory()
+    @Published var pendingSceneParameterHistory: PendingSceneParameterHistory?
+    @Published var activeParameterEdits: [Int: SceneParameterEdit] = [:]
+    @Published var externalParameterGestures: [ExternalParameterGesture] = []
+    var sceneParameterToken: UInt64 = 0
     var pianoRollViewports: [Int: PianoRollViewport] = [:]
     var pianoRollHistories: [Int: PianoRollEditBuffer] = [:]
     var sceneSessionKey = UUID().uuidString
@@ -523,6 +528,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
         applyPresetData(for: selectedPresetIndex)
         instruments = [.oberVave(slot: 0, channel: 1)]
         rememberSelectedInstrument()
+        ov_rack_external_history_enable(1)
         startAudio()
         observeAudioChanges()
         startMIDI()
@@ -732,13 +738,37 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     }
 
     func setParameter(_ parameter: SynthParameter, value: Int) {
+        syncExternalParameterHistory()
         recordMIDIActivity()
         let value = min(parameterMax(parameter), max(0, value))
-        ov_set_parameter(UInt32(parameter.rawValue), UInt32(value))
         guard parameter.rawValue < parameterValues.count else { return }
+        guard pendingSceneParameterHistory == nil else {
+            errorMessage = "Wait for the pending parameter history operation."; return
+        }
+        let before = parameterValues[parameter.rawValue]
+        ov_set_parameter(UInt32(parameter.rawValue), UInt32(value))
         parameterValues[parameter.rawValue] = value
+        if var edit = activeParameterEdits[parameter.rawValue], edit.slot == selectedSlot {
+            edit.after = value
+            activeParameterEdits[parameter.rawValue] = edit
+        } else {
+            sceneParameterHistory.record([SceneParameterEdit(slot: selectedSlot, parameter: parameter.rawValue,
+                                                              before: before, after: value)])
+        }
         rememberPerformanceMode(parameter, value: value)
         rememberSelectedInstrument()
+    }
+
+    func editParameter(_ parameter: SynthParameter, editing: Bool) {
+        let index = parameter.rawValue
+        if editing {
+            syncExternalParameterHistory()
+            guard activeParameterEdits[index] == nil, parameterValues.indices.contains(index) else { return }
+            activeParameterEdits[index] = SceneParameterEdit(slot: selectedSlot, parameter: index,
+                before: parameterValues[index], after: parameterValues[index])
+        } else if let edit = activeParameterEdits.removeValue(forKey: index) {
+            sceneParameterHistory.record([edit])
+        }
     }
 
     var controllerContext: Int { selectedSlot }
@@ -1591,7 +1621,7 @@ struct ContentView: View {
             .padding(.bottom, 6)
         }
         }
-        .disabled(model.sceneSwitchPending)
+        .disabled(model.sceneSwitchPending || model.pendingSceneParameterHistory != nil)
         .padding(.top, 10)
         .background(Color(red: 0.055, green: 0.075, blue: 0.11).ignoresSafeArea())
         .preferredColorScheme(.dark)
@@ -1657,6 +1687,20 @@ struct ContentView: View {
                     .lineLimit(1)
             }
             .buttonStyle(.bordered)
+            if selectedScreen != .sequencer {
+                Button { model.applySceneParameterHistory(undo: true) } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                .disabled(model.sceneParameterHistory.undoStack.isEmpty || model.pendingSceneParameterHistory != nil ||
+                          !model.activeParameterEdits.isEmpty || !model.externalParameterGestures.isEmpty)
+                .accessibilityLabel("Undo synthesizer parameter")
+                Button { model.applySceneParameterHistory(undo: false) } label: {
+                    Image(systemName: "arrow.uturn.forward")
+                }
+                .disabled(model.sceneParameterHistory.redoStack.isEmpty || model.pendingSceneParameterHistory != nil ||
+                          !model.activeParameterEdits.isEmpty || !model.externalParameterGestures.isEmpty)
+                .accessibilityLabel("Redo synthesizer parameter")
+            }
             Menu {
                 ForEach(model.instruments) { instrument in
                     Button("\(instrument.name) · CH \(instrument.channel)") {
@@ -2483,9 +2527,7 @@ struct SynthControlPanel: View {
                     Slider(value: Binding(get: { Double(model.parameterValue(p.amount)) },
                                           set: { model.setParameter(p.amount, value: Int($0.rounded())) }),
                            in: 0...128, step: 1, onEditingChanged: { editing in
-    #if OBERVAVE_AU
                         model.editParameter(p.amount, editing: editing)
-    #endif
                     })
                     .tint(.cyan)
                     .accessibilityLabel("Mod \(slot + 1) depth")
@@ -2567,6 +2609,7 @@ struct SynthControlPanel: View {
             onChange: onChange,
             onMappingTap: onMappingTap,
             onCCChange: onCCChange,
+            onEditingChanged: { model.editParameter(parameter, editing: $0) },
             isEnabled: performance ? model.parameterValue(parameter) != 0 : nil,
             onToggle: { model.togglePerformance(parameter) }
         )
@@ -2669,9 +2712,7 @@ struct ControllersView: View {
             Slider(value: Binding(get: { Double(model.parameterValue(parameter)) },
                                   set: { model.setParameter(parameter, value: Int($0.rounded())) }),
                    in: 0...128, step: 1, onEditingChanged: { editing in
-#if OBERVAVE_AU
                 model.editParameter(parameter, editing: editing)
-#endif
             })
             .tint(.cyan)
 #if OBERVAVE_AU

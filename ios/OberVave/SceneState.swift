@@ -222,6 +222,65 @@ struct SceneSessionState {
     var pianoRollViewports: [Int: PianoRollViewport]
     var fileURL: URL?
     var sequencerHistory = SequencerHistory()
+    var sceneParameterHistory = SceneParameterHistory()
+}
+
+struct SceneParameterEdit: Equatable {
+    var slot: Int
+    var parameter: Int
+    var before: Int
+    var after: Int
+}
+
+struct SceneParameterHistory {
+    private(set) var undoStack: [[SceneParameterEdit]] = []
+    private(set) var redoStack: [[SceneParameterEdit]] = []
+    private static let limit = 32
+
+    mutating func record(_ edits: [SceneParameterEdit]) {
+        let changes = edits.filter { $0.before != $0.after }
+        guard !changes.isEmpty else { return }
+        undoStack.append(changes)
+        if undoStack.count > Self.limit { undoStack.removeFirst() }
+        redoStack.removeAll()
+    }
+
+    mutating func acknowledge(undo: Bool) {
+        if undo, let entry = undoStack.popLast() { redoStack.append(entry) }
+        if !undo, let entry = redoStack.popLast() { undoStack.append(entry) }
+    }
+}
+
+struct PendingSceneParameterHistory {
+    var token: UInt64
+    var epoch: UInt64
+    var edits: [SceneParameterEdit]
+    var undo: Bool
+}
+
+struct ExternalParameterGesture {
+    static let idleFrames: UInt32 = 22_050
+    var epoch: UInt64
+    var source: UInt32
+    var status: UInt32
+    var controller: UInt32
+    var frame: UInt32
+    var edits: [SceneParameterEdit] = []
+
+    func expired(at currentFrame: UInt32) -> Bool {
+        currentFrame &- frame >= Self.idleFrames
+    }
+
+    mutating func merge(slot: Int, before: [UInt8], after: [UInt8]) {
+        for index in before.indices where before[index] != after[index] {
+            if let existing = edits.firstIndex(where: { $0.slot == slot && $0.parameter == index }) {
+                edits[existing].after = Int(after[index])
+            } else {
+                edits.append(SceneParameterEdit(slot: slot, parameter: index,
+                                                before: Int(before[index]), after: Int(after[index])))
+            }
+        }
+    }
 }
 
 enum SequencerRecordMode: Int, CaseIterable {

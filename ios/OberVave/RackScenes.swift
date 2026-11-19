@@ -112,6 +112,79 @@ struct RackInstanceSidebar: View {
 }
 
 extension OberVaveModel {
+    func syncExternalParameterHistory(finish: Bool = false) {
+        guard pendingSceneParameterHistory == nil else { return }
+        let lost = ov_rack_external_history_lost()
+        if lost != 0 {
+            externalParameterGestures.removeAll()
+            sceneParameterHistory = SceneParameterHistory()
+            var discarded = ov_rack_external_change()
+            while ov_rack_read_external_change(&discarded) != 0 {}
+            errorMessage = "External MIDI history overflowed; parameter history was cleared to avoid restoring incomplete changes."
+            return
+        }
+        var event = ov_rack_external_change()
+        while ov_rack_read_external_change(&event) != 0 {
+            guard event.epoch == ov_seq_scene_epoch() else { continue }
+            let kind = event.status & 0xF0
+            guard kind == 0xB0 || kind == 0xD0 || kind == 0xE0 else { continue }
+            let controller = kind == 0xB0 ? event.data1 : 0
+            let frame = UInt32(truncatingIfNeeded: event.frame)
+            let key = externalParameterGestures.firstIndex {
+                $0.epoch == event.epoch && $0.source == event.source &&
+                    $0.status == event.status && $0.controller == controller
+            }
+            var index = key
+            if let key, externalParameterGestures[key].expired(at: frame) {
+                sceneParameterHistory.record(externalParameterGestures.remove(at: key).edits)
+                index = nil
+            }
+            if index == nil {
+                externalParameterGestures.append(ExternalParameterGesture(epoch: event.epoch,
+                    source: event.source, status: event.status, controller: controller, frame: frame))
+                index = externalParameterGestures.count - 1
+            }
+            let before = withUnsafeBytes(of: event.before.parameters) { Array($0.bindMemory(to: UInt8.self)) }
+            let after = withUnsafeBytes(of: event.after.parameters) { Array($0.bindMemory(to: UInt8.self)) }
+            externalParameterGestures[index!].merge(slot: Int(event.slot), before: before, after: after)
+            externalParameterGestures[index!].frame = frame
+        }
+        let now = ov_audio_frame()
+        var pending: [ExternalParameterGesture] = []
+        for gesture in externalParameterGestures.sorted(by: { now &- $0.frame > now &- $1.frame }) {
+            if finish || gesture.expired(at: now) {
+                sceneParameterHistory.record(gesture.edits)
+            } else {
+                pending.append(gesture)
+            }
+        }
+        externalParameterGestures = pending
+    }
+
+    func applySceneParameterHistory(undo: Bool) {
+        syncExternalParameterHistory()
+        guard pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty,
+              externalParameterGestures.isEmpty,
+              pendingSceneName == nil, !sceneSwitchPending else {
+            errorMessage = "Finish the current parameter edit before using history."; return
+        }
+        guard let edits = undo ? sceneParameterHistory.undoStack.last : sceneParameterHistory.redoStack.last else { return }
+        let changes = edits.map { edit in
+            ov_rack_parameter_change(slot: UInt32(edit.slot), parameter: UInt32(edit.parameter),
+                expected: UInt32(undo ? edit.after : edit.before), replacement: UInt32(undo ? edit.before : edit.after))
+        }
+        let epoch = ov_seq_scene_epoch()
+        sceneParameterToken &+= 1
+        let accepted = changes.withUnsafeBufferPointer {
+            ov_rack_change_parameters($0.baseAddress, UInt32($0.count), epoch, sceneParameterToken)
+        }
+        guard accepted != 0 else {
+            errorMessage = "Could not queue the parameter history operation."; return
+        }
+        pendingSceneParameterHistory = PendingSceneParameterHistory(token: sceneParameterToken,
+            epoch: epoch, edits: edits, undo: undo)
+    }
+
     var newInstrumentDraft: RackInstrument? {
         guard let slot = (0..<16).first(where: { candidate in
             !instruments.contains { $0.slot == candidate }
@@ -123,6 +196,24 @@ extension OberVaveModel {
     var selectedInstrument: RackInstrument? { instruments.first { $0.slot == selectedSlot } }
 
     func syncSequencerState() {
+        var parameterResult = ov_rack_parameter_result()
+        while ov_rack_read_parameter_result(&parameterResult) != 0 {
+            if let pending = pendingSceneParameterHistory, pending.token == parameterResult.token {
+                defer { pendingSceneParameterHistory = nil }
+                if parameterResult.success != 0 && pending.epoch == ov_seq_scene_epoch() {
+                    sceneParameterHistory.acknowledge(undo: pending.undo)
+                    for edit in pending.edits {
+                        guard let index = instruments.firstIndex(where: { $0.slot == edit.slot }) else { continue }
+                        let value = pending.undo ? edit.before : edit.after
+                        instruments[index].parameters[edit.parameter] = value
+                        if edit.slot == selectedSlot { parameterValues[edit.parameter] = value }
+                    }
+                } else {
+                    errorMessage = "The parameter history operation was rejected because the scene or parameter changed."
+                }
+            }
+        }
+        syncExternalParameterHistory()
         while ov_seq_record_ready() != 0 {
             let revision = ov_seq_record_revision()
             var result: UInt32 = 0
@@ -253,7 +344,7 @@ extension OberVaveModel {
             if ov_seq_recording_slot() < 0 && ov_seq_record_ready() == 0 { recordingPattern = nil }
             errorMessage = failure == 1 ? "The MIDI/control queue or note ownership capacity overflowed. Notes were stopped to prevent stuck notes."
                 : failure == 3 ? "Not enough memory to create the requested instruments."
-                : failure == 4 ? "The sequencer result queue is full. Let synchronization finish, then retry the operation."
+                : failure == 4 ? "An audio result queue is full. Let synchronization finish, then retry the operation."
                 : "The audio rack rejected an invalid configuration."
         }
     }
@@ -299,7 +390,8 @@ extension OberVaveModel {
     }
 
     func selectInstrument(_ slot: Int) {
-        guard pendingSceneName == nil, instruments.contains(where: { $0.slot == slot }) else { return }
+        guard pendingSceneName == nil, pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty,
+              instruments.contains(where: { $0.slot == slot }) else { return }
         rememberSelectedInstrument()
         cancelMidiLearn()
         selectedSlot = slot
@@ -491,7 +583,7 @@ extension OberVaveModel {
             selectedSlot: instruments.isEmpty ? nil : selectedSlot, patterns: patterns)
         return SceneSessionState(document: document, pianoRollHistories: pianoRollHistories,
                                  pianoRollViewports: pianoRollViewports, fileURL: sceneFileURL,
-                                 sequencerHistory: sequencerHistory)
+                                 sequencerHistory: sequencerHistory, sceneParameterHistory: sceneParameterHistory)
     }
 
     func restoreSessionScene(_ key: String) {
@@ -502,7 +594,9 @@ extension OberVaveModel {
     private func switchScene(to next: SceneSessionState, key: String) {
         do {
             syncSequencerState()
-            guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil, recordingPattern == nil,
+            syncExternalParameterHistory(finish: true)
+            guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
+                  pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty, recordingPattern == nil,
                   ov_seq_record_state() == 0, pendingSceneName == nil, !sceneSwitchPending else {
                 throw SceneError.invalid("Finish recording and pending pattern edits before loading a scene.")
             }
@@ -518,9 +612,11 @@ extension OberVaveModel {
                 defer { self.sceneSwitchPending = false }
                 do {
                     self.syncSequencerState()
+                    self.syncExternalParameterHistory(finish: true)
                     guard self.recordingPattern == nil, ov_seq_record_state() == 0,
                           self.pendingPatternTransfer == nil, self.pendingPianoPublication == nil,
-                          self.pendingSequencerHistory == nil else {
+                          self.pendingSequencerHistory == nil, self.pendingSceneParameterHistory == nil,
+                          self.activeParameterEdits.isEmpty else {
                         throw SceneError.invalid("The scene changed while switching. Finish recording and try again.")
                     }
                     var previous = self.currentSceneSession()
@@ -540,6 +636,7 @@ extension OberVaveModel {
                     self.pianoRollHistories = next.pianoRollHistories
                     self.pianoRollViewports = next.pianoRollViewports
                     self.sequencerHistory = next.sequencerHistory
+                    self.sceneParameterHistory = next.sceneParameterHistory
                     self.sceneFileURL = next.fileURL
                 } catch { self.errorMessage = "Could not switch scene: \(error.localizedDescription)" }
                 return true
@@ -552,7 +649,8 @@ extension OberVaveModel {
 
     private func applyScene(_ document: RackSceneDocument) throws {
         try document.validate()
-        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil else { throw SceneError.invalid("Wait for the pending pattern edit.") }
+        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
+              pendingSceneParameterHistory == nil, activeParameterEdits.isEmpty else { throw SceneError.invalid("Wait for the pending edit.") }
         guard recordingPattern == nil else { throw SceneError.invalid("Finish recording before loading a scene.") }
         var c = ov_scene_config()
         c.tempo = UInt32(document.tempo)
@@ -574,6 +672,7 @@ extension OberVaveModel {
         pianoRollViewports.removeAll()
         pianoRollHistories.removeAll()
         sequencerHistory = SequencerHistory()
+        sceneParameterHistory = SceneParameterHistory()
         instruments = document.instruments
         patterns = document.patterns ?? []
         soloSlots = []

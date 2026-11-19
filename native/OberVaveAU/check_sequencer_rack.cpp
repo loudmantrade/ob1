@@ -115,6 +115,36 @@ static void checkExternalHistoryFeed()
     assert(!ov_rack_take_error());
     std::puts("PASS external MIDI history feed: source, before/after, per-slot routing, exclusions and overflow");
 }
+static void checkAtomicParameters()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
+    auto backing = std::make_unique<ov_seq_clip>(clip(1, 0));
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(backing.get()) && ov_seq_launch(1, 0, 0)); render();
+    const auto epoch = ov_seq_scene_epoch();
+    ov_rack_parameter_change changes[] {
+        {0, rack::P_CUTOFF, scene->slots[0].config.parameters[rack::P_CUTOFF], 12},
+        {1, rack::P_RESO, scene->slots[1].config.parameters[rack::P_RESO], 13}
+    };
+    ov_rack_parameter_result result {};
+    assert(ov_rack_change_parameters(changes, 2, epoch, 1)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.success && result.token == 1);
+    assert(rack::scene->slots[0]->config.parameters[rack::P_CUTOFF] == 12);
+    assert(rack::scene->slots[1]->config.parameters[rack::P_RESO] == 13 && ov_seq_active(1) == 0);
+    changes[0].expected = 12; changes[0].replacement = 21;
+    changes[1].expected = 99; changes[1].replacement = 22;
+    assert(ov_rack_change_parameters(changes, 2, epoch, 2)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    assert(rack::scene->slots[0]->config.parameters[rack::P_CUTOFF] == 12);
+    changes[1].expected = 13;
+    assert(ov_rack_change_parameters(changes, 2, epoch - 1, 3)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success && ov_seq_active(1) == 0);
+    changes[1] = changes[0];
+    assert(!ov_rack_change_parameters(changes, 2, epoch, 4));
+    assert(ov_rack_take_error() == 2);
+    std::puts("PASS atomic parameters: checked multi-slot changes, conflicts and uninterrupted playback");
+}
 static void checkRack()
 {
     auto scene = std::make_unique<ov_scene_config>();
@@ -1202,5 +1232,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkExternalHistoryFeed(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicCellHistory(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicCellHistory(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }
