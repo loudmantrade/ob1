@@ -39,6 +39,10 @@ int ov_rack_add(uint32_t slot, const ov_instrument_config *config);
 int ov_rack_remove(uint32_t slot);
 int ov_rack_load(const ov_scene_config *scene);
 int ov_rack_snapshot_request(void);
+/* Abandon the current single-consumer request after timeout. A queued request
+   remains reserved until the audio owner discards it; it cannot be reused by
+   another caller while its capture command is still pending. */
+void ov_rack_snapshot_cancel(void);
 int ov_rack_snapshot_read(ov_scene_config *scene);
 int ov_rack_read(uint32_t slot, ov_instrument_config *config);
 /* Optional single-consumer feed of external MIDI changes, captured on the

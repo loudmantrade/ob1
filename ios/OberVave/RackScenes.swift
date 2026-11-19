@@ -670,8 +670,8 @@ extension OberVaveModel {
     func syncRackState() {
         syncSequencerState()
         var captured = ov_scene_config()
-        if !sceneSwitchPending && ov_rack_snapshot_read(&captured) != 0 {
-            if pendingSceneName != nil { finishSceneSave(captured) }
+        if !sceneSwitchPending && pendingSceneName != nil && ov_rack_snapshot_read(&captured) != 0 {
+            finishSceneSave(captured)
         }
         guard pendingSceneName == nil else { return }
         let selectedArp = arpSelectedMode, selectedLatch = latchSelectedMode
@@ -851,6 +851,7 @@ extension OberVaveModel {
             self.syncRackState()
             return self.pendingSceneName == nil
         } onTimeout: { [weak self] in
+            ov_rack_snapshot_cancel()
             guard let self else { return }
             self.pendingSceneName = nil
             self.pendingSceneURL = nil
@@ -1019,6 +1020,7 @@ extension OberVaveModel {
                 } catch { self.errorMessage = "Could not switch scene: \(error.localizedDescription)" }
                 return true
             } onTimeout: { [weak self] in
+                ov_rack_snapshot_cancel()
                 self?.sceneSwitchPending = false
                 self?.errorMessage = "The audio engine did not provide a scene snapshot. Resume audio and try again."
             }
@@ -1208,6 +1210,7 @@ extension OberVaveModel {
             }
             return true
         } onTimeout: { [weak self] in
+            ov_rack_snapshot_cancel()
             self?.sceneSwitchPending = false
             self?.sceneHistoryJump = nil
             self?.errorMessage = "The audio engine did not provide a snapshot. Resume audio and try again."
@@ -1351,6 +1354,7 @@ extension OberVaveModel {
             }
             return true
         } onTimeout: { [weak self] in
+            ov_rack_snapshot_cancel()
             self?.sceneSwitchPending = false
             self?.errorMessage = "The audio engine did not provide a snapshot. Resume audio and try again."
         }

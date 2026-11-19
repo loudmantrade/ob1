@@ -473,6 +473,7 @@ Clock clock;
 music::Frame processedFrames = 0;
 void engineFailure() { error.store(2); panic.store(1); }
 ov_seq_scene_snapshot capturedScene {};
+// idle, requested, ready, abandoned, capturing, capturing-abandoned
 std::atomic<uint32_t> captureState {0};
 std::array<std::atomic<uint32_t>, 128> keyboardHeld {};
 music::MIDIByteParser legacyMIDIParser;
@@ -1445,6 +1446,11 @@ void apply(const Command& c)
         return;
     }
     if (c.kind == Kind::Capture) {
+        uint32_t requested = 1;
+        if (!captureState.compare_exchange_strong(requested, 4)) {
+            if (requested == 3) captureState.store(0);
+            return;
+        }
         capturedScene = {};
         capturedScene.scene.tempo = tempo.load();
         capturedScene.epoch = sceneEpoch.load();
@@ -1460,7 +1466,11 @@ void apply(const Command& c)
                 capturedScene.scene.slots[s].config = scene->slots[s]->config;
             }
         }
-        captureState.store(2, std::memory_order_release);
+        uint32_t capturing = 4;
+        if (!captureState.compare_exchange_strong(capturing, 2, std::memory_order_release,
+                                                   std::memory_order_relaxed)) {
+            captureState.store(0, std::memory_order_release);
+        }
         return;
     }
     if (c.kind == Kind::Scene) {
@@ -1937,6 +1947,18 @@ int ov_rack_snapshot_request(void)
     if (rack::enqueue(c)) return 1;
     rack::captureState.store(0);
     return 0;
+}
+void ov_rack_snapshot_cancel(void)
+{
+    auto state = rack::captureState.load();
+    for (;;) {
+        uint32_t replacement;
+        if (state == 1) replacement = 3;
+        else if (state == 2) replacement = 0;
+        else if (state == 4) replacement = 5;
+        else return;
+        if (rack::captureState.compare_exchange_weak(state, replacement)) return;
+    }
 }
 int ov_rack_snapshot_read(ov_scene_config* out)
 {

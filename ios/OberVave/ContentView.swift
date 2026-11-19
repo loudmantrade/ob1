@@ -918,6 +918,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             } catch { self.errorMessage = "Could not use preset default: \(error.localizedDescription)" }
             return true
         } onTimeout: { [weak self] in
+            ov_rack_snapshot_cancel()
             self?.sceneSwitchPending = false
             self?.errorMessage = "The audio engine did not provide a snapshot. Resume audio and try again."
         }
