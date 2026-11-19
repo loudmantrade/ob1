@@ -449,6 +449,7 @@ extension OberVaveModel {
             throw SceneError.invalid("Could not allocate this scene. The current scene has been kept.")
         }
         sequencerInteractionEpoch &+= 1
+        pianoRollViewports.removeAll()
         instruments = document.instruments
         patterns = document.patterns ?? []
         soloSlots = []
@@ -995,13 +996,8 @@ struct SequencerView: View {
             .padding(24).presentationDetents([.medium, .large])
         }
         .sheet(item: $pianoRoll) { pattern in
-            VStack(spacing: 20) {
-                Image(systemName: "pianokeys").font(.largeTitle)
-                Text("Piano Roll").font(.title2.bold())
-                Text("The Piano Roll editor is planned for a later update. This action does not change or launch the pattern.")
-                    .multilineTextAlignment(.center)
-                Button("Close") { pianoRoll = nil }.buttonStyle(.bordered)
-            }.padding(30).presentationDetents([.medium])
+            PianoRollView(model: model, pattern: pattern) { pianoRoll = nil }
+                .presentationDetents([.large])
         }
         .onReceive(Timer.publish(every: 0.04, on: .main, in: .common).autoconnect()) { _ in
             meters = (0..<16).map { slot in

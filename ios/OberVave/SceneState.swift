@@ -406,6 +406,15 @@ struct PianoRollViewport: Equatable {
     func pitch(at y: Double) -> Double { topPitch - y / pitchHeight }
     func x(forTick tick: Double) -> Double { (tick - leftTick) * beatWidth / 960 }
     func y(forPitch pitch: Double) -> Double { (topPitch - pitch) * pitchHeight }
+
+    mutating func clamp(length: Int64, intro: Int64, size: CoreGraphics.CGSize) {
+        beatWidth = min(Self.maximumBeatWidth, max(Self.minimumBeatWidth, beatWidth))
+        pitchHeight = min(Self.maximumPitchHeight, max(Self.minimumPitchHeight, pitchHeight))
+        let visibleTicks = Double(max(0, size.width)) * 960 / beatWidth
+        let visiblePitches = Double(max(0, size.height)) / pitchHeight
+        leftTick = min(Double(length) + 960, max(-Double(intro) - visibleTicks + 960, leftTick))
+        topPitch = min(127 + visiblePitches - 1, max(0, topPitch))
+    }
 }
 
 struct PianoRollNavigation {

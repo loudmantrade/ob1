@@ -228,6 +228,13 @@ struct SceneChecks {
         precondition(arbitration.mode == .editing)
         arbitration.cancel()
         precondition(arbitration.mode == .idle)
+        viewport.leftTick = 1_000_000; viewport.topPitch = -100
+        viewport.clamp(length: 3840, intro: 0, size: .init(width: 600, height: 400))
+        precondition(viewport.leftTick == 4800 && viewport.topPitch == 0)
+        viewport.leftTick = -1_000_000; viewport.topPitch = 1_000_000
+        viewport.clamp(length: 3840, intro: 960, size: .init(width: 600, height: 400))
+        precondition(viewport.leftTick >= -960 - 600 * 960 / viewport.beatWidth &&
+                     viewport.topPitch <= 127 + 400 / viewport.pitchHeight)
         print("PASS piano roll navigation foundation: independent axes, moving midpoint anchor, dead zone/crossing, bounded zoom and touch arbitration")
         var editPattern = SequencerPattern(slot: 0, row: 0, name: "Edit")
         editPattern.notes = [
