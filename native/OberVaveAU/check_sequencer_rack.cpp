@@ -689,6 +689,69 @@ static void checkWaitDuringPlayback()
     std::puts("PASS Wait during playback: multiple bars/pattern notes/other channels do not trigger, Input and compensated ARP Output start at first note, no clock reset, full take and loop handover");
 }
 
+static void checkLivePatternReplacement()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
+    auto source = std::make_unique<ov_seq_clip>(clip(0, 0));
+    auto other = std::make_unique<ov_seq_clip>(clip(1, 0));
+    source->notes[0].duration = 720;
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(source.get()) && ov_seq_set_clip(other.get()));
+    assert(ov_seq_launch(0, 0, 0) && ov_seq_launch(1, 0, 0)); render();
+    assert(ov_seq_active(0) == 0 && ov_seq_active(1) == 0);
+    auto replacement = std::make_unique<ov_seq_clip>(*source);
+    replacement->notes[0].pitch = 72;
+    auto epoch = ov_seq_scene_epoch(), revision = ov_seq_cell_revision(0, 0);
+    const auto origin = rack::players[0].origin, otherOrigin = rack::players[1].origin;
+    uint32_t held = 0;
+    for (const auto& note : rack::players[0].active) held += note.used;
+    assert(held == 1);
+    assert(ov_seq_replace_pattern(source.get(), replacement.get(), epoch, revision, 501)); render();
+    ov_seq_edit_result result {};
+    assert(ov_seq_read_edit(&result) && result.success && result.token == 501 && result.source_revision == revision + 1);
+    assert(ov_seq_active(0) == 0 && ov_seq_active(1) == 0);
+    assert(rack::players[0].origin == origin && rack::players[1].origin == otherOrigin);
+    held = 0;
+    for (const auto& note : rack::players[0].active) if (note.used) {
+        ++held; assert(note.on.data1 == 60);
+    }
+    assert(held == 1 && rack::players[0].clip == &rack::clips[0][0]->pattern);
+    assert(ov_seq_replace_pattern(source.get(), replacement.get(), epoch, revision, 502)); render();
+    assert(ov_seq_read_edit(&result) && !result.success && result.token == 502);
+    assert(rack::clips[0][0]->pattern.data().notes[0].pitch == 72);
+    while (rack::musicalPosition.value < origin + 720 * music::tickUnit) render();
+    held = 0;
+    for (const auto& note : rack::players[0].active) held += note.used;
+    assert(held == 0);
+    while (rack::musicalPosition.value < origin + 960 * music::tickUnit) render();
+    held = 0;
+    for (const auto& note : rack::players[0].active) if (note.used) { ++held; assert(note.on.data1 == 72); }
+    assert(held == 1);
+    auto queued = std::make_unique<ov_seq_clip>(clip(0, 1));
+    assert(ov_seq_set_clip(queued.get())); render();
+    assert(ov_seq_launch(0, 1, 2)); render();
+    assert(ov_seq_pending(0) == 1);
+    auto changed = std::make_unique<ov_seq_clip>(*queued);
+    changed->notes[0].pitch = 76;
+    assert(ov_seq_replace_pattern(queued.get(), changed.get(), epoch, ov_seq_cell_revision(0, 1), 503)); render();
+    assert(ov_seq_read_edit(&result) && result.success);
+    while (ov_seq_active(0) != 1) render();
+    held = 0;
+    for (const auto& note : rack::players[0].active) if (note.used) { ++held; assert(note.on.data1 == 76); }
+    assert(held == 1);
+    assert(ov_seq_arm(0, 1, 0, 1, 0, 0)); render();
+    const auto currentRevision = ov_seq_cell_revision(0, 1);
+    assert(ov_seq_replace_pattern(changed.get(), queued.get(), epoch, currentRevision, 504)); render();
+    assert(ov_seq_read_edit(&result) && !result.success);
+    assert(rack::clips[0][1]->pattern.data().notes[0].pitch == 76);
+    assert(ov_rack_stop_all()); render();
+    auto completion = std::make_unique<ov_seq_clip>();
+    assert(ov_seq_read_record(completion.get()));
+    assert(!ov_rack_take_error());
+    std::puts("PASS live snapshot replacement: stale revision rejected, held notes release normally, next loop uses edited notes, transport and unrelated column continue");
+}
+
 static void checkGroupedRecording()
 {
     for (uint32_t output : {0u, 1u}) {
@@ -860,5 +923,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

@@ -285,12 +285,13 @@ same-cell/off-grid drops are no-ops.
 The existing double-tap action still opens a placeholder; the Piano Roll is not
 yet available. The tested control-side foundation consists of independent
 time/pitch viewport transforms, pinch anchoring and touch-state arbitration,
-plus bounded group note edits and undo/redo. None of these helpers publishes
-audio changes or modifies the scene format.
+plus bounded group note edits and undo/redo. A revision-checked same-cell
+replacement API now swaps immutable snapshots without restarting active or
+queued playback. Already-sounding notes retain their original release times;
+future onsets use the new data. The editor does not yet invoke this API.
 
-The remaining implementation must add revision-checked immutable publication
-that safely handles active patterns, then connect a coordinated touch editor
-and source-owned audition to it. Controller automation requires bounded,
+The remaining implementation must connect a coordinated touch editor and
+source-owned audition to the publication API. Controller automation requires bounded,
 versioned events with backward-compatible decoding and audio scheduling.
 Independent loop/tail markers require a versioned migration preserving old
 loop behavior, plus iteration-specific note release and real-time capacity

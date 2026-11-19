@@ -60,6 +60,11 @@ public:
         pendingStart = pendingOrigin - intro;
     }
     bool stopping() const { return pendingRow >= 0 && !queued_ && row >= 0; }
+    void replaceSnapshot(const Pattern* oldPattern, const Pattern* replacement)
+    {
+        if (clip == oldPattern) clip = replacement;
+        if (queued_ == oldPattern) queued_ = replacement;
+    }
     void requestStop(int64_t now)
     {
         if (row < 0 || stopping()) return;

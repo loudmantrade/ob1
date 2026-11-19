@@ -803,6 +803,7 @@ void apply(const Command& c)
         const auto s = edit->sourceSlot, r = edit->sourceRow, t = edit->targetSlot, u = edit->targetRow;
         const bool recording = (recordings[s].recorder.running && recordings[s].recorder.row == r) ||
             (recordings[t].recorder.running && recordings[t].recorder.row == u);
+        const bool sameCellReplacement = edit->mode == 5;
         const bool valid = !recording && edit->epoch == sceneEpoch.load() &&
             scene->slots[s] && scene->slots[t] && clips[s][r] && (!clips[t][u] || edit->mode >= 2) &&
             clipRevisions[s][r].load() == edit->sourceRevision &&
@@ -816,15 +817,22 @@ void apply(const Command& c)
                     scene->slots[slot]->engine->stopArpeggiator();
                 }
             };
-            stopAffected(s, r);
-            if (edit->mode != 4) {
-                stopAffected(t, u);
-                retire(clips[t][u].release()); clips[t][u] = std::move(edit->replacement);
-                clipRevisions[t][u].fetch_add(1);
-            }
-            if (!(edit->mode & 1)) {
+            if (sameCellReplacement) {
+                players[s].replaceSnapshot(&clips[s][r]->pattern, &edit->replacement->pattern);
                 retire(clips[s][r].release());
+                clips[s][r] = std::move(edit->replacement);
                 clipRevisions[s][r].fetch_add(1);
+            } else {
+                stopAffected(s, r);
+                if (edit->mode != 4) {
+                    stopAffected(t, u);
+                    retire(clips[t][u].release()); clips[t][u] = std::move(edit->replacement);
+                    clipRevisions[t][u].fetch_add(1);
+                }
+                if (!(edit->mode & 1)) {
+                    retire(clips[s][r].release());
+                    clipRevisions[s][r].fetch_add(1);
+                }
             }
         }
         const auto write = editWrite.load(std::memory_order_relaxed);
@@ -1415,6 +1423,29 @@ int ov_seq_edit(const ov_seq_clip* source, uint32_t targetSlot, uint32_t targetR
         edit->sourceSlot = source->slot; edit->sourceRow = source->row;
         edit->targetSlot = targetSlot; edit->targetRow = targetRow; edit->mode = mode;
         edit->epoch = epoch; edit->sourceRevision = sourceRevision; edit->targetRevision = targetRevision; edit->token = token;
+        if (editOutstanding.fetch_add(1) >= editCapacity) {
+            editOutstanding.fetch_sub(1); error.store(4); return 0;
+        }
+        Command c; c.kind = Kind::SeqEdit; c.object = edit.get();
+        if (!enqueue(c)) { editOutstanding.fetch_sub(1); return 0; }
+        edit.release(); return 1;
+    } catch (const EngineCreationFailure&) { error.store(2); return 0; }
+    catch (const std::bad_alloc&) { error.store(3); return 0; }
+}
+int ov_seq_replace_pattern(const ov_seq_clip* expected, const ov_seq_clip* replacement,
+                           uint64_t epoch, uint64_t revision, uint64_t token)
+{
+    using namespace rack;
+    if (!expected || !replacement || expected->slot != replacement->slot || expected->row != replacement->row ||
+        expected->slot >= capacity || expected->row >= OV_SEQ_ROWS) { error.store(2); return 0; }
+    try {
+        auto edit = std::make_unique<EditRequest>();
+        edit->expected = prepareClip(*expected);
+        edit->replacement = prepareClip(*replacement);
+        edit->sourceSlot = edit->targetSlot = expected->slot;
+        edit->sourceRow = edit->targetRow = expected->row;
+        edit->mode = 5; edit->epoch = epoch;
+        edit->sourceRevision = edit->targetRevision = revision; edit->token = token;
         if (editOutstanding.fetch_add(1) >= editCapacity) {
             editOutstanding.fetch_sub(1); error.store(4); return 0;
         }

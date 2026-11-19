@@ -67,6 +67,10 @@ int ov_seq_edit(const ov_seq_clip* source, uint32_t target_slot, uint32_t target
                 uint32_t mode, uint64_t epoch, uint64_t source_revision,
                 uint64_t target_revision, uint64_t token);
 int ov_seq_read_edit(ov_seq_edit_result* result);
+/* Revision-checked same-cell replacement. Active and queued playback retain their
+   transport position; already sounding notes retain their original Note Off. */
+int ov_seq_replace_pattern(const ov_seq_clip* expected, const ov_seq_clip* replacement,
+                           uint64_t epoch, uint64_t revision, uint64_t token);
 uint32_t ov_seq_pad_pending(uint32_t slot, uint32_t row);
 #ifdef __cplusplus
 }
