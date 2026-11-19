@@ -308,6 +308,9 @@ replacing a pattern through the numeric pattern editor clears its history.
 When switching scenes during the session, their unsaved state, Piano Roll
 histories and viewports can be restored from Scenes in this session, including
 untitled and imported scenes. These session states are not saved to disk.
+Switching waits for an audio-owned snapshot before replacing the scene; if the
+audio engine is stopped or recording is active, switching is rejected rather
+than saving a potentially stale session state.
 
 Copy/Paste retains relative timing and routing, with the most recent empty-grid
 tap as the paste anchor (initially tick zero). Paste creates new note IDs and

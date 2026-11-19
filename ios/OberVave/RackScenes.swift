@@ -229,7 +229,7 @@ extension OberVaveModel {
     func syncRackState() {
         syncSequencerState()
         var captured = ov_scene_config()
-        if ov_rack_snapshot_read(&captured) != 0 {
+        if !sceneSwitchPending && ov_rack_snapshot_read(&captured) != 0 {
             if pendingSceneName != nil { finishSceneSave(captured) }
         }
         guard pendingSceneName == nil else { return }
@@ -441,24 +441,12 @@ extension OberVaveModel {
         do {
             let key = url.standardizedFileURL.absoluteString
             if key == sceneSessionKey { return }
-            syncRackState()
-            guard pendingPatternTransfer == nil, pendingPianoPublication == nil, recordingPattern == nil,
-                  ov_seq_record_state() == 0 else {
-                throw SceneError.invalid("Finish recording and pending pattern edits before loading a scene.")
-            }
-            let previous = currentSceneSession()
             let saved = sceneSessions[key]
             let document = try saved?.document ?? RackSceneDocument.read(from: url)
             let folder = try scenesFolder()
-            try applyScene(document)
-            sceneSessions[sceneSessionKey] = previous
-            sceneSessions.removeValue(forKey: key)
-            sceneSessionKey = key
-            if let saved {
-                pianoRollHistories = saved.pianoRollHistories
-                pianoRollViewports = saved.pianoRollViewports
-            }
-            sceneFileURL = url.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL ? url : nil
+            let fileURL = url.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL ? url : nil
+            switchScene(to: saved ?? SceneSessionState(document: document, pianoRollHistories: [:],
+                        pianoRollViewports: [:], fileURL: fileURL), key: key)
         } catch { errorMessage = "Could not load scene: \(error.localizedDescription)" }
     }
 
@@ -472,20 +460,55 @@ extension OberVaveModel {
 
     func restoreSessionScene(_ key: String) {
         guard key != sceneSessionKey, let saved = sceneSessions[key], pendingSceneName == nil else { return }
+        switchScene(to: saved, key: key)
+    }
+
+    private func switchScene(to next: SceneSessionState, key: String) {
         do {
-            syncRackState()
+            syncSequencerState()
             guard pendingPatternTransfer == nil, pendingPianoPublication == nil, recordingPattern == nil,
-                  ov_seq_record_state() == 0 else {
+                  ov_seq_record_state() == 0, pendingSceneName == nil, !sceneSwitchPending else {
                 throw SceneError.invalid("Finish recording and pending pattern edits before loading a scene.")
             }
-            let previous = currentSceneSession()
-            try applyScene(saved.document)
-            sceneSessions[sceneSessionKey] = previous
-            sceneSessions.removeValue(forKey: key)
-            sceneSessionKey = key
-            pianoRollHistories = saved.pianoRollHistories
-            pianoRollViewports = saved.pianoRollViewports
-            sceneFileURL = saved.fileURL
+            try next.document.validate()
+            guard ov_rack_snapshot_request() != 0 else {
+                throw SceneError.invalid("Could not request an audio scene snapshot.")
+            }
+            sceneSwitchPending = true
+            sceneSwitchMonitor.start { [weak self] in
+                guard let self else { return true }
+                var captured = ov_scene_config()
+                guard ov_rack_snapshot_read(&captured) != 0 else { return false }
+                defer { self.sceneSwitchPending = false }
+                do {
+                    self.syncSequencerState()
+                    guard self.recordingPattern == nil, ov_seq_record_state() == 0,
+                          self.pendingPatternTransfer == nil, self.pendingPianoPublication == nil else {
+                        throw SceneError.invalid("The scene changed while switching. Finish recording and try again.")
+                    }
+                    var previous = self.currentSceneSession()
+                    let slots = withUnsafeBytes(of: captured.slots) { Array($0.bindMemory(to: ov_rack_slot.self)) }
+                    for index in previous.document.instruments.indices {
+                        let slot = slots[previous.document.instruments[index].slot]
+                        guard slot.present != 0 else {
+                            throw SceneError.invalid("The instrument list changed while switching. Try again.")
+                        }
+                        previous.document.instruments[index].updateSound(slot.config)
+                    }
+                    try previous.document.validate()
+                    try self.applyScene(next.document)
+                    self.sceneSessions[self.sceneSessionKey] = previous
+                    self.sceneSessions.removeValue(forKey: key)
+                    self.sceneSessionKey = key
+                    self.pianoRollHistories = next.pianoRollHistories
+                    self.pianoRollViewports = next.pianoRollViewports
+                    self.sceneFileURL = next.fileURL
+                } catch { self.errorMessage = "Could not switch scene: \(error.localizedDescription)" }
+                return true
+            } onTimeout: { [weak self] in
+                self?.sceneSwitchPending = false
+                self?.errorMessage = "The audio engine did not provide a scene snapshot. Resume audio and try again."
+            }
         } catch { errorMessage = "Could not restore scene: \(error.localizedDescription)" }
     }
 
@@ -528,20 +551,10 @@ extension OberVaveModel {
 
     func newScene() {
         guard pendingSceneName == nil else { return }
-        do {
-            syncRackState()
-            guard pendingPatternTransfer == nil, pendingPianoPublication == nil, recordingPattern == nil,
-                  ov_seq_record_state() == 0 else {
-                throw SceneError.invalid("Finish recording and pending pattern edits before creating a scene.")
-            }
-            let previous = currentSceneSession()
-            let empty = RackSceneDocument(name: "Untitled Scene", instruments: [], tempo: tempo,
-                masterDB: masterLevelDB, masterPan: masterPan, keyboardMask: keyboardChannelMask, selectedSlot: nil)
-            try applyScene(empty)
-            sceneSessions[sceneSessionKey] = previous
-            sceneSessionKey = UUID().uuidString
-            sceneFileURL = nil
-        } catch { errorMessage = error.localizedDescription }
+        let empty = RackSceneDocument(name: "Untitled Scene", instruments: [], tempo: tempo,
+            masterDB: masterLevelDB, masterPan: masterPan, keyboardMask: keyboardChannelMask, selectedSlot: nil)
+        switchScene(to: SceneSessionState(document: empty, pianoRollHistories: [:],
+                    pianoRollViewports: [:], fileURL: nil), key: UUID().uuidString)
     }
 }
 
@@ -1495,6 +1508,7 @@ struct RackSceneView: View {
             }
             .disabled(model.pendingSceneName != nil)
             .navigationTitle("Scenes & Instruments")
+            .disabled(model.sceneSwitchPending)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .onAppear { name = model.sceneName; model.refreshSavedScenes() }
             .onChange(of: model.sceneName) { name = $0 }

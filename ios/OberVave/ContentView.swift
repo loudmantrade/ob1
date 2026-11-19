@@ -371,6 +371,8 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     var pianoRollHistories: [Int: PianoRollEditBuffer] = [:]
     var sceneSessionKey = UUID().uuidString
     @Published var sceneSessions: [String: SceneSessionState] = [:]
+    @Published var sceneSwitchPending = false
+    let sceneSwitchMonitor = SceneSaveMonitor()
     var patternTransferToken: UInt64 = 0
     @Published var sequencerInteractionEpoch: UInt64 = 0
     @Published var soloSlots: Set<Int> = []
@@ -1587,6 +1589,7 @@ struct ContentView: View {
             .padding(.bottom, 6)
         }
         }
+        .disabled(model.sceneSwitchPending)
         .padding(.top, 10)
         .background(Color(red: 0.055, green: 0.075, blue: 0.11).ignoresSafeArea())
         .preferredColorScheme(.dark)
