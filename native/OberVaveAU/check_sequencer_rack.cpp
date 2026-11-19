@@ -1422,6 +1422,37 @@ static void checkBundleProgramChange()
     std::puts("PASS bundle program change: checked sound, mixer, route and clip with isolated playback stop");
 }
 
+static void checkFullSceneSnapshot()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()};
+    auto pattern = std::make_unique<ov_seq_clip>(clip(0, 0));
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(pattern.get()) && ov_seq_solo(0, 1)); render();
+    const auto epoch = ov_seq_scene_epoch();
+    const auto revision = ov_seq_cell_revision(0, 0);
+    uint64_t generation = 0;
+    assert(ov_rack_slot_generation(0, &generation));
+    assert(ov_rack_snapshot_request());
+    assert(!ov_rack_snapshot_request());
+    ov_seq_scene_snapshot snapshot {};
+    assert(!ov_seq_snapshot_read(&snapshot));
+    assert(ov_rack_remove(0));
+    render();
+    assert(ov_seq_snapshot_read(&snapshot));
+    assert(snapshot.scene.slots[0].present && snapshot.solo_mask == 1);
+    assert(snapshot.epoch == epoch && snapshot.generations[0] == generation);
+    assert(snapshot.revisions[0][0] == revision && ov_seq_cell_revision(0, 0) != revision);
+    assert(snapshot.internal_tempo == 120 && !snapshot.clock_external);
+    ov_scene_config legacy {};
+    assert(!ov_rack_snapshot_read(&legacy) && !ov_seq_snapshot_read(&snapshot));
+    assert(ov_rack_snapshot_request()); render();
+    assert(ov_rack_snapshot_read(&legacy) && !legacy.slots[0].present);
+    assert(!ov_seq_snapshot_read(&snapshot));
+    assert(!ov_rack_take_error());
+    std::puts("PASS full scene snapshot: audio-boundary revisions, generations, solo and single-consumer compatibility");
+}
+
 static void checkBundleTempo()
 {
     auto scene = std::make_unique<ov_scene_config>();
@@ -1857,5 +1888,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkAtomicSounds(); checkAtomicMixer(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicBundle(); checkBundleProgramChange(); checkBundleTempo(); checkStructuralBundle(); checkAtomicCellHistory(); checkAtomicFullCellGrid(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkAtomicSounds(); checkAtomicMixer(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicBundle(); checkBundleProgramChange(); checkFullSceneSnapshot(); checkBundleTempo(); checkStructuralBundle(); checkAtomicCellHistory(); checkAtomicFullCellGrid(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

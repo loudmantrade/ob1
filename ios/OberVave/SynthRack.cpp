@@ -470,7 +470,7 @@ std::unique_ptr<Scene> scene;
 Clock clock;
 music::Frame processedFrames = 0;
 void engineFailure() { error.store(2); panic.store(1); }
-ov_scene_config capturedScene {};
+ov_seq_scene_snapshot capturedScene {};
 std::atomic<uint32_t> captureState {0};
 std::array<std::atomic<uint32_t>, 128> keyboardHeld {};
 music::MIDIByteParser legacyMIDIParser;
@@ -1421,10 +1421,19 @@ void apply(const Command& c)
     }
     if (c.kind == Kind::Capture) {
         capturedScene = {};
-        capturedScene.tempo = tempo.load();
-        for (uint32_t s = 0; s < capacity; ++s) if (scene->slots[s]) {
-            capturedScene.slots[s].present = 1;
-            capturedScene.slots[s].config = scene->slots[s]->config;
+        capturedScene.scene.tempo = tempo.load();
+        capturedScene.epoch = sceneEpoch.load();
+        capturedScene.solo_mask = soloMask;
+        capturedScene.internal_tempo = internalTempo.load();
+        capturedScene.clock_external = clock.external || clock.quarter;
+        for (uint32_t s = 0; s < capacity; ++s) {
+            capturedScene.generations[s] = slotGenerations[s].load();
+            for (uint32_t row = 0; row < music::sequencerRows; ++row)
+                capturedScene.revisions[s][row] = clipRevisions[s][row].load();
+            if (scene->slots[s]) {
+                capturedScene.scene.slots[s].present = 1;
+                capturedScene.scene.slots[s].config = scene->slots[s]->config;
+            }
         }
         captureState.store(2, std::memory_order_release);
         return;
@@ -1905,6 +1914,13 @@ int ov_rack_snapshot_request(void)
     return 0;
 }
 int ov_rack_snapshot_read(ov_scene_config* out)
+{
+    if (!out || rack::captureState.load(std::memory_order_acquire) != 2) return 0;
+    *out = rack::capturedScene.scene;
+    rack::captureState.store(0);
+    return 1;
+}
+int ov_seq_snapshot_read(ov_seq_scene_snapshot* out)
 {
     if (!out || rack::captureState.load(std::memory_order_acquire) != 2) return 0;
     *out = rack::capturedScene;

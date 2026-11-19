@@ -37,6 +37,14 @@ int ov_seq_launch(uint32_t slot, uint32_t row, uint32_t grid);
 int ov_seq_launch_row(uint32_t row, uint32_t grid);
 int ov_seq_stop(uint32_t slot, uint32_t arp);
 int ov_seq_solo(uint32_t slot, uint32_t enabled);
+/* Shares the rack snapshot mailbox. All fields are captured on the audio owner
+   at one command boundary. Either read function consumes the pending snapshot. */
+typedef struct {
+    ov_scene_config scene;
+    uint64_t epoch, generations[OV_RACK_CAPACITY], revisions[OV_RACK_CAPACITY][OV_SEQ_ROWS];
+    uint32_t solo_mask, internal_tempo, clock_external;
+} ov_seq_scene_snapshot;
+int ov_seq_snapshot_read(ov_seq_scene_snapshot* snapshot);
 int ov_seq_record(uint32_t slot, uint32_t row, uint32_t output, uint32_t intro);
 /* mode: 0 Wait for note, 1 Count-in, 2 Immediate; beats: 0 free, 1..256 fixed. */
 int ov_seq_arm(uint32_t slot, uint32_t row, uint32_t mode, uint32_t count_bars, uint32_t beats, uint32_t output);

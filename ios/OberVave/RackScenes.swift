@@ -1032,17 +1032,27 @@ extension OberVaveModel {
         sceneSwitchPending = true
         sceneSwitchMonitor.start { [weak self] in
             guard let self else { return true }
-            var snapshot = ov_scene_config()
-            guard ov_rack_snapshot_read(&snapshot) != 0 else { return false }
+            var snapshot = ov_seq_scene_snapshot()
+            guard ov_seq_snapshot_read(&snapshot) != 0 else { return false }
             defer { self.sceneSwitchPending = false }
             do {
-                guard self.sceneSessionKey == sceneKey, epoch == ov_seq_scene_epoch(),
+                let capturedGenerations = withUnsafeBytes(of: snapshot.generations) {
+                    Array($0.bindMemory(to: UInt64.self))
+                }
+                let capturedRevisions = withUnsafeBytes(of: snapshot.revisions) {
+                    Array($0.bindMemory(to: UInt64.self))
+                }
+                let capturedSoloMask = capturedSettings.columns.reduce(UInt32(0)) {
+                    $1.solo ? $0 | (1 << $1.slot) : $0
+                }
+                guard self.sceneSessionKey == sceneKey, epoch == snapshot.epoch, epoch == ov_seq_scene_epoch(),
                       self.recordingPattern == nil, ov_seq_record_state() == 0, ov_seq_record_ready() == 0,
-                      self.rackSlotGenerations() == generations,
+                      capturedGenerations == generations, self.rackSlotGenerations() == generations,
                       self.instruments == capturedInstruments, self.sceneName == capturedName,
                       self.masterLevelDB == capturedMasterDB, self.masterPan == capturedMasterPan,
                       self.keyboardChannelMask == capturedKeyboardMask, self.selectedSlot == capturedSelectedSlot,
                       !includePatterns || self.currentSequencerSettings() == capturedSettings,
+                      !includePatterns || snapshot.solo_mask == capturedSoloMask,
                       !application || self.applicationDeviceSettings == capturedDevice else {
                     throw SceneError.invalid("The scene changed while taking the snapshot.")
                 }
@@ -1053,12 +1063,17 @@ extension OberVaveModel {
                     for index in 0..<128 {
                         let slot = UInt32(index / 8), row = UInt32(index % 8)
                         guard ov_seq_pad_pending(slot, row) == 0,
+                              capturedRevisions[index] == revisions[index],
                               ov_seq_cell_revision(slot, row) == revisions[index] else {
                             throw SceneError.invalid("A pattern changed while taking the snapshot.")
                         }
                     }
                 }
-                let slots = withUnsafeBytes(of: snapshot.slots) { Array($0.bindMemory(to: ov_rack_slot.self)) }
+                let slots = withUnsafeBytes(of: snapshot.scene.slots) { Array($0.bindMemory(to: ov_rack_slot.self)) }
+                guard Set(slots.enumerated().filter { $0.element.present != 0 }.map(\.offset)) ==
+                        Set(capturedInstruments.map(\.slot)) else {
+                    throw SceneError.invalid("The instrument list changed while taking the snapshot.")
+                }
                 var captured = capturedInstruments
                 for index in captured.indices {
                     let slot = slots[captured[index].slot]
@@ -1074,7 +1089,7 @@ extension OberVaveModel {
                     captured[index].muted = slot.config.muted != 0
                 }
                 let document = RackSceneDocument(name: capturedName, instruments: captured,
-                    tempo: Int(snapshot.tempo), masterDB: capturedMasterDB, masterPan: capturedMasterPan,
+                    tempo: Int(snapshot.scene.tempo), masterDB: capturedMasterDB, masterPan: capturedMasterPan,
                     keyboardMask: capturedKeyboardMask,
                     selectedSlot: captured.isEmpty ? nil : capturedSelectedSlot, patterns: nil)
                 var sequence = capturedSettings
