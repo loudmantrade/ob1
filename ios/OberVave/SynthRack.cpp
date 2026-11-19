@@ -2435,7 +2435,7 @@ int ov_rack_change_route(uint32_t slot, uint32_t mask, const ov_instrument_confi
                          const ov_instrument_config* replacement, uint64_t epoch, uint64_t token)
 {
     using namespace rack;
-    if (slot >= capacity || !mask || (mask & ~63u) || !expected || !replacement ||
+    if (slot >= capacity || !mask || (mask & ~255u) || !expected || !replacement ||
         !valid(*expected) || !valid(*replacement)) { error.store(2); return 0; }
     try {
         auto request = std::make_unique<RouteChangeRequest>();

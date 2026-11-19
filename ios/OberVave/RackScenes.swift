@@ -234,7 +234,6 @@ extension OberVaveModel {
         }
         if case .route(let edit) = entry {
             let old = undo ? edit.after : edit.before
-            let next = undo ? edit.before : edit.after
             guard let current = instruments.first(where: { $0.slot == old.slot }),
                   edit.before.name == edit.after.name || current.name == old.name else {
                 errorMessage = "The instrument changed; history was not applied."
@@ -246,16 +245,7 @@ extension OberVaveModel {
                 sceneParameterHistory.acknowledge(undo: undo)
                 return
             }
-            var oldConfig = old.coreConfig(), newConfig = next.coreConfig()
-            let epoch = ov_seq_scene_epoch()
-            sceneParameterToken &+= 1
-            guard ov_rack_change_route(UInt32(old.slot), edit.mask, &oldConfig, &newConfig,
-                                       epoch, sceneParameterToken) != 0 else {
-                errorMessage = "Could not queue the instrument history operation."
-                return
-            }
-            pendingSceneParameterHistory = PendingSceneParameterHistory(token: sceneParameterToken,
-                epoch: epoch, edits: [], undo: undo, route: edit)
+            submitSceneRouteChange(edit, undo: undo, recording: false)
             return
         }
         if case .value(let edit) = entry {
@@ -297,6 +287,25 @@ extension OberVaveModel {
 
     func submitSoundChange(expected: RackInstrument, target: RackInstrument, undo: Bool, recording: Bool) {
         submitSoundChanges([SceneSoundEdit(before: expected, after: target)], undo: undo, recording: recording)
+    }
+
+    func submitSceneRouteChange(_ edit: SceneRouteEdit, undo: Bool, recording: Bool) {
+        guard pendingSceneParameterHistory == nil, !sceneSwitchPending, edit.mask != 0 else {
+            errorMessage = "Finish the pending scene edit before changing the instrument."
+            return
+        }
+        let old = undo ? edit.after : edit.before
+        let next = undo ? edit.before : edit.after
+        var oldConfig = old.coreConfig(), newConfig = next.coreConfig()
+        let epoch = ov_seq_scene_epoch()
+        sceneParameterToken &+= 1
+        guard ov_rack_change_route(UInt32(old.slot), edit.mask, &oldConfig, &newConfig,
+                                   epoch, sceneParameterToken) != 0 else {
+            errorMessage = "Could not queue the instrument change."
+            return
+        }
+        pendingSceneParameterHistory = PendingSceneParameterHistory(token: sceneParameterToken,
+            epoch: epoch, edits: [], undo: undo, route: edit, recordingRoute: recording)
     }
 
     func submitSoundChanges(_ sounds: [SceneSoundEdit], undo: Bool, recording: Bool) {
@@ -454,12 +463,18 @@ extension OberVaveModel {
                 if parameterResult.success != 0 && pending.epoch == ov_seq_scene_epoch() {
                     if let sounds = pending.sounds, pending.recordingSound {
                         sceneParameterHistory.recordSounds(sounds)
+                    } else if let route = pending.route, pending.recordingRoute {
+                        sceneParameterHistory.record(route)
                     } else {
                         sceneParameterHistory.acknowledge(undo: pending.undo)
                     }
                     if let route = pending.route,
                        let index = instruments.firstIndex(where: { $0.slot == route.before.slot }) {
                         route.apply(to: &instruments[index], undo: pending.undo)
+                        if route.mask & 192 != 0 {
+                            persistArpSyncSettings(instruments[index])
+                            if route.before.slot == selectedSlot { showSelectedInstrument() }
+                        }
                     }
                     for sound in pending.sounds ?? [] {
                         guard let index = instruments.firstIndex(where: { $0.slot == sound.after.slot }) else { continue }

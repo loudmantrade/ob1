@@ -167,6 +167,19 @@ static void checkAtomicRoute()
     assert(ov_rack_change_route(0, 1, &before, &after, epoch - 1, 13)); render();
     assert(ov_rack_read_parameter_result(&result) && !result.success);
     assert(rack::scene->slots[0]->config.channel == 2 && ov_seq_active(1) == 0);
+    auto syncBefore = rack::scene->slots[0]->config;
+    auto syncAfter = syncBefore;
+    syncAfter.sync = 1; syncAfter.grid = 4;
+    assert(ov_rack_change_route(0, 192, &syncBefore, &syncAfter, epoch, 14)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.success && result.token == 14);
+    assert(rack::scene->slots[0]->config.sync == 1 && rack::scene->slots[0]->config.grid == 4);
+    assert(ov_seq_active(1) == 0);
+    assert(ov_rack_change_route(0, 192, &syncBefore, &syncAfter, epoch, 15)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success && result.token == 15);
+    assert(ov_rack_change_route(0, 192, &syncAfter, &syncBefore, epoch, 16)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.success && result.token == 16);
+    assert(rack::scene->slots[0]->config.sync == syncBefore.sync &&
+           rack::scene->slots[0]->config.grid == syncBefore.grid && ov_seq_active(1) == 0);
     assert(!ov_rack_take_error());
     std::puts("PASS checked route: changed-field isolation, conflict rejection and playback continuity");
 }

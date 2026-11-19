@@ -437,6 +437,8 @@ struct SceneRouteEdit: Equatable {
         if before.levelDB != after.levelDB { value |= 8 }
         if before.pan != after.pan { value |= 16 }
         if before.muted != after.muted { value |= 32 }
+        if before.sync != after.sync { value |= 64 }
+        if before.grid != after.grid { value |= 128 }
         return value
     }
 
@@ -449,6 +451,8 @@ struct SceneRouteEdit: Equatable {
         if mask & 8 != 0 { current.levelDB = target.levelDB }
         if mask & 16 != 0 { current.pan = target.pan }
         if mask & 32 != 0 { current.muted = target.muted }
+        if mask & 64 != 0 { current.sync = target.sync }
+        if mask & 128 != 0 { current.grid = target.grid }
     }
 }
 
@@ -552,6 +556,7 @@ struct PendingSceneParameterHistory {
     var route: SceneRouteEdit? = nil
     var sounds: [SceneSoundEdit]? = nil
     var recordingSound = false
+    var recordingRoute = false
 }
 
 struct ExternalParameterGesture {

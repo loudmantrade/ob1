@@ -148,6 +148,14 @@ struct SceneChecks {
         precondition(sceneHistory.undoStack.last == .sounds([presetEdit]))
         sceneHistory.acknowledge(undo: true)
         precondition(sceneHistory.redoStack.last == .sounds([presetEdit]))
+        var syncTarget = application.scene.instruments[0]
+        syncTarget.sync.toggle()
+        syncTarget.grid = (syncTarget.grid + 1) % 6
+        let syncEdit = SceneRouteEdit(before: application.scene.instruments[0], after: syncTarget)
+        precondition(syncEdit.mask == 192)
+        var syncValue = syncTarget
+        syncEdit.apply(to: &syncValue, undo: true)
+        precondition(syncValue.sync == syncEdit.before.sync && syncValue.grid == syncEdit.before.grid)
         var removed = application
         removed.scene.instruments.removeAll()
         removed.scene.patterns?.removeAll()

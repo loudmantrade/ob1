@@ -1158,20 +1158,38 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     }
 
     func setArpSyncEnabled(_ enabled: Bool) {
-        ov_set_arp_sync(enabled ? 1 : 0)
-        if selectedSlot == 0 { UserDefaults.standard.set(enabled, forKey: arpSyncKey) }
-        isArpSyncEnabled = enabled
-        rememberSelectedInstrument()
+        syncExternalParameterHistory(finish: true)
+        guard let before = selectedInstrument, activeParameterEdits.isEmpty,
+              externalParameterGestures.isEmpty else {
+            errorMessage = "Finish the current edit before changing arpeggiator sync."
+            return
+        }
+        guard before.sync != enabled else { return }
+        var after = before
+        after.sync = enabled
+        submitSceneRouteChange(SceneRouteEdit(before: before, after: after), undo: false, recording: true)
         recordMIDIActivity()
     }
 
     func setArpSyncGrid(_ grid: Int) {
         guard (0...5).contains(grid) else { return }
-        ov_set_arp_sync_grid(UInt32(grid))
-        if selectedSlot == 0 { UserDefaults.standard.set(grid, forKey: arpSyncGridKey) }
-        arpSyncGrid = grid
-        rememberSelectedInstrument()
+        syncExternalParameterHistory(finish: true)
+        guard let before = selectedInstrument, activeParameterEdits.isEmpty,
+              externalParameterGestures.isEmpty else {
+            errorMessage = "Finish the current edit before changing the arpeggiator grid."
+            return
+        }
+        guard before.grid != grid else { return }
+        var after = before
+        after.grid = grid
+        submitSceneRouteChange(SceneRouteEdit(before: before, after: after), undo: false, recording: true)
         recordMIDIActivity()
+    }
+
+    func persistArpSyncSettings(_ instrument: RackInstrument) {
+        guard instrument.slot == 0 else { return }
+        UserDefaults.standard.set(instrument.sync, forKey: arpSyncKey)
+        UserDefaults.standard.set(instrument.grid, forKey: arpSyncGridKey)
     }
 
     func setBLEMIDIBufferMilliseconds(_ milliseconds: Int) {
