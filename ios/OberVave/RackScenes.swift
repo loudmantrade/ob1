@@ -831,9 +831,12 @@ extension OberVaveModel {
 
     func saveScene(name: String, asNew: Bool = false) {
         syncRackState()
-        guard pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
-              pendingSequencerSettings == nil, activeMixerGestures.isEmpty else {
-            errorMessage = "Finish the pending sequencer edit."; return
+        syncExternalParameterHistory(finish: true)
+        guard !sceneSwitchPending, pendingSceneParameterHistory == nil, sceneHistoryJump == nil,
+              pendingPatternTransfer == nil, pendingPianoPublication == nil, pendingSequencerHistory == nil,
+              pendingSequencerSettings == nil, sequencerHistoryJump == nil, activeMixerGestures.isEmpty,
+              activeParameterEdits.isEmpty, activeSceneValueEdits.isEmpty, externalParameterGestures.isEmpty else {
+            errorMessage = "Finish the pending scene or sequencer edit before saving."; return
         }
         guard recordingPattern == nil else {
             errorMessage = "Finish pattern recording before saving the scene."; return
