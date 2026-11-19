@@ -2154,6 +2154,65 @@ struct SequencerCellSnapshot {
     var inDefaultLayout: Bool? = nil
 }
 
+struct SceneRestorePatternHistories {
+    var before: [SequencerCellSnapshot]
+    var after: [SequencerCellSnapshot]
+
+    static func prepare(before: ApplicationDefault, after: ApplicationDefault,
+                        histories: [Int: PianoRollEditBuffer]) throws -> Self {
+        let plan = try SceneRestorePlan(before: before, after: after)
+        guard let oldPatterns = before.scene.patterns, let newPatterns = after.scene.patterns else {
+            throw SceneError.invalid("A scene restore snapshot is missing patterns.")
+        }
+        let old = Dictionary(uniqueKeysWithValues: oldPatterns.map { ($0.id, $0) })
+        let new = Dictionary(uniqueKeysWithValues: newPatterns.map { ($0.id, $0) })
+        let structural = Set(plan.slots.filter(\.structural).map(\.index))
+        var oldSnapshots: [SequencerCellSnapshot] = []
+        var newSnapshots: [SequencerCellSnapshot] = []
+        for id in Set(old.keys).union(new.keys).sorted() {
+            let previous = old[id], target = new[id]
+            guard previous != target || structural.contains(id / 8) else { continue }
+            let history = histories[id]
+            guard history == nil || history?.pattern == previous else {
+                throw SceneError.invalid("A Piano Roll history does not match its pattern.")
+            }
+            var nextHistory: PianoRollEditBuffer?
+            if !structural.contains(id / 8), let target, var editor = history {
+                try editor.restoreDefault(target)
+                nextHistory = editor
+            }
+            let cell = PatternCell(slot: id / 8, row: id % 8)
+            oldSnapshots.append(SequencerCellSnapshot(cell: cell, pattern: previous, pianoHistory: history))
+            newSnapshots.append(SequencerCellSnapshot(cell: cell, pattern: target, pianoHistory: nextHistory))
+        }
+        return Self(before: oldSnapshots, after: newSnapshots)
+    }
+
+    mutating func refreshExpected(undo: Bool, patterns: [SequencerPattern],
+                                  histories: [Int: PianoRollEditBuffer]) throws {
+        guard Set(patterns.map(\.id)).count == patterns.count else {
+            throw SceneError.invalid("Duplicate patterns in the scene.")
+        }
+        let live = Dictionary(uniqueKeysWithValues: patterns.map { ($0.id, $0) })
+        var expected = undo ? after : before
+        for index in expected.indices {
+            let id = expected[index].cell.id
+            guard live[id] == expected[index].pattern,
+                  histories[id] == nil || histories[id]?.pattern == live[id] else {
+                throw SceneError.invalid("A Piano Roll history changed since the scene restore.")
+            }
+            expected[index].pianoHistory = histories[id]
+        }
+        if undo { after = expected } else { before = expected }
+    }
+
+    func apply(to histories: inout [Int: PianoRollEditBuffer], undo: Bool) {
+        for cell in undo ? before : after {
+            histories[cell.cell.id] = cell.pianoHistory
+        }
+    }
+}
+
 struct SequencerHistoryEntry {
     var before: [SequencerCellSnapshot]
     var after: [SequencerCellSnapshot]

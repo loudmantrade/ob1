@@ -131,10 +131,35 @@ struct SceneChecks {
         let deviceEdit = SceneRestoreEdit(before: application, after: deviceAfter, restoresDevice: true)
         let deviceUndone = try deviceEdit.applying(to: deviceAfter, undo: true)
         precondition(deviceUndone.device == application.device)
+        let originalEditor = try PianoRollEditBuffer(pattern: pattern)
+        let unrelatedPattern = SequencerPattern(slot: 0, row: 4, name: "Later")
+        let unrelatedEditor = try PianoRollEditBuffer(pattern: unrelatedPattern)
+        var editorHistories = [pattern.id: originalEditor, unrelatedPattern.id: unrelatedEditor]
+        var patternHistories = try SceneRestorePatternHistories.prepare(before: application,
+            after: targetApplication, histories: editorHistories)
+        precondition(patternHistories.before.count == 2 && patternHistories.after.count == 2)
+        patternHistories.apply(to: &editorHistories, undo: false)
+        precondition(editorHistories[pattern.id]?.pattern.name == "Edited")
+        precondition(editorHistories[pattern.id]?.canUndo == true && editorHistories[unrelatedPattern.id]?.pattern == unrelatedPattern)
+        guard let restoredPatterns = targetApplication.scene.patterns else { fatalError("Missing patterns") }
+        try patternHistories.refreshExpected(undo: true, patterns: restoredPatterns + [unrelatedPattern],
+                                            histories: editorHistories)
+        patternHistories.apply(to: &editorHistories, undo: true)
+        precondition(editorHistories[pattern.id]?.pattern == pattern && editorHistories[unrelatedPattern.id]?.pattern == unrelatedPattern)
+        patternHistories.apply(to: &editorHistories, undo: false)
+        precondition(editorHistories[pattern.id]?.pattern.name == "Edited")
+        do {
+            try patternHistories.refreshExpected(undo: true, patterns: [pattern], histories: editorHistories)
+            fatalError("Scene restore history accepted a changed pattern")
+        } catch { }
         targetApplication = application
         targetApplication.scene.instruments[0].defaultIdentity = UUID()
         let replacementPlan = try SceneRestorePlan(before: application, after: targetApplication)
         precondition(replacementPlan.slots.count == 1 && replacementPlan.slots[0].structural)
+        let structuralHistories = try SceneRestorePatternHistories.prepare(before: application,
+            after: targetApplication, histories: [pattern.id: originalEditor])
+        precondition(structuralHistories.before[0].pianoHistory?.pattern == pattern &&
+                     structuralHistories.after[0].pianoHistory == nil)
         let suite = "io.github.joakimeriksson.obervave.tests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suite) else { fatalError("Could not create test defaults suite") }
         defer { defaults.removePersistentDomain(forName: suite) }
