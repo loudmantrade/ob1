@@ -1208,6 +1208,90 @@ static void checkAudition()
     std::puts("PASS audition: timed release, same-pitch owners, recorder isolation, stale scene and unrelated instrument");
 }
 
+static void checkAtomicBundle()
+{
+    auto scene = std::make_unique<ov_scene_config>();
+    scene->tempo = 120; scene->slots[0] = {1, config()}; scene->slots[1] = {1, config()};
+    auto oldClip = std::make_unique<ov_seq_clip>(clip(0, 0));
+    auto newClip = std::make_unique<ov_seq_clip>(*oldClip);
+    auto backing = std::make_unique<ov_seq_clip>(clip(1, 0));
+    newClip->notes[0].pitch = 72;
+    assert(ov_rack_load(scene.get())); render();
+    assert(ov_seq_set_clip(oldClip.get()) && ov_seq_set_clip(backing.get()));
+    assert(ov_seq_launch(0, 0, 0) && ov_seq_launch(1, 0, 0)); render();
+    const auto epoch = ov_seq_scene_epoch();
+    const auto revision = ov_seq_cell_revision(0, 0);
+    const auto origin = rack::players[0].origin;
+    ov_rack_sound_change sound {0, rack::scene->slots[0]->config, rack::scene->slots[0]->config};
+    sound.replacement.parameters[rack::P_CUTOFF] = 17;
+    ov_rack_mixer_change mixer {0, -6, 0, -12, .5f, 0, 1, 0, 1};
+    ov_seq_cell_change cell {0, 0, revision, oldClip.get(), newClip.get()};
+    ov_rack_parameter_result result {};
+    auto unchanged = [&] {
+        assert(rack::scene->slots[0]->config.parameters[rack::P_CUTOFF] == sound.expected.parameters[rack::P_CUTOFF]);
+        assert(rack::scene->slots[0]->config.level_db == -6 && rack::soloMask == 0);
+        assert(rack::clips[0][0]->pattern.data().notes[0].pitch == 60);
+        assert(ov_seq_cell_revision(0, 0) == revision);
+    };
+    ++cell.revision;
+    assert(ov_seq_change_bundle(&sound, 1, &mixer, 1, &cell, 1, epoch, 800)); render();
+    assert(ov_rack_read_parameter_result(&result) && result.token == 800 && !result.success);
+    unchanged();
+    cell.revision = revision;
+    mixer.expected_level = -5;
+    assert(ov_seq_change_bundle(&sound, 1, &mixer, 1, &cell, 1, epoch, 801)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success); unchanged();
+    mixer.expected_level = -6;
+    sound.expected.cc[rack::P_CUTOFF] = 42;
+    assert(ov_seq_change_bundle(&sound, 1, &mixer, 1, &cell, 1, epoch, 802)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success);
+    sound.expected = rack::scene->slots[0]->config; unchanged();
+    assert(ov_seq_change_bundle(&sound, 1, &mixer, 1, &cell, 1, epoch - 1, 803)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success); unchanged();
+    oldClip->notes[0].pitch = 61;
+    assert(ov_seq_change_bundle(&sound, 1, &mixer, 1, &cell, 1, epoch, 808)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success); unchanged();
+    oldClip->notes[0].pitch = 60;
+    assert(ov_seq_arm(1, 1, 0, 1, 0, 0)); render();
+    assert(ov_seq_change_bundle(&sound, 1, &mixer, 1, &cell, 1, epoch, 804)); render();
+    assert(ov_rack_read_parameter_result(&result) && !result.success); unchanged();
+    assert(ov_seq_finish_record()); render();
+    auto completion = std::make_unique<ov_seq_clip>();
+    while (ov_seq_record_ready()) assert(ov_seq_read_record(completion.get()));
+    assert(ov_seq_change_bundle(&sound, 1, &mixer, 1, &cell, 1, epoch, 805));
+    newClip->notes[0].pitch = 73;
+    render();
+    assert(ov_rack_read_parameter_result(&result) && result.token == 805 && result.success);
+    assert(rack::scene->slots[0]->config.parameters[rack::P_CUTOFF] == 17);
+    assert(rack::scene->slots[0]->config.level_db == -12 && rack::soloMask == 1);
+    assert(rack::clips[0][0]->pattern.data().notes[0].pitch == 72);
+    assert(ov_seq_cell_revision(0, 0) == revision + 1);
+    assert(ov_seq_active(0) == 0 && ov_seq_active(1) == 0 && rack::players[0].origin == origin);
+    assert(rack::players[0].clip == &rack::clips[0][0]->pattern);
+    ov_rack_sound_change duplicate[2] {sound, sound};
+    assert(!ov_seq_change_bundle(duplicate, 2, nullptr, 0, nullptr, 0, epoch, 809));
+    assert(ov_rack_take_error() == 2);
+    ov_seq_cell_change duplicateCells[2] {cell, cell};
+    assert(!ov_seq_change_bundle(nullptr, 0, nullptr, 0, duplicateCells, 2, epoch, 810));
+    assert(ov_rack_take_error() == 2);
+    assert(!ov_seq_change_bundle(nullptr, 1, nullptr, 0, nullptr, 0, epoch, 806));
+    assert(ov_rack_take_error() == 2);
+    assert(!ov_seq_change_bundle(nullptr, 0, nullptr, 0, nullptr, 0, epoch, 807));
+    assert(ov_rack_take_error() == 2);
+    sound.expected = rack::scene->slots[0]->config;
+    sound.replacement = sound.expected;
+    for (uint32_t i = 0; i < rack::parameterResultCapacity; ++i)
+        assert(ov_seq_change_bundle(&sound, 1, nullptr, 0, nullptr, 0, epoch, 820 + i));
+    assert(!ov_seq_change_bundle(&sound, 1, nullptr, 0, nullptr, 0, epoch, 840));
+    assert(ov_rack_take_error() == 4);
+    render();
+    for (uint32_t i = 0; i < rack::parameterResultCapacity; ++i)
+        assert(ov_rack_read_parameter_result(&result) && result.token == 820 + i && result.success);
+    assert(ov_rack_stop_all()); render();
+    assert(!ov_rack_take_error());
+    std::puts("PASS bundle: atomic sound, mixer and cells; conflicts, recording and playback");
+}
+
 static void checkAtomicCellHistory()
 {
     auto scene = std::make_unique<ov_scene_config>();
@@ -1477,5 +1561,5 @@ static void checkRecordingMetronomeAndTransport()
 
 int main()
 {
-    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkAtomicSounds(); checkAtomicMixer(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicCellHistory(); checkAtomicFullCellGrid(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
+    ov_init(); checkExternalHistoryFeed(); checkAtomicParameters(); checkAtomicRoute(); checkAutomationHistory(); checkAtomicSound(); checkAtomicSounds(); checkAtomicMixer(); checkRack(); checkRecording(); checkPadRecording(); checkLaunchHandover(); checkPadTapTransitions(); checkConsecutiveTakes(); checkPatternMove(); checkEditRaces(); checkOutputFirstNoteOrigin(); checkWaitDuringPlayback(); checkLivePatternReplacement(); checkAutomationClip(); checkRegionClip(); checkIndependentRegionClip(); checkAudition(); checkAtomicBundle(); checkAtomicCellHistory(); checkAtomicFullCellGrid(); checkGroupedRecording(); checkRecordingMetronomeAndTransport(); ov_rack_collect();
 }

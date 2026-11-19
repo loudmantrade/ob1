@@ -384,6 +384,13 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     var pianoRollViewports: [Int: PianoRollViewport] = [:]
     var pianoRollHistories: [Int: PianoRollEditBuffer] = [:]
     var patternDefaults = PatternDefaultLibrary()
+    var patternDefaultLayouts: [String: [Int]] = [:]
+    var instrumentDefaults = InstrumentDefaultLibrary()
+    var sceneDefaults = SceneDefaultLibrary()
+    private var sceneDefaultsAvailable = true
+    private let sceneDefaultsKey = "io.github.joakimeriksson.obervave.scene-defaults"
+    private let defaultLibrariesKey = "io.github.joakimeriksson.obervave.default-libraries-v1"
+    private var defaultLibrariesAvailable = true
     var sequencerDefaults: [String: SequencerDefault] = [:]
     private var sequencerDefaultsAvailable = true
     private let sequencerDefaultsKey = "io.github.joakimeriksson.obervave.sequencer-defaults"
@@ -478,6 +485,8 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     private var audioInterrupted = false
     private let presetLibraryKey = "io.github.joakimeriksson.obervave.preset-library"
     private let presetDefaultsKey = "io.github.joakimeriksson.obervave.preset-defaults"
+    private let instrumentDefaultsKey = "io.github.joakimeriksson.obervave.instrument-defaults"
+    private var instrumentDefaultsAvailable = true
     private var presetDefaults: [String: StoredPreset] = [:]
     private var presetDefaultsAvailable = true
     private let patternDefaultsKey = "io.github.joakimeriksson.obervave.pattern-defaults"
@@ -552,6 +561,26 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
                 errorMessage = "Could not load preset defaults: \(error.localizedDescription)"
             }
         }
+        if let data = UserDefaults.standard.data(forKey: instrumentDefaultsKey) {
+            do {
+                let saved = try JSONDecoder().decode(InstrumentDefaultLibrary.self, from: data)
+                try saved.validate()
+                instrumentDefaults = saved
+            } catch {
+                instrumentDefaultsAvailable = false
+                errorMessage = "Could not load instrument defaults: \(error.localizedDescription)"
+            }
+        }
+        if let data = UserDefaults.standard.data(forKey: sceneDefaultsKey) {
+            do {
+                let saved = try JSONDecoder().decode(SceneDefaultLibrary.self, from: data)
+                try saved.validate()
+                sceneDefaults = saved
+            } catch {
+                sceneDefaultsAvailable = false
+                errorMessage = "Could not load scene defaults: \(error.localizedDescription)"
+            }
+        }
         if let data = UserDefaults.standard.data(forKey: patternDefaultsKey) {
             do {
                 let saved = try JSONDecoder().decode(PatternDefaultLibrary.self, from: data)
@@ -560,6 +589,24 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             } catch {
                 patternDefaultsAvailable = false
                 errorMessage = "Could not load pattern defaults: \(error.localizedDescription)"
+            }
+        }
+        if let data = UserDefaults.standard.data(forKey: defaultLibrariesKey) {
+            do {
+                let saved = try JSONDecoder().decode(DefaultLibraries.self, from: data)
+                try saved.validate()
+                sceneDefaults = saved.scenes
+                instrumentDefaults = saved.instruments
+                patternDefaults = saved.patterns
+                sequencerDefaults = saved.sequencers
+                patternDefaultLayouts = saved.patternLayouts
+                sceneDefaultsAvailable = true
+                instrumentDefaultsAvailable = true
+                patternDefaultsAvailable = true
+                sequencerDefaultsAvailable = true
+            } catch {
+                defaultLibrariesAvailable = false
+                errorMessage = "Could not load default libraries: \(error.localizedDescription)"
             }
         }
         let metronome = UserDefaults.standard.object(forKey: "sequencer-record-metronome") as? Bool ?? true
@@ -674,6 +721,20 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     }
 
     private func presetDefaultTarget(for before: RackInstrument) throws -> RackInstrument {
+        guard instrumentDefaultsAvailable else {
+            throw SceneError.invalid("Instrument defaults could not be loaded.")
+        }
+        if let saved = instrumentDefaults.value(scene: sceneSessionKey, instrument: before) {
+            guard saved.engine == before.engine else {
+                throw SceneError.invalid("The instrument default belongs to a different engine.")
+            }
+            var target = before
+            target.parameters = saved.parameters
+            target.cc = saved.cc
+            target.arpMode = saved.arpMode
+            target.latchMode = saved.latchMode
+            return target
+        }
         let key = presetKey(bank: before.programIndex / 128, program: before.programIndex % 128)
         let saved = presetDefaults[key] ?? presetLibrary.presets[key]
         var target = before
@@ -728,7 +789,6 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
             errorMessage = "Saving all instrument defaults is not available yet."
             return
         }
-        let key = presetKey(bank: bank, program: program)
         let epoch = ov_seq_scene_epoch()
         let capturedInstruments = allInstruments ? instruments : [instrument]
         guard ov_rack_snapshot_request() != 0 else {
@@ -762,15 +822,10 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
                 }
                 guard let before = snapshots.first else { throw SceneError.invalid("There are no instruments to restore.") }
                 if save {
-                    let value = StoredPreset(name: self.presetName(bank: self.bank, program: self.program),
-                        parameters: before.parameters, ccAssignments: before.cc.map { $0 == 255 ? -1 : $0 },
-                        arpSelectedMode: before.arpMode, latchSelectedMode: before.latchMode)
-                    try self.validatePresetDefault(value)
-                    var updated = self.presetDefaults
-                    updated[key] = value
-                    UserDefaults.standard.set(try JSONEncoder().encode(updated), forKey: self.presetDefaultsKey)
-                    self.presetDefaults = updated
-                    self.sceneStatus = "Saved preset default"
+                    var updated = self.instrumentDefaults
+                    try updated.set(before, scene: self.sceneSessionKey)
+                    guard self.persistInstrumentDefaults(updated) else { return true }
+                    self.sceneStatus = "Saved instrument preset default"
                 } else {
                     let sounds = try snapshots.map {
                         SceneSoundEdit(before: $0, after: try self.presetDefaultTarget(for: $0))
@@ -1196,40 +1251,61 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     }
 
     @discardableResult
-    func persistPatternDefaults(_ updated: PatternDefaultLibrary) -> Bool {
-        guard updated != patternDefaults else { return true }
-        guard patternDefaultsAvailable else {
-            errorMessage = "Pattern defaults could not be loaded and will not be overwritten."
+    func persistDefaultLibraries(_ updated: DefaultLibraries) -> Bool {
+        guard defaultLibrariesAvailable, instrumentDefaultsAvailable, sceneDefaultsAvailable,
+              patternDefaultsAvailable, sequencerDefaultsAvailable else {
+            errorMessage = "Defaults could not be loaded and will not be overwritten."
             return false
         }
-
         do {
             try updated.validate()
             let data = try JSONEncoder().encode(updated)
-            UserDefaults.standard.set(data, forKey: patternDefaultsKey)
-            patternDefaults = updated
+            UserDefaults.standard.set(data, forKey: defaultLibrariesKey)
+            sceneDefaults = updated.scenes
+            instrumentDefaults = updated.instruments
+            patternDefaults = updated.patterns
+            sequencerDefaults = updated.sequencers
+            patternDefaultLayouts = updated.patternLayouts
             return true
         } catch {
-            errorMessage = "Could not save pattern defaults: \(error.localizedDescription)"
+            errorMessage = "Could not save defaults: \(error.localizedDescription)"
             return false
         }
     }
 
+    func currentDefaultLibraries() -> DefaultLibraries {
+        DefaultLibraries(scenes: sceneDefaults, instruments: instrumentDefaults,
+                         patterns: patternDefaults, sequencers: sequencerDefaults,
+                         patternLayouts: patternDefaultLayouts)
+    }
+
+    @discardableResult
+    func persistInstrumentDefaults(_ updated: InstrumentDefaultLibrary) -> Bool {
+        var libraries = currentDefaultLibraries()
+        libraries.instruments = updated
+        return persistDefaultLibraries(libraries)
+    }
+
+    @discardableResult
+    func persistSceneDefaults(_ updated: SceneDefaultLibrary) -> Bool {
+        var libraries = currentDefaultLibraries()
+        libraries.scenes = updated
+        return persistDefaultLibraries(libraries)
+    }
+
+    @discardableResult
+    func persistPatternDefaults(_ updated: PatternDefaultLibrary) -> Bool {
+        guard updated != patternDefaults else { return true }
+        var libraries = currentDefaultLibraries()
+        libraries.patterns = updated
+        return persistDefaultLibraries(libraries)
+    }
+
     @discardableResult
     func persistSequencerDefaults(_ updated: [String: SequencerDefault]) -> Bool {
-        guard sequencerDefaultsAvailable else {
-            errorMessage = "Sequencer defaults could not be loaded and will not be overwritten."
-            return false
-        }
-        do {
-            for value in updated.values { try value.validate() }
-            UserDefaults.standard.set(try JSONEncoder().encode(updated), forKey: sequencerDefaultsKey)
-            sequencerDefaults = updated
-            return true
-        } catch {
-            errorMessage = "Could not save sequencer defaults: \(error.localizedDescription)"
-            return false
-        }
+        var libraries = currentDefaultLibraries()
+        libraries.sequencers = updated
+        return persistDefaultLibraries(libraries)
     }
 
     func applyPresetData(for index: Int) {
@@ -1850,6 +1926,8 @@ struct ContentView: View {
     @State private var showsPresetEditor = false
     @State private var createsPreset = false
     @State private var showsDefaultSaveConfirmation = false
+    @State private var showsSceneDefaultSaveConfirmation = false
+    @State private var showsAllDefaultsSaveConfirmation = false
     @State private var showsRack = false
 
     var body: some View {
@@ -1940,6 +2018,14 @@ struct ContentView: View {
         }
         .confirmationDialog("Save the current sound and MIDI assignments as this preset's default?", isPresented: $showsDefaultSaveConfirmation) {
             Button("Update Preset Default") { model.capturePresetDefault(save: true) }
+            Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog("Save the current scene as its default without sequencer patterns?", isPresented: $showsSceneDefaultSaveConfirmation) {
+            Button("Update Scene Default") { model.saveSceneDefault() }
+            Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog("Save the scene, instruments, sequencer and patterns as their individual defaults?", isPresented: $showsAllDefaultsSaveConfirmation) {
+            Button("Update All Defaults") { model.saveSceneDefault(all: true) }
             Button("Cancel", role: .cancel) {}
         }
         .onReceive(Timer.publish(every: 0.04, on: .main, in: .common).autoconnect()) { _ in
@@ -2119,8 +2205,11 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
 
-                PatternDefaultButton(enabled: true, subject: "Preset",
-                                     extendedAction: model.performExtendedDefault) { save in
+                PatternDefaultButton(enabled: true, subject: "Preset", extendedAction: { effect in
+                    if effect == .saveScene { showsSceneDefaultSaveConfirmation = true }
+                    else if effect == .saveAll { showsAllDefaultsSaveConfirmation = true }
+                    else { model.performExtendedDefault(effect) }
+                }) { save in
                     if save { showsDefaultSaveConfirmation = true }
                     else { model.capturePresetDefault(save: false) }
                 }

@@ -4,6 +4,205 @@ import CoreGraphics
 
 @main
 struct SceneChecks {
+    static func checkSceneDefaults() throws {
+        let instrument = RackInstrument.oberVave(slot: 0, channel: 1)
+        var baseline = RackSceneDocument(name: "Scene", instruments: [instrument], tempo: 120,
+            masterDB: 0, masterPan: 0, keyboardMask: 1, selectedSlot: 0,
+            patterns: [SequencerPattern(slot: 0, row: 0, name: "Pattern")])
+        var defaults = SceneDefaultLibrary()
+        try defaults.seedMissing(baseline, scene: "one")
+        precondition(defaults.value(scene: "one")?.patterns == nil)
+        baseline.tempo = 140
+        try defaults.seedMissing(baseline, scene: "one")
+        precondition(defaults.value(scene: "one")?.tempo == 120)
+        do {
+            try defaults.set(baseline, scene: "one")
+            fatalError("Scene default accepted patterns")
+        } catch { }
+        try defaults.copyScene(from: "one", to: "copy")
+        baseline.patterns = nil
+        try defaults.set(baseline, scene: "one")
+        precondition(defaults.value(scene: "copy")?.tempo == 120)
+        precondition(defaults.value(scene: "one")?.tempo == 140)
+        let decoded = try JSONDecoder().decode(SceneDefaultLibrary.self, from: JSONEncoder().encode(defaults))
+        try decoded.validate()
+        precondition(decoded.value(scene: "one")?.tempo == 140)
+        precondition(decoded.value(scene: "copy")?.patterns == nil)
+        print("PASS scene defaults: saved baseline, no patterns, independent copy and serialization")
+    }
+
+    static func checkDefaultLibraries() throws {
+        var instrument = RackInstrument.oberVave(slot: 0, channel: 1)
+        let scene = RackSceneDocument(name: "Scene", instruments: [instrument], tempo: 120,
+            masterDB: 0, masterPan: 0, keyboardMask: 1, selectedSlot: 0, patterns: nil)
+        var pattern = SequencerPattern(slot: 0, row: 0, name: "Original")
+        var libraries = DefaultLibraries(scenes: SceneDefaultLibrary(),
+            instruments: InstrumentDefaultLibrary(), patterns: PatternDefaultLibrary(), sequencers: [:])
+        try libraries.scenes.set(scene, scene: "one")
+        try libraries.instruments.set(instrument, scene: "one")
+        try libraries.patterns.replaceScene([pattern], scene: "one")
+        try libraries.setPatternLayout([pattern], scene: "one")
+        libraries.sequencers["one"] = SequencerDefault(launchGrid: 2, recordMode: 0, countBars: 1,
+            recordOutput: true, columns: [SequencerDefault.Column(slot: 0, level: 0, pan: 0,
+                                                                   muted: false, recordBeats: 4)])
+        try libraries.validate()
+        var decoded = try JSONDecoder().decode(DefaultLibraries.self, from: JSONEncoder().encode(libraries))
+        try decoded.validate()
+        instrument.parameters[SynthParameter.cutoff.rawValue] = 45
+        pattern.name = "Changed"
+        try decoded.instruments.set(instrument, scene: "one")
+        try decoded.patterns.set(pattern, scene: "one", cell: PatternCell(slot: 0, row: 0))
+        let again = try JSONDecoder().decode(DefaultLibraries.self, from: JSONEncoder().encode(decoded))
+        precondition(again.instruments.value(scene: "one", instrument: instrument) == instrument)
+        precondition(again.patterns.value(scene: "one", cell: PatternCell(slot: 0, row: 0)) == pattern)
+        let defaultPatterns = try again.defaultPatterns(scene: "one", instruments: [instrument])
+        precondition(defaultPatterns == [pattern])
+        precondition(again.scenes.value(scene: "one")?.tempo == 120)
+        precondition(again.sequencers["one"]?.launchGrid == 2)
+        let target = try again.sceneRestoreTarget(scene: "one")
+        precondition(target.document.instruments[0].parameters[SynthParameter.cutoff.rawValue] == 45)
+        precondition(target.document.patterns == [pattern])
+        precondition(target.document.instruments[0].levelDB == 0)
+        precondition(target.sequencer.launchGrid == 2)
+        var invalid = again
+        invalid.sequencers[""] = invalid.sequencers["one"]
+        do {
+            try invalid.validate()
+            fatalError("Invalid default library accepted")
+        } catch { }
+        invalid = again
+        invalid.patternLayouts["one"] = [128]
+        do {
+            try invalid.validate()
+            fatalError("Invalid pattern layout accepted")
+        } catch { }
+        invalid.patternLayouts["one"] = [0, 0]
+        do {
+            _ = try invalid.defaultPatterns(scene: "one", instruments: [instrument])
+            fatalError("Duplicate pattern layout accepted")
+        } catch { }
+        do {
+            _ = try again.defaultPatterns(scene: "one", instruments: [])
+            fatalError("Pattern layout with missing instrument accepted")
+        } catch { }
+        invalid = again
+        try invalid.patterns.set(nil, scene: "one", cell: PatternCell(slot: 0, row: 0))
+        do {
+            _ = try invalid.defaultPatterns(scene: "one", instruments: [instrument])
+            fatalError("Pattern layout with missing default accepted")
+        } catch { }
+        do {
+            _ = try invalid.sceneRestoreTarget(scene: "one")
+            fatalError("Scene restore accepted a missing pattern default")
+        } catch { }
+        invalid = again
+        invalid.sequencers["one"]?.columns = []
+        do {
+            _ = try invalid.sceneRestoreTarget(scene: "one")
+            fatalError("Scene restore accepted mismatched instruments")
+        } catch { }
+        invalid = again
+        invalid.instruments = InstrumentDefaultLibrary()
+        let fallback = try invalid.sceneRestoreTarget(scene: "one")
+        precondition(fallback.document.instruments[0].parameters == scene.instruments[0].parameters)
+        let encoded = try JSONEncoder().encode(again)
+        guard var old = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+            fatalError("Expected default libraries JSON object")
+        }
+        old.removeValue(forKey: "patternLayouts")
+        let migrated = try JSONDecoder().decode(DefaultLibraries.self, from: JSONSerialization.data(withJSONObject: old))
+        precondition(migrated.patternLayouts.isEmpty)
+        try migrated.validate()
+        var moved = again
+        let source = PatternCell(slot: 0, row: 0)
+        let destination = PatternCell(slot: 0, row: 1)
+        try moved.transferPatternDefault(scene: "one", source: source, destination: destination,
+                                         copying: true, deleting: false)
+        precondition(moved.patternLayouts["one"] == [0, 1])
+        var copied = pattern
+        copied.row = 1
+        precondition(moved.patterns.value(scene: "one", cell: destination) == copied)
+        pattern.name = "Updated after copy"
+        try moved.patterns.set(pattern, scene: "one", cell: source)
+        precondition(moved.patterns.value(scene: "one", cell: destination) == copied)
+        try moved.transferPatternDefault(scene: "one", source: source, destination: source,
+                                         copying: false, deleting: true)
+        precondition(moved.patternLayouts["one"] == [1])
+        let third = PatternCell(slot: 0, row: 2)
+        try moved.transferPatternDefault(scene: "one", source: destination, destination: third,
+                                         copying: false, deleting: false)
+        precondition(moved.patternLayouts["one"] == [2])
+        try moved.setPatternLayoutMembership(true, scene: "one", cell: destination)
+        try moved.setPatternLayoutMembership(false, scene: "one", cell: third)
+        precondition(moved.patternLayouts["one"] == [1])
+        try moved.transferPatternDefault(scene: "one", source: third, destination: destination,
+                                         copying: true, deleting: false)
+        precondition(moved.patternLayouts["one"] == [])
+        precondition(moved.patterns.value(scene: "one", cell: destination) != nil)
+        do {
+            try moved.setPatternLayoutMembership(nil, scene: "one", cell: source)
+            fatalError("Changed pattern layout accepted")
+        } catch { }
+        try moved.validate()
+        let movedRoundTrip = try JSONDecoder().decode(DefaultLibraries.self, from: JSONEncoder().encode(moved))
+        precondition(movedRoundTrip.patternLayouts["one"] == [])
+        print("PASS default libraries: combined serialization and independent subsequent updates")
+    }
+
+    static func checkInstrumentDefaults() throws {
+        var first = RackInstrument.oberVave(slot: 0, channel: 1)
+        var second = RackInstrument.oberVave(slot: 1, channel: 2)
+        first.parameters[SynthParameter.cutoff.rawValue] = 23
+        second.parameters[SynthParameter.cutoff.rawValue] = 55
+        var library = InstrumentDefaultLibrary()
+        try library.set(first, scene: "one")
+        try library.set(second, scene: "one")
+        var savedBaseline = first
+        savedBaseline.parameters[SynthParameter.cutoff.rawValue] = 81
+        try library.seedMissing([savedBaseline], scene: "one")
+        precondition(library.value(scene: "one", instrument: first) == first)
+        try library.seedMissing([savedBaseline], scene: "baseline")
+        precondition(library.value(scene: "baseline", instrument: first) == savedBaseline)
+        precondition(library.value(scene: "one", instrument: first) == first)
+        precondition(library.value(scene: "one", instrument: second) == second)
+        var alternate = first
+        alternate.programIndex += 1
+        try library.set(alternate, scene: "one")
+        precondition(library.value(scene: "one", instrument: first) == first)
+        try library.copyScene(from: "one", to: "copy")
+        first.parameters[SynthParameter.cutoff.rawValue] = 31
+        try library.set(first, scene: "one")
+        precondition(library.value(scene: "copy", instrument: first) != first)
+        let decoded = try JSONDecoder().decode(InstrumentDefaultLibrary.self, from: JSONEncoder().encode(library))
+        try decoded.validate()
+        precondition(decoded == library)
+        let encodedInstrument = try JSONEncoder().encode(first)
+        guard var oldFields = try JSONSerialization.jsonObject(with: encodedInstrument) as? [String: Any] else {
+            fatalError("Instrument JSON is not an object")
+        }
+        oldFields.removeValue(forKey: "defaultIdentity")
+        let legacy = try JSONDecoder().decode(RackInstrument.self,
+            from: JSONSerialization.data(withJSONObject: oldFields))
+        precondition(legacy.defaultIdentity == nil)
+        try library.set(legacy, scene: "legacy")
+        let reopenedLegacy = try JSONDecoder().decode(RackInstrument.self,
+            from: JSONSerialization.data(withJSONObject: oldFields))
+        precondition(library.value(scene: "legacy", instrument: reopenedLegacy) == legacy)
+        var replacement = RackInstrument.oberVave(slot: 0, channel: 1)
+        precondition(library.value(scene: "one", instrument: replacement) == nil)
+        replacement.parameters[SynthParameter.cutoff.rawValue] = 77
+        try library.set(replacement, scene: "one")
+        precondition(library.value(scene: "one", instrument: first) == first)
+        precondition(library.value(scene: "one", instrument: replacement) == replacement)
+        precondition(library.value(scene: "one", instrument: second) == second)
+        precondition(library.value(scene: "copy", instrument: alternate) == alternate)
+        do {
+            try library.set(first, scene: "")
+            fatalError("Empty scene key accepted")
+        } catch { }
+        print("PASS instrument defaults: scene, instrument and preset isolation, replacement, copy and serialization")
+    }
+
     static func checkPatternDefaults() throws {
         let a = PatternCell(slot: 0, row: 1)
         let b = PatternCell(slot: 2, row: 3)
@@ -395,6 +594,9 @@ struct SceneChecks {
     }
 
     static func main() throws {
+        try checkSceneDefaults()
+        try checkDefaultLibraries()
+        try checkInstrumentDefaults()
         try checkSequencerDefaults()
         try checkPatternDefaults()
         checkDefaultGesture()

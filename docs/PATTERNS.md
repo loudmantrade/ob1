@@ -370,9 +370,20 @@ thread without restarting the sequencer. Double-tap DEFAULT on the synth,
 sequencer or Piano Roll screen to restore all instruments' current preset
 defaults together as one scene-history action. All sounds are checked before
 any are changed; a missing default or concurrent edit rejects the whole
-operation. Defaults are local to the device and keyed by preset, so instruments
-using the same preset share that preset default. Triple-tap and the multi-tap
-hold scene-default operations are not yet available.
+operation. Defaults are local to the device and keyed by scene, instrument
+identity and preset, so instruments using the same preset can have independent
+defaults. Saving a scene as a new file copies these defaults; a new instrument
+does not inherit a former occupant's defaults. Older shared preset defaults
+remain available as a fallback. On the synth screen, tap then hold DEFAULT and
+confirm to save a scene default without pattern contents or sequencer options.
+Saving a scene establishes a baseline if no scene default exists, and Save As
+copies it independently. Double-tap then hold DEFAULT and confirm to update the
+scene, instrument sounds, sequencer settings, pattern layout and pattern defaults
+together. Later individual saves remain independent. The layout is also seeded
+from a saved scene when no layout default exists, and copied with Save As.
+When a pattern default moves, is copied, or is deleted, its membership in the
+saved layout follows the same operation and is restored by sequencer Undo/Redo.
+Restoring a scene default is not yet available.
 
 Copy/Paste retains relative timing and routing, with the most recent empty-grid
 tap as the paste anchor (initially tick zero). Paste creates new note IDs and

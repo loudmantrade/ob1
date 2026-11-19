@@ -72,6 +72,7 @@ final class SceneSaveMonitor {
 struct RackInstrument: Codable, Equatable, Identifiable {
     var id: Int { slot }
     var slot: Int
+    var defaultIdentity: UUID? = UUID()
     var name: String
     var engine = Int(OV_ENGINE_OBERVAVE)
     var channel: Int
@@ -151,6 +152,7 @@ extension RackInstrument {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         slot = try c.decode(Int.self, forKey: .slot)
+        defaultIdentity = try c.decodeIfPresent(UUID.self, forKey: .defaultIdentity)
         name = try c.decode(String.self, forKey: .name)
         engine = try c.decode(Int.self, forKey: .engine)
         channel = try c.decode(Int.self, forKey: .channel)
@@ -223,6 +225,187 @@ struct SceneSessionState {
     var fileURL: URL?
     var sequencerHistory = SequencerHistory()
     var sceneParameterHistory = SceneParameterHistory()
+}
+
+struct SceneDefaultLibrary: Codable {
+    private(set) var scenes: [String: RackSceneDocument] = [:]
+
+    func value(scene: String) -> RackSceneDocument? { scenes[scene] }
+
+    mutating func set(_ document: RackSceneDocument, scene: String) throws {
+        guard !scene.isEmpty, document.patterns == nil else {
+            throw SceneError.invalid("A scene default must not contain patterns.")
+        }
+        try document.validate()
+        scenes[scene] = document
+    }
+
+    mutating func seedMissing(_ document: RackSceneDocument, scene: String) throws {
+        guard !scene.isEmpty else { throw SceneError.invalid("Invalid scene default key.") }
+        if scenes[scene] == nil {
+            var baseline = document
+            baseline.patterns = nil
+            try set(baseline, scene: scene)
+        }
+    }
+
+    mutating func copyScene(from source: String, to destination: String) throws {
+        guard !source.isEmpty, !destination.isEmpty else {
+            throw SceneError.invalid("Invalid scene default key.")
+        }
+        scenes[destination] = scenes[source]
+    }
+
+    func validate() throws {
+        for (key, document) in scenes {
+            guard !key.isEmpty, document.patterns == nil else {
+                throw SceneError.invalid("Invalid scene defaults library.")
+            }
+            try document.validate()
+        }
+    }
+}
+
+struct DefaultLibraries: Codable {
+    var scenes: SceneDefaultLibrary
+    var instruments: InstrumentDefaultLibrary
+    var patterns: PatternDefaultLibrary
+    var sequencers: [String: SequencerDefault]
+    var patternLayouts: [String: [Int]] = [:]
+
+    private enum CodingKeys: String, CodingKey {
+        case scenes, instruments, patterns, sequencers, patternLayouts
+    }
+
+    init(scenes: SceneDefaultLibrary, instruments: InstrumentDefaultLibrary,
+         patterns: PatternDefaultLibrary, sequencers: [String: SequencerDefault],
+         patternLayouts: [String: [Int]] = [:]) {
+        self.scenes = scenes
+        self.instruments = instruments
+        self.patterns = patterns
+        self.sequencers = sequencers
+        self.patternLayouts = patternLayouts
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        scenes = try container.decode(SceneDefaultLibrary.self, forKey: .scenes)
+        instruments = try container.decode(InstrumentDefaultLibrary.self, forKey: .instruments)
+        patterns = try container.decode(PatternDefaultLibrary.self, forKey: .patterns)
+        sequencers = try container.decode([String: SequencerDefault].self, forKey: .sequencers)
+        patternLayouts = try container.decodeIfPresent([String: [Int]].self, forKey: .patternLayouts) ?? [:]
+    }
+
+    mutating func setPatternLayout(_ patterns: [SequencerPattern], scene: String) throws {
+        guard !scene.isEmpty, patterns.count <= 128,
+              Set(patterns.map(\.id)).count == patterns.count else {
+            throw SceneError.invalid("Invalid sequencer default pattern layout.")
+        }
+        try patterns.forEach { try $0.validate() }
+        patternLayouts[scene] = patterns.map(\.id).sorted()
+    }
+
+    mutating func transferPatternDefault(scene: String, source: PatternCell, destination: PatternCell,
+                                         copying: Bool, deleting: Bool) throws {
+        try patterns.transfer(scene: scene, source: source, destination: destination,
+                              copying: copying, deleting: deleting)
+        guard let layout = patternLayouts[scene] else { return }
+        var cells = Set(layout)
+        let included = cells.contains(source.id)
+        if !copying || deleting { cells.remove(source.id) }
+        if !deleting {
+            cells.remove(destination.id)
+            if included { cells.insert(destination.id) }
+        }
+        patternLayouts[scene] = cells.sorted()
+    }
+
+    mutating func setPatternLayoutMembership(_ included: Bool?, scene: String, cell: PatternCell) throws {
+        guard !scene.isEmpty, (0..<16).contains(cell.slot), (0..<8).contains(cell.row) else {
+            throw SceneError.invalid("Invalid scene or pattern cell for default layout.")
+        }
+        guard let included else {
+            guard patternLayouts[scene] == nil else {
+                throw SceneError.invalid("The pattern default layout changed.")
+            }
+            return
+        }
+        guard let layout = patternLayouts[scene] else {
+            throw SceneError.invalid("The pattern default layout is missing.")
+        }
+        var cells = Set(layout)
+        if included { cells.insert(cell.id) } else { cells.remove(cell.id) }
+        patternLayouts[scene] = cells.sorted()
+    }
+
+    func defaultPatterns(scene: String, instruments: [RackInstrument]) throws -> [SequencerPattern] {
+        guard let layout = patternLayouts[scene] else {
+            throw SceneError.invalid("This scene has no saved sequencer pattern layout.")
+        }
+        guard layout.count <= 128, Set(layout).count == layout.count,
+              layout.allSatisfy({ (0..<128).contains($0) }) else {
+            throw SceneError.invalid("Invalid sequencer default pattern layout.")
+        }
+        let slots = Set(instruments.map(\.slot))
+        return try layout.map { id in
+            let cell = PatternCell(slot: id / 8, row: id % 8)
+            guard slots.contains(cell.slot), let pattern = patterns.value(scene: scene, cell: cell) else {
+                throw SceneError.invalid("A pattern default for cell \(cell.slot + 1):\(cell.row + 1) is missing.")
+            }
+            return pattern
+        }
+    }
+
+    func sceneRestoreTarget(scene: String) throws -> (document: RackSceneDocument, sequencer: SequencerDefault) {
+        guard var document = scenes.value(scene: scene) else {
+            throw SceneError.invalid("This scene has no saved scene default.")
+        }
+        guard let sequencer = sequencers[scene] else {
+            throw SceneError.invalid("This scene has no saved sequencer default.")
+        }
+        try sequencer.validate()
+        guard Set(document.instruments.map(\.slot)) == Set(sequencer.columns.map(\.slot)) else {
+            throw SceneError.invalid("The scene and sequencer defaults have different instruments.")
+        }
+        for index in document.instruments.indices {
+            let baseline = document.instruments[index]
+            if let sound = instruments.value(scene: scene, instrument: baseline) {
+                guard sound.engine == baseline.engine else {
+                    throw SceneError.invalid("An instrument default belongs to a different engine.")
+                }
+                document.instruments[index].parameters = sound.parameters
+                document.instruments[index].cc = sound.cc
+                document.instruments[index].arpMode = sound.arpMode
+                document.instruments[index].latchMode = sound.latchMode
+            }
+            guard let column = sequencer.columns.first(where: { $0.slot == baseline.slot }) else {
+                throw SceneError.invalid("A sequencer default instrument is missing.")
+            }
+            document.instruments[index].levelDB = column.level
+            document.instruments[index].pan = column.pan
+            document.instruments[index].muted = column.muted
+            document.instruments[index].recordBeats = column.recordBeats
+        }
+        document.patterns = try defaultPatterns(scene: scene, instruments: document.instruments)
+        try document.validate()
+        return (document, sequencer)
+    }
+
+    func validate() throws {
+        try scenes.validate()
+        try instruments.validate()
+        try patterns.validate()
+        guard sequencers.keys.allSatisfy({ !$0.isEmpty }) else {
+            throw SceneError.invalid("Invalid sequencer default scene key.")
+        }
+        for (scene, layout) in patternLayouts {
+            guard !scene.isEmpty, layout.count <= 128,
+                  Set(layout).count == layout.count, layout.allSatisfy({ (0..<128).contains($0) }) else {
+                throw SceneError.invalid("Invalid sequencer default pattern layout.")
+            }
+        }
+        try sequencers.values.forEach { try $0.validate() }
+    }
 }
 
 struct SceneParameterEdit: Equatable {
@@ -741,6 +924,65 @@ struct PatternCell: Hashable {
     var slot: Int
     var row: Int
     var id: Int { slot * 8 + row }
+}
+
+struct InstrumentDefaultLibrary: Codable, Equatable {
+    private(set) var scenes: [String: [Int: [String: [Int: RackInstrument]]]] = [:]
+
+    private static func identity(_ instrument: RackInstrument) -> String {
+        instrument.defaultIdentity?.uuidString ?? "legacy"
+    }
+
+    func value(scene: String, instrument: RackInstrument) -> RackInstrument? {
+        scenes[scene]?[instrument.slot]?[Self.identity(instrument)]?[instrument.programIndex]
+    }
+
+    mutating func set(_ instrument: RackInstrument, scene: String) throws {
+        guard !scene.isEmpty else { throw SceneError.invalid("Invalid instrument default scene.") }
+        try instrument.validate()
+        scenes[scene, default: [:]][instrument.slot, default: [:]][Self.identity(instrument), default: [:]][instrument.programIndex] = instrument
+    }
+
+    mutating func copyScene(from source: String, to destination: String) throws {
+        guard !source.isEmpty, !destination.isEmpty else {
+            throw SceneError.invalid("Invalid instrument default scene.")
+        }
+        scenes[destination] = scenes[source]
+    }
+
+    mutating func seedMissing(_ instruments: [RackInstrument], scene: String) throws {
+        guard Set(instruments.map(\.slot)).count == instruments.count else {
+            throw SceneError.invalid("Duplicate instruments in default baseline.")
+        }
+        for instrument in instruments where value(scene: scene, instrument: instrument) == nil {
+            try set(instrument, scene: scene)
+        }
+    }
+
+    func validate() throws {
+        for (scene, slots) in scenes {
+            guard !scene.isEmpty, slots.count <= 16 else {
+                throw SceneError.invalid("Invalid instrument defaults library.")
+            }
+            for (slot, identities) in slots {
+                guard (0..<16).contains(slot), identities.count <= 1024 else {
+                    throw SceneError.invalid("Invalid instrument default slot.")
+                }
+                for (identity, programs) in identities {
+                    guard programs.count <= 768 else {
+                        throw SceneError.invalid("Invalid instrument default programs.")
+                    }
+                    for (program, instrument) in programs {
+                        try instrument.validate()
+                        guard slot == instrument.slot, identity == Self.identity(instrument),
+                              program == instrument.programIndex else {
+                            throw SceneError.invalid("Instrument default identity does not match its key.")
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 struct PatternDefaultLibrary: Codable, Equatable {
@@ -1511,6 +1753,7 @@ struct SequencerCellSnapshot {
     var pattern: SequencerPattern?
     var pianoHistory: PianoRollEditBuffer?
     var patternDefault: SequencerPattern? = nil
+    var inDefaultLayout: Bool? = nil
 }
 
 struct SequencerHistoryEntry {

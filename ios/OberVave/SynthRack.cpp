@@ -330,6 +330,12 @@ struct MixerChangeRequest final : Retired {
     uint32_t count = 0;
     uint64_t epoch = 0, token = 0;
 };
+struct BundleChangeRequest final : Retired {
+    SoundChangeRequest sounds;
+    MixerChangeRequest mixer;
+    CellChangeRequest cells;
+    uint64_t epoch = 0, token = 0;
+};
 constexpr uint32_t parameterResultCapacity = 16;
 std::array<ov_rack_parameter_result, parameterResultCapacity> parameterResults {};
 std::atomic<uint32_t> parameterRead {0}, parameterWrite {0}, parameterOutstanding {0};
@@ -485,7 +491,7 @@ void forgetPedals(uint32_t slot)
     for (auto& pedal : pedalOwners) pedal.destinations &= ~(1u << slot);
 }
 
-enum class Kind { MIDI, Audition, StopAll, SeqClip, SeqEdit, SeqChangeCells, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
+enum class Kind { MIDI, Audition, StopAll, SeqClip, SeqEdit, SeqChangeCells, BundleChange, SeqLaunch, SeqRow, SeqStop, SeqSolo, SeqRecord, SeqTap,
     SeqFinish, SourceClose, Parameter, ParameterChange, RouteChange, SoundChange, MixerChange, CC, ResetCC, Learn, Program, Sync, Grid, Route, Add, Remove, Scene, Capture };
 struct Command {
     Kind kind = Kind::MIDI;
@@ -918,29 +924,116 @@ bool samePattern(const music::PatternData& a, const music::PatternData& b)
     }
     return true;
 }
+bool matchesSounds(const SoundChangeRequest& request)
+{
+    for (uint32_t i = 0; i < request.count; ++i) {
+        const auto& change = request.changes[i];
+        const auto& pointer = scene->slots[change.slot];
+        if (!pointer) return false;
+        const auto& current = pointer->config;
+        if (current.engine != change.expected.engine || current.program != change.expected.program) return false;
+        for (uint32_t p = 0; p < NPARAM; ++p)
+            if ((current.parameters[p] != change.expected.parameters[p] && !pointer->automatedParameters[p]) ||
+                current.cc[p] != change.expected.cc[p]) return false;
+    }
+    return true;
+}
+void applySounds(const SoundChangeRequest& request)
+{
+    for (uint32_t i = 0; i < request.count; ++i) {
+        const auto& change = request.changes[i];
+        auto& inst = *scene->slots[change.slot];
+        inst.engine->boundary({processedFrames});
+        for (uint32_t p = 0; p < NPARAM; ++p) {
+            const auto replacement = change.replacement.parameters[p];
+            if (inst.config.parameters[p] != replacement) {
+                inst.config.parameters[p] = replacement;
+                inst.engine->parameter(p, replacement);
+            }
+            inst.config.cc[p] = change.replacement.cc[p];
+            inst.automatedParameters[p] = false;
+        }
+        publish(change.slot);
+    }
+}
+bool matchesMixer(const MixerChangeRequest& request)
+{
+    for (uint32_t i = 0; i < request.count; ++i) {
+        const auto& change = request.changes[i];
+        const auto& inst = scene->slots[change.slot];
+        if (!inst || inst->config.level_db != change.expected_level ||
+            inst->config.pan != change.expected_pan || inst->config.muted != change.expected_mute ||
+            ((soloMask >> change.slot) & 1u) != change.expected_solo) return false;
+    }
+    return true;
+}
+void applyMixer(const MixerChangeRequest& request)
+{
+    for (uint32_t i = 0; i < request.count; ++i) {
+        const auto& change = request.changes[i];
+        auto& config = scene->slots[change.slot]->config;
+        config.level_db = change.replacement_level;
+        config.pan = change.replacement_pan;
+        config.muted = change.replacement_mute;
+        if (change.replacement_solo) soloMask |= uint16_t(1u << change.slot);
+        else soloMask &= uint16_t(~(1u << change.slot));
+        publish(change.slot);
+    }
+}
+bool matchesCells(const CellChangeRequest& request)
+{
+    for (uint32_t i = 0; i < request.count; ++i) {
+        const auto& cell = request.cells[i];
+        const auto& current = clips[cell.slot][cell.row];
+        if (!scene->slots[cell.slot] ||
+            (recordings[cell.slot].recorder.running && recordings[cell.slot].recorder.row == cell.row) ||
+            clipRevisions[cell.slot][cell.row].load() != cell.revision ||
+            bool(current) != bool(cell.expected) ||
+            (current && !samePattern(current->pattern.data(), cell.expected->pattern.data()))) return false;
+    }
+    return true;
+}
+void applyCells(CellChangeRequest& request)
+{
+    for (uint32_t i = 0; i < request.count; ++i) {
+        auto& cell = request.cells[i];
+        auto& current = clips[cell.slot][cell.row];
+        if (current && cell.replacement) {
+            players[cell.slot].replaceSnapshot(&current->pattern, &cell.replacement->pattern);
+        } else if (current && (players[cell.slot].row == int32_t(cell.row) ||
+                               players[cell.slot].pendingRow == int32_t(cell.row))) {
+            stopSequencer(cell.slot);
+            scene->slots[cell.slot]->engine->boundary({processedFrames});
+            scene->slots[cell.slot]->engine->stopArpeggiator();
+        }
+        retire(current.release());
+        current = std::move(cell.replacement);
+        clipRevisions[cell.slot][cell.row].fetch_add(1);
+    }
+}
 void apply(const Command& c)
 {
     if (c.padAcknowledgement) padCommands[c.slot][c.a].fetch_sub(1);
+    if (c.kind == Kind::BundleChange) {
+        auto* request = static_cast<BundleChangeRequest*>(c.object);
+        bool valid = request->epoch == sceneEpoch.load();
+        for (const auto& recording : recordings) valid = valid && !recording.recorder.running;
+        valid = valid && matchesSounds(request->sounds) && matchesMixer(request->mixer) && matchesCells(request->cells);
+        if (valid) {
+            applySounds(request->sounds);
+            applyMixer(request->mixer);
+            applyCells(request->cells);
+        }
+        const auto write = parameterWrite.load(std::memory_order_relaxed);
+        parameterResults[write % parameterResultCapacity] = {request->token, valid ? 1u : 0u};
+        parameterWrite.store(write + 1, std::memory_order_release);
+        retire(request);
+        return;
+    }
     if (c.kind == Kind::MixerChange) {
         auto* request = static_cast<MixerChangeRequest*>(c.object);
-        bool valid = request->epoch == sceneEpoch.load();
-        for (uint32_t i = 0; i < request->count && valid; ++i) {
-            const auto& change = request->changes[i];
-            const auto& inst = scene->slots[change.slot];
-            valid = inst && inst->config.level_db == change.expected_level &&
-                inst->config.pan == change.expected_pan && inst->config.muted == change.expected_mute &&
-                ((soloMask >> change.slot) & 1u) == change.expected_solo;
-        }
-        if (valid) for (uint32_t i = 0; i < request->count; ++i) {
-            const auto& change = request->changes[i];
-            auto& config = scene->slots[change.slot]->config;
-            config.level_db = change.replacement_level;
-            config.pan = change.replacement_pan;
-            config.muted = change.replacement_mute;
-            if (change.replacement_solo) soloMask |= uint16_t(1u << change.slot);
-            else soloMask &= uint16_t(~(1u << change.slot));
-            publish(change.slot);
-        }
+        const bool valid = request->epoch == sceneEpoch.load() && matchesMixer(*request);
+        if (valid) applyMixer(*request);
         const auto write = parameterWrite.load(std::memory_order_relaxed);
         parameterResults[write % parameterResultCapacity] = {request->token, valid ? 1u : 0u};
         parameterWrite.store(write + 1, std::memory_order_release);
@@ -949,33 +1042,8 @@ void apply(const Command& c)
     }
     if (c.kind == Kind::SoundChange) {
         auto* request = static_cast<SoundChangeRequest*>(c.object);
-        bool valid = request->epoch == sceneEpoch.load();
-        for (uint32_t i = 0; i < request->count && valid; ++i) {
-            const auto& change = request->changes[i];
-            const auto& pointer = scene->slots[change.slot];
-            if (!pointer) { valid = false; break; }
-            const auto& current = pointer->config;
-            valid = current.engine == change.expected.engine && current.program == change.expected.program;
-            for (uint32_t p = 0; p < NPARAM && valid; ++p) {
-                valid = (current.parameters[p] == change.expected.parameters[p] || pointer->automatedParameters[p]) &&
-                    current.cc[p] == change.expected.cc[p];
-            }
-        }
-        if (valid) for (uint32_t i = 0; i < request->count; ++i) {
-            const auto& change = request->changes[i];
-            auto& inst = *scene->slots[change.slot];
-            inst.engine->boundary({processedFrames});
-            for (uint32_t p = 0; p < NPARAM; ++p) {
-                const auto replacement = change.replacement.parameters[p];
-                if (inst.config.parameters[p] != replacement) {
-                    inst.config.parameters[p] = replacement;
-                    inst.engine->parameter(p, replacement);
-                }
-                inst.config.cc[p] = change.replacement.cc[p];
-                inst.automatedParameters[p] = false;
-            }
-            publish(change.slot);
-        }
+        const bool valid = request->epoch == sceneEpoch.load() && matchesSounds(*request);
+        if (valid) applySounds(*request);
         const auto write = parameterWrite.load(std::memory_order_relaxed);
         parameterResults[write % parameterResultCapacity] = {request->token, valid ? 1u : 0u};
         parameterWrite.store(write + 1, std::memory_order_release);
@@ -1046,32 +1114,8 @@ void apply(const Command& c)
     }
     if (c.kind == Kind::SeqChangeCells) {
         auto* edit = static_cast<CellChangeRequest*>(c.object);
-        bool valid = edit->epoch == sceneEpoch.load();
-        for (uint32_t i = 0; i < edit->count; ++i) {
-            const auto& cell = edit->cells[i];
-            const auto& current = clips[cell.slot][cell.row];
-            valid = valid && scene->slots[cell.slot] &&
-                !(recordings[cell.slot].recorder.running && recordings[cell.slot].recorder.row == cell.row) &&
-                clipRevisions[cell.slot][cell.row].load() == cell.revision &&
-                bool(current) == bool(cell.expected);
-            if (current && cell.expected)
-                valid = valid && samePattern(current->pattern.data(), cell.expected->pattern.data());
-        }
-        if (valid) for (uint32_t i = 0; i < edit->count; ++i) {
-            auto& cell = edit->cells[i];
-            auto& current = clips[cell.slot][cell.row];
-            if (current && cell.replacement) {
-                players[cell.slot].replaceSnapshot(&current->pattern, &cell.replacement->pattern);
-            } else if (current && (players[cell.slot].row == int32_t(cell.row) ||
-                                   players[cell.slot].pendingRow == int32_t(cell.row))) {
-                stopSequencer(cell.slot);
-                scene->slots[cell.slot]->engine->boundary({processedFrames});
-                scene->slots[cell.slot]->engine->stopArpeggiator();
-            }
-            retire(current.release());
-            current = std::move(cell.replacement);
-            clipRevisions[cell.slot][cell.row].fetch_add(1);
-        }
+        const bool valid = edit->epoch == sceneEpoch.load() && matchesCells(*edit);
+        if (valid) applyCells(*edit);
         const auto write = editWrite.load(std::memory_order_relaxed);
         const auto& first = edit->cells[0];
         const auto& last = edit->cells[edit->count - 1];
@@ -1599,6 +1643,61 @@ bool send(uint32_t status, uint32_t d1, uint32_t d2, uint32_t frame, bool timed,
     c.source.id = sourceID;
     return enqueue(c);
 }
+bool prepareSounds(SoundChangeRequest& request, const ov_rack_sound_change* changes, uint32_t count)
+{
+    if (count > capacity || (count && !changes)) return false;
+    uint32_t seen = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& c = changes[i];
+        if (c.slot >= capacity || (seen & (1u << c.slot)) ||
+            !valid(c.expected) || !valid(c.replacement) ||
+            c.expected.engine != c.replacement.engine || c.expected.program != c.replacement.program)
+            return false;
+        seen |= 1u << c.slot;
+        request.changes[i] = c;
+    }
+    request.count = count;
+    return true;
+}
+bool prepareMixer(MixerChangeRequest& request, const ov_rack_mixer_change* changes, uint32_t count)
+{
+    if (count > capacity || (count && !changes)) return false;
+    uint32_t seen = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& c = changes[i];
+        if (c.slot >= capacity || (seen & (1u << c.slot)) ||
+            !std::isfinite(c.expected_level) || c.expected_level < -48 || c.expected_level > 0 ||
+            !std::isfinite(c.replacement_level) || c.replacement_level < -48 || c.replacement_level > 0 ||
+            !std::isfinite(c.expected_pan) || std::abs(c.expected_pan) > 1 ||
+            !std::isfinite(c.replacement_pan) || std::abs(c.replacement_pan) > 1 ||
+            c.expected_mute > 1 || c.replacement_mute > 1 || c.expected_solo > 1 || c.replacement_solo > 1)
+            return false;
+        seen |= 1u << c.slot;
+        request.changes[i] = c;
+    }
+    request.count = count;
+    return true;
+}
+bool prepareCells(CellChangeRequest& request, const ov_seq_cell_change* changes, uint32_t count)
+{
+    if (count > capacity * music::sequencerRows || (count && !changes)) return false;
+    std::array<std::array<bool, music::sequencerRows>, capacity> seen {};
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& input = changes[i];
+        if (input.slot >= capacity || input.row >= OV_SEQ_ROWS ||
+            (!input.expected && !input.replacement) || seen[input.slot][input.row] ||
+            (input.expected && (input.expected->slot != input.slot || input.expected->row != input.row)) ||
+            (input.replacement && (input.replacement->slot != input.slot || input.replacement->row != input.row)))
+            return false;
+        seen[input.slot][input.row] = true;
+        auto& cell = request.cells[i];
+        cell.slot = input.slot; cell.row = input.row; cell.revision = input.revision;
+        if (input.expected) cell.expected = prepareClip(*input.expected);
+        if (input.replacement) cell.replacement = prepareClip(*input.replacement);
+    }
+    request.count = count;
+    return true;
+}
 } // namespace rack
 
 extern "C" {
@@ -1796,28 +1895,35 @@ int ov_seq_change_cells(const ov_seq_cell_change* changes, uint32_t count, uint6
     if (!changes || !count || count > capacity * music::sequencerRows) { error.store(2); return 0; }
     try {
         auto request = std::make_unique<CellChangeRequest>();
-        request->count = count; request->epoch = epoch; request->token = token;
-        std::array<std::array<bool, music::sequencerRows>, capacity> seen {};
-        for (uint32_t i = 0; i < count; ++i) {
-            const auto& input = changes[i];
-            if (input.slot >= capacity || input.row >= OV_SEQ_ROWS ||
-                (!input.expected && !input.replacement) ||
-                seen[input.slot][input.row] ||
-                (input.expected && (input.expected->slot != input.slot || input.expected->row != input.row)) ||
-                (input.replacement && (input.replacement->slot != input.slot || input.replacement->row != input.row))) {
-                error.store(2); return 0;
-            }
-            seen[input.slot][input.row] = true;
-            auto& cell = request->cells[i];
-            cell.slot = input.slot; cell.row = input.row; cell.revision = input.revision;
-            if (input.expected) cell.expected = prepareClip(*input.expected);
-            if (input.replacement) cell.replacement = prepareClip(*input.replacement);
-        }
+        if (!prepareCells(*request, changes, count)) { error.store(2); return 0; }
+        request->epoch = epoch; request->token = token;
         if (editOutstanding.fetch_add(1) >= editCapacity) {
             editOutstanding.fetch_sub(1); error.store(4); return 0;
         }
         Command command; command.kind = Kind::SeqChangeCells; command.object = request.get();
         if (!enqueue(command)) { editOutstanding.fetch_sub(1); return 0; }
+        request.release(); return 1;
+    } catch (const EngineCreationFailure&) { error.store(2); return 0; }
+    catch (const std::bad_alloc&) { error.store(3); return 0; }
+}
+int ov_seq_change_bundle(const ov_rack_sound_change* sounds, uint32_t sound_count,
+                         const ov_rack_mixer_change* mixer, uint32_t mixer_count,
+                         const ov_seq_cell_change* cells, uint32_t cell_count,
+                         uint64_t epoch, uint64_t token)
+{
+    using namespace rack;
+    if (!sound_count && !mixer_count && !cell_count) { error.store(2); return 0; }
+    try {
+        auto request = std::make_unique<BundleChangeRequest>();
+        if (!prepareSounds(request->sounds, sounds, sound_count) ||
+            !prepareMixer(request->mixer, mixer, mixer_count) ||
+            !prepareCells(request->cells, cells, cell_count)) { error.store(2); return 0; }
+        request->epoch = epoch; request->token = token;
+        if (parameterOutstanding.fetch_add(1) >= parameterResultCapacity) {
+            parameterOutstanding.fetch_sub(1); error.store(4); return 0;
+        }
+        Command command; command.kind = Kind::BundleChange; command.object = request.get();
+        if (!enqueue(command)) { parameterOutstanding.fetch_sub(1); return 0; }
         request.release(); return 1;
     } catch (const EngineCreationFailure&) { error.store(2); return 0; }
     catch (const std::bad_alloc&) { error.store(3); return 0; }
@@ -2054,19 +2160,8 @@ int ov_rack_change_sounds(const ov_rack_sound_change* changes, uint32_t count,
     if (!changes || !count || count > capacity) { error.store(2); return 0; }
     try {
         auto request = std::make_unique<SoundChangeRequest>();
-        uint32_t seen = 0;
-        for (uint32_t i = 0; i < count; ++i) {
-            const auto& change = changes[i];
-            if (change.slot >= capacity || (seen & (1u << change.slot)) ||
-                !valid(change.expected) || !valid(change.replacement) ||
-                change.expected.engine != change.replacement.engine ||
-                change.expected.program != change.replacement.program) {
-                error.store(2); return 0;
-            }
-            seen |= 1u << change.slot;
-            request->changes[i] = change;
-        }
-        request->count = count; request->epoch = epoch; request->token = token;
+        if (!prepareSounds(*request, changes, count)) { error.store(2); return 0; }
+        request->epoch = epoch; request->token = token;
         if (parameterOutstanding.fetch_add(1) >= parameterResultCapacity) {
             parameterOutstanding.fetch_sub(1); error.store(4); return 0;
         }
@@ -2082,20 +2177,8 @@ int ov_rack_change_mixer(const ov_rack_mixer_change* changes, uint32_t count,
     if (!changes || !count || count > capacity) { error.store(2); return 0; }
     try {
         auto request = std::make_unique<MixerChangeRequest>();
-        uint32_t seen = 0;
-        for (uint32_t i = 0; i < count; ++i) {
-            const auto& c = changes[i];
-            if (c.slot >= capacity || (seen & (1u << c.slot)) ||
-                !std::isfinite(c.expected_level) || c.expected_level < -48 || c.expected_level > 0 ||
-                !std::isfinite(c.replacement_level) || c.replacement_level < -48 || c.replacement_level > 0 ||
-                !std::isfinite(c.expected_pan) || std::abs(c.expected_pan) > 1 ||
-                !std::isfinite(c.replacement_pan) || std::abs(c.replacement_pan) > 1 ||
-                c.expected_mute > 1 || c.replacement_mute > 1 ||
-                c.expected_solo > 1 || c.replacement_solo > 1) { error.store(2); return 0; }
-            seen |= 1u << c.slot;
-            request->changes[i] = c;
-        }
-        request->count = count; request->epoch = epoch; request->token = token;
+        if (!prepareMixer(*request, changes, count)) { error.store(2); return 0; }
+        request->epoch = epoch; request->token = token;
         if (parameterOutstanding.fetch_add(1) >= parameterResultCapacity) {
             parameterOutstanding.fetch_sub(1); error.store(4); return 0;
         }

@@ -37,6 +37,7 @@ struct PianoRollView: View {
     @State private var velocityGesture: VelocityGesture?
     @State private var markerGesture: MarkerGesture?
     @State private var confirmsPatternDefault = false
+    @State private var confirmsAllDefaults = false
 
     private enum Lane: String, CaseIterable { case none = "Off", velocity = "Velocity", cc = "CC", bend = "Pitch Bend" }
     private enum LaneMode: String, CaseIterable { case points = "Points", draw = "Freehand" }
@@ -93,8 +94,10 @@ struct PianoRollView: View {
                     .contextMenu { historyMenu(undo: true) }
                 Button("Redo") { command { $0.redo() } }.disabled(editor?.canRedo != true || busy)
                     .contextMenu { historyMenu(undo: false) }
-                PatternDefaultButton(enabled: !busy && editor != nil,
-                                     extendedAction: model.performExtendedDefault) { save in
+                PatternDefaultButton(enabled: !busy && editor != nil, extendedAction: { effect in
+                    if effect == .saveAll { confirmsAllDefaults = true }
+                    else { model.performExtendedDefault(effect) }
+                }) { save in
                     if save {
                         confirmsPatternDefault = true
                     } else {
@@ -215,6 +218,10 @@ struct PianoRollView: View {
         .padding()
         .confirmationDialog("Save the current pattern as its default?", isPresented: $confirmsPatternDefault) {
             Button("Update Pattern Default") { savePatternDefault() }
+            Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog("Save the scene, instruments, sequencer and patterns as their individual defaults?", isPresented: $confirmsAllDefaults) {
+            Button("Update All Defaults") { model.saveSceneDefault(all: true) }
             Button("Cancel", role: .cancel) {}
         }
         .sheet(isPresented: $showRegions) {
@@ -891,6 +898,12 @@ final class PatternDefaultControl: UIButton {
         if extendedAction != nil {
             actions.append(UIAccessibilityCustomAction(name: "Restore all instrument defaults", target: self,
                                                        selector: #selector(restoreAllAccessibility)))
+            actions.append(UIAccessibilityCustomAction(name: "Save all individual defaults", target: self,
+                                                       selector: #selector(saveAllAccessibility)))
+            if subject == "Preset" {
+                actions.append(UIAccessibilityCustomAction(name: "Save scene default", target: self,
+                                                           selector: #selector(saveSceneAccessibility)))
+            }
         }
         accessibilityCustomActions = actions
     }
@@ -907,6 +920,20 @@ final class PatternDefaultControl: UIButton {
         guard isEnabled, let extendedAction else { return false }
         cancelSequence()
         extendedAction(.restoreInstruments)
+        return true
+    }
+
+    @objc private func saveSceneAccessibility() -> Bool {
+        guard isEnabled, let extendedAction, subject == "Preset" else { return false }
+        cancelSequence()
+        extendedAction(.saveScene)
+        return true
+    }
+
+    @objc private func saveAllAccessibility() -> Bool {
+        guard isEnabled, let extendedAction else { return false }
+        cancelSequence()
+        extendedAction(.saveAll)
         return true
     }
 

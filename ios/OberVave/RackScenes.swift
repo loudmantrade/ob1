@@ -291,7 +291,10 @@ extension OberVaveModel {
               sounds.allSatisfy({ sound in
                   guard sound.before.slot == sound.after.slot,
                         let current = instruments.first(where: { $0.slot == sound.before.slot }) else { return false }
-                  return current.programIndex == sound.before.programIndex &&
+                  return current.defaultIdentity == sound.before.defaultIdentity &&
+                      sound.before.defaultIdentity == sound.after.defaultIdentity &&
+                      current.engine == sound.before.engine && sound.before.engine == sound.after.engine &&
+                      current.programIndex == sound.before.programIndex &&
                       current.arpMode == sound.before.arpMode && current.latchMode == sound.before.latchMode
               }) else {
             errorMessage = "The instrument changed; sound was not restored."
@@ -439,11 +442,11 @@ extension OberVaveModel {
                     }
                     if sourceUnchanged && destinationUnchanged {
                         do {
-                            var updated = patternDefaults
-                            try updated.transfer(scene: sceneSessionKey,
+                            var libraries = currentDefaultLibraries()
+                            try libraries.transferPatternDefault(scene: sceneSessionKey,
                                 source: PatternCell(slot: transfer.source.slot, row: transfer.source.row),
                                 destination: transfer.destination, copying: transfer.copying, deleting: transfer.deleting)
-                            _ = persistPatternDefaults(updated)
+                            _ = persistDefaultLibraries(libraries)
                         } catch {
                             errorMessage = "Could not move pattern defaults: \(error.localizedDescription)"
                         }
@@ -471,11 +474,13 @@ extension OberVaveModel {
                 if editResult.success != 0 && pending.epoch == ov_seq_scene_epoch() && unchanged {
                     if pending.entry.changesPatternDefaults {
                         do {
-                            var updated = patternDefaults
+                            var libraries = currentDefaultLibraries()
                             for snapshot in target {
-                                try updated.set(snapshot.patternDefault, scene: sceneSessionKey, cell: snapshot.cell)
+                                try libraries.patterns.set(snapshot.patternDefault, scene: sceneSessionKey, cell: snapshot.cell)
+                                try libraries.setPatternLayoutMembership(snapshot.inDefaultLayout,
+                                    scene: sceneSessionKey, cell: snapshot.cell)
                             }
-                            _ = persistPatternDefaults(updated)
+                            _ = persistDefaultLibraries(libraries)
                         } catch {
                             errorMessage = "Could not restore pattern defaults: \(error.localizedDescription)"
                         }
@@ -763,23 +768,25 @@ extension OberVaveModel {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let url = try pendingSceneURL ?? scenesFolder().appendingPathComponent("\(UUID().uuidString).obscene.json")
             let newKey = url.standardizedFileURL.absoluteString
-            var updated = patternDefaults
+            var libraries = currentDefaultLibraries()
             if newKey != sceneSessionKey {
-                try updated.copyScene(from: sceneSessionKey, to: newKey)
+                try libraries.scenes.copyScene(from: sceneSessionKey, to: newKey)
+                try libraries.instruments.copyScene(from: sceneSessionKey, to: newKey)
+                try libraries.patterns.copyScene(from: sceneSessionKey, to: newKey)
+                libraries.sequencers[newKey] = libraries.sequencers[sceneSessionKey]
+                libraries.patternLayouts[newKey] = libraries.patternLayouts[sceneSessionKey]
             }
-            try updated.seedMissing(document.patterns ?? [], scene: newKey)
-            guard persistPatternDefaults(updated) else {
-                throw SceneError.invalid("Could not save the scene's pattern defaults.")
+            try libraries.scenes.seedMissing(document, scene: newKey)
+            try libraries.instruments.seedMissing(document.instruments, scene: newKey)
+            try libraries.patterns.seedMissing(document.patterns ?? [], scene: newKey)
+            if libraries.sequencers[newKey] == nil {
+                libraries.sequencers[newKey] = currentSequencerSettings()
             }
-            var sequenceDefaults = sequencerDefaults
-            if newKey != sceneSessionKey {
-                sequenceDefaults[newKey] = sequenceDefaults[sceneSessionKey]
+            if libraries.patternLayouts[newKey] == nil {
+                try libraries.setPatternLayout(document.patterns ?? [], scene: newKey)
             }
-            if sequenceDefaults[newKey] == nil {
-                sequenceDefaults[newKey] = currentSequencerSettings()
-            }
-            guard persistSequencerDefaults(sequenceDefaults) else {
-                throw SceneError.invalid("Could not save the scene's sequencer default.")
+            guard persistDefaultLibraries(libraries) else {
+                throw SceneError.invalid("Could not save the scene defaults.")
             }
             try encoder.encode(document).write(to: url, options: .atomic)
             if pendingSceneURL == nil, sceneFileURL != nil {
@@ -807,22 +814,23 @@ extension OberVaveModel {
             let saved = sceneSessions[key]
             let document = try saved?.document ?? RackSceneDocument.read(from: url)
             if saved == nil {
-                var updated = patternDefaults
-                try updated.seedMissing(document.patterns ?? [], scene: key)
-                guard persistPatternDefaults(updated) else {
-                    throw SceneError.invalid("Could not load the scene's pattern defaults.")
-                }
-                if sequencerDefaults[key] == nil {
+                var libraries = currentDefaultLibraries()
+                try libraries.scenes.seedMissing(document, scene: key)
+                try libraries.instruments.seedMissing(document.instruments, scene: key)
+                try libraries.patterns.seedMissing(document.patterns ?? [], scene: key)
+                if libraries.sequencers[key] == nil {
                     var baseline = currentSequencerSettings()
                     baseline.columns = document.instruments.sorted { $0.slot < $1.slot }.map {
                         SequencerDefault.Column(slot: $0.slot, level: Double(Float($0.levelDB)),
                             pan: Double(Float($0.pan)), muted: $0.muted, recordBeats: $0.recordBeats)
                     }
-                    var defaults = sequencerDefaults
-                    defaults[key] = baseline
-                    guard persistSequencerDefaults(defaults) else {
-                        throw SceneError.invalid("Could not load the scene's sequencer default.")
-                    }
+                    libraries.sequencers[key] = baseline
+                }
+                if libraries.patternLayouts[key] == nil {
+                    try libraries.setPatternLayout(document.patterns ?? [], scene: key)
+                }
+                guard persistDefaultLibraries(libraries) else {
+                    throw SceneError.invalid("Could not load the scene defaults.")
                 }
             }
             let folder = try scenesFolder()
@@ -955,6 +963,107 @@ extension OberVaveModel {
         switchScene(to: SceneSessionState(document: empty, pianoRollHistories: [:],
                     pianoRollViewports: [:], fileURL: nil), key: UUID().uuidString)
     }
+
+    func saveSceneDefault(all: Bool = false) {
+        syncSequencerState()
+        syncExternalParameterHistory(finish: true)
+        guard !sceneSwitchPending, pendingSceneName == nil, pendingSceneParameterHistory == nil,
+              pendingSequencerHistory == nil, pendingSequencerSettings == nil,
+              pendingPatternTransfer == nil, pendingPianoPublication == nil,
+              sceneHistoryJump == nil, sequencerHistoryJump == nil,
+              activeParameterEdits.isEmpty, activeSceneValueEdits.isEmpty,
+              activeMixerGestures.isEmpty, externalParameterGestures.isEmpty,
+              recordingPattern == nil, ov_seq_record_state() == 0 else {
+            errorMessage = "Finish recording and pending edits before saving the scene default."
+            return
+        }
+        let epoch = ov_seq_scene_epoch()
+        let sceneKey = sceneSessionKey
+        let capturedInstruments = instruments
+        let capturedPatterns = patterns
+        let revisions = (0..<128).map {
+            ov_seq_cell_revision(UInt32($0 / 8), UInt32($0 % 8))
+        }
+        guard !all || (0..<128).allSatisfy({
+            ov_seq_pad_pending(UInt32($0 / 8), UInt32($0 % 8)) == 0
+        }) else {
+            errorMessage = "Wait for pending pad actions before saving defaults."
+            return
+        }
+        guard ov_rack_snapshot_request() != 0 else {
+            errorMessage = "Could not request an audio scene snapshot."
+            return
+        }
+        sceneSwitchPending = true
+        sceneSwitchMonitor.start { [weak self] in
+            guard let self else { return true }
+            var snapshot = ov_scene_config()
+            guard ov_rack_snapshot_read(&snapshot) != 0 else { return false }
+            defer { self.sceneSwitchPending = false }
+            do {
+                guard self.sceneSessionKey == sceneKey, epoch == ov_seq_scene_epoch(),
+                      self.recordingPattern == nil, ov_seq_record_state() == 0,
+                      self.instruments.map(\.defaultIdentity) == capturedInstruments.map(\.defaultIdentity),
+                      self.instruments.map(\.slot) == capturedInstruments.map(\.slot) else {
+                    throw SceneError.invalid("The scene changed while taking the snapshot.")
+                }
+                if all {
+                    guard self.patterns == capturedPatterns else {
+                        throw SceneError.invalid("Patterns changed while taking the snapshot.")
+                    }
+                    for index in 0..<128 {
+                        let slot = UInt32(index / 8), row = UInt32(index % 8)
+                        guard ov_seq_pad_pending(slot, row) == 0,
+                              ov_seq_cell_revision(slot, row) == revisions[index] else {
+                            throw SceneError.invalid("A pattern changed while taking the snapshot.")
+                        }
+                    }
+                }
+                let slots = withUnsafeBytes(of: snapshot.slots) { Array($0.bindMemory(to: ov_rack_slot.self)) }
+                var captured = capturedInstruments
+                for index in captured.indices {
+                    let slot = slots[captured[index].slot]
+                    guard slot.present != 0, Int(slot.config.engine) == captured[index].engine else {
+                        throw SceneError.invalid("An instrument changed while taking the snapshot.")
+                    }
+                    captured[index].updateSound(slot.config)
+                    captured[index].channel = Int(slot.config.channel)
+                    captured[index].lowNote = Int(slot.config.low_note)
+                    captured[index].highNote = Int(slot.config.high_note)
+                    captured[index].levelDB = Double(slot.config.level_db)
+                    captured[index].pan = Double(slot.config.pan)
+                    captured[index].muted = slot.config.muted != 0
+                }
+                let document = RackSceneDocument(name: self.sceneName, instruments: captured,
+                    tempo: Int(snapshot.tempo), masterDB: self.masterLevelDB, masterPan: self.masterPan,
+                    keyboardMask: self.keyboardChannelMask,
+                    selectedSlot: captured.isEmpty ? nil : self.selectedSlot, patterns: nil)
+                var libraries = self.currentDefaultLibraries()
+                try libraries.scenes.set(document, scene: sceneKey)
+                if all {
+                    for instrument in captured { try libraries.instruments.set(instrument, scene: sceneKey) }
+                    try libraries.patterns.replaceScene(capturedPatterns, scene: sceneKey)
+                    try libraries.setPatternLayout(capturedPatterns, scene: sceneKey)
+                    var sequence = self.currentSequencerSettings()
+                    sequence.columns = captured.sorted { $0.slot < $1.slot }.map {
+                        SequencerDefault.Column(slot: $0.slot, level: Double(Float($0.levelDB)),
+                            pan: Double(Float($0.pan)), muted: $0.muted, recordBeats: $0.recordBeats,
+                            solo: self.soloSlots.contains($0.slot))
+                    }
+                    libraries.sequencers[sceneKey] = sequence
+                }
+                if self.persistDefaultLibraries(libraries) {
+                    self.sceneStatus = all ? "Saved all scene defaults" : "Saved scene default (without patterns)"
+                }
+            } catch {
+                self.errorMessage = "Could not save scene default: \(error.localizedDescription)"
+            }
+            return true
+        } onTimeout: { [weak self] in
+            self?.sceneSwitchPending = false
+            self?.errorMessage = "The audio engine did not provide a snapshot. Resume audio and try again."
+        }
+    }
 }
 
 extension OberVaveModel {
@@ -966,7 +1075,8 @@ extension OberVaveModel {
         let current = pattern(slot: cell.slot, row: cell.row)
         return SequencerCellSnapshot(cell: cell, pattern: current,
             pianoHistory: pianoRollHistories[cell.id].flatMap { $0.pattern == current ? $0 : nil },
-            patternDefault: patternDefaults.value(scene: sceneSessionKey, cell: cell))
+            patternDefault: patternDefaults.value(scene: sceneSessionKey, cell: cell),
+            inDefaultLayout: patternDefaultLayouts[sceneSessionKey].map { $0.contains(cell.id) })
     }
 
     func applySequencerHistory(undo: Bool) {
@@ -986,7 +1096,8 @@ extension OberVaveModel {
         let expected = undo ? entry.after : entry.before
         let live = expected.map { sequencerSnapshot($0.cell) }
         guard zip(expected, live).allSatisfy({
-            $0.pattern == $1.pattern && (!entry.changesPatternDefaults || $0.patternDefault == $1.patternDefault)
+            $0.pattern == $1.pattern && (!entry.changesPatternDefaults ||
+                ($0.patternDefault == $1.patternDefault && $0.inDefaultLayout == $1.inDefaultLayout))
         }) else {
             errorMessage = "The pattern or its default has changed. Restore it before using sequencer history."
             return
@@ -1583,6 +1694,7 @@ struct SequencerView: View {
     @State private var rootFrame = CGRect.zero
     @State private var meters = [Double](repeating: 0, count: 16)
     @State private var confirmsDefault = false
+    @State private var confirmsAllDefaults = false
     private var width: CGFloat { max(1, model.keyboardChannelWidth) }
     private var padHeight: CGFloat { width }
     private var historyBusy: Bool {
@@ -1623,8 +1735,10 @@ struct SequencerView: View {
                 }
                 .disabled(model.sequencerHistory.redoStack.isEmpty || historyBusy)
                 .contextMenu { sequencerHistoryMenu(undo: false) }
-                PatternDefaultButton(enabled: !historyBusy, subject: "Sequencer",
-                                     extendedAction: model.performExtendedDefault) { save in
+                PatternDefaultButton(enabled: !historyBusy, subject: "Sequencer", extendedAction: { effect in
+                    if effect == .saveAll { confirmsAllDefaults = true }
+                    else { model.performExtendedDefault(effect) }
+                }) { save in
                     if save { confirmsDefault = true }
                     else { model.restoreSequencerDefault() }
                 }
@@ -1721,6 +1835,10 @@ struct SequencerView: View {
         .onDisappear { cancelGesture(); model.finishMixerGestures() }
         .confirmationDialog("Save the current sequencer settings as the default?", isPresented: $confirmsDefault) {
             Button("Update Sequencer Default") { model.saveSequencerDefault() }
+            Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog("Save the scene, instruments, sequencer and patterns as their individual defaults?", isPresented: $confirmsAllDefaults) {
+            Button("Update All Defaults") { model.saveSceneDefault(all: true) }
             Button("Cancel", role: .cancel) {}
         }
         .sheet(item: $editing) { pattern in

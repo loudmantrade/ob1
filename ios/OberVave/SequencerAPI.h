@@ -98,6 +98,15 @@ typedef struct {
 } ov_seq_cell_change;
 int ov_seq_change_cells(const ov_seq_cell_change* changes, uint32_t count,
                         uint64_t epoch, uint64_t token);
+/* One audio-owner transaction for sound, mixer and cell replacements on
+   existing instruments. Any conflict rejects the whole transaction. Arrays
+   and clips are copied before return; zero counts permit null pointers.
+   Completion uses ov_rack_read_parameter_result. Successful changed cells
+   advance their revision exactly once. */
+int ov_seq_change_bundle(const ov_rack_sound_change* sounds, uint32_t sound_count,
+                         const ov_rack_mixer_change* mixer, uint32_t mixer_count,
+                         const ov_seq_cell_change* cells, uint32_t cell_count,
+                         uint64_t epoch, uint64_t token);
 /* Brief, output-stage preview for this instrument. Audio owner schedules Note Off;
    previews do not enter the recorder and have independent note ownership. */
 int ov_seq_audition(uint32_t slot, uint32_t pitch, uint32_t velocity, uint64_t epoch);
