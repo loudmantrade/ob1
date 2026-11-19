@@ -641,6 +641,13 @@ struct PianoRollEditBuffer {
         try commit(candidate)
     }
 
+    mutating func playbackQuantization(grid: Int) throws {
+        guard (0...3840).contains(grid) else { throw SceneError.invalid("Invalid quantization grid.") }
+        var candidate = pattern
+        candidate.quantize = grid
+        try commit(candidate)
+    }
+
     mutating func conform(root: Int, scale: Scale, direction: ScaleDirection) throws {
         guard (0...11).contains(root) else { throw SceneError.invalid("Invalid scale root.") }
         let allowed = Set(scale.pitchClasses.map { ($0 + root) % 12 })

@@ -271,6 +271,14 @@ struct SceneChecks {
             try pasted.paste(copiedNotes, at: editPattern.length - 1)
             preconditionFailure("Out-of-range paste must fail")
         } catch { precondition(pasted.pattern == beforeInvalidPaste) }
+        var quantizedEditor = try PianoRollEditBuffer(pattern: editPattern)
+        try quantizedEditor.playbackQuantization(grid: 240)
+        try quantizedEditor.playbackQuantization(grid: 120)
+        precondition(quantizedEditor.pattern.notes == editPattern.notes)
+        quantizedEditor.undo()
+        precondition(quantizedEditor.pattern.quantize == 240 && quantizedEditor.pattern.notes == editPattern.notes)
+        quantizedEditor.undo()
+        precondition(quantizedEditor.pattern == editPattern)
         var editor = try PianoRollEditBuffer(pattern: editPattern)
         editor.selection = [1, 2, 3]
         try editor.changeDuration(by: 120)

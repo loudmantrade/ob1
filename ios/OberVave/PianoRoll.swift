@@ -58,6 +58,14 @@ struct PianoRollView: View {
                     Button("Transpose -1") { command { try $0.transpose(by: -1) } }
                     Button("Octave up") { command { try $0.transpose(by: 12) } }
                     Button("Octave down") { command { try $0.transpose(by: -12) } }
+                    Menu("Playback quantize · all notes") {
+                        Button("Off") { command { try $0.playbackQuantization(grid: 0) } }
+                        Button("1/4") { command { try $0.playbackQuantization(grid: 960) } }
+                        Button("1/8") { command { try $0.playbackQuantization(grid: 480) } }
+                        Button("1/16") { command { try $0.playbackQuantization(grid: 240) } }
+                        Button("1/32") { command { try $0.playbackQuantization(grid: 120) } }
+                        Button("1/8 triplet") { command { try $0.playbackQuantization(grid: 320) } }
+                    }
                     Picker("Root", selection: $scaleRoot) {
                         ForEach(0..<12, id: \.self) { Text(["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"][$0]).tag($0) }
                     }

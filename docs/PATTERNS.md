@@ -297,9 +297,11 @@ tap as the paste anchor (initially tick zero). Paste creates new note IDs and
 rejects invalid destinations. Transpose and scale conform affect the selection,
 or all notes when no notes are selected; nearest-scale ties choose the lower
 pitch.
+Playback quantization is a separate, non-destructive setting for the entire
+pattern, not the current selection; changing or disabling it retains the
+recorded note timings. Selected-note and end quantization are not yet exposed.
 
-The editor remains incomplete: audition and note quantization are not yet
-exposed. Controller automation requires bounded,
+The editor remains incomplete: audition is not yet exposed. Controller automation requires bounded,
 versioned events with backward-compatible decoding and audio scheduling.
 Independent loop/tail markers require a versioned migration preserving old
 loop behavior, plus iteration-specific note release and real-time capacity
