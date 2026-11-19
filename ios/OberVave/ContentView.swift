@@ -394,7 +394,7 @@ final class OberVaveModel: NSObject, ObservableObject, @preconcurrency CBCentral
     private var defaultLibrariesAvailable = true
     private let applicationDefaultKey = "io.github.joakimeriksson.obervave.application-default-v1"
     private var applicationDefaultAvailable = true
-    private(set) var applicationDefault: ApplicationDefault?
+    @Published private(set) var applicationDefault: ApplicationDefault?
     var sequencerDefaults: [String: SequencerDefault] = [:]
     private var sequencerDefaultsAvailable = true
     private let sequencerDefaultsKey = "io.github.joakimeriksson.obervave.sequencer-defaults"
