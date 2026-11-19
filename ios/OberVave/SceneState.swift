@@ -472,6 +472,28 @@ struct PianoRollTouchArbitration {
 }
 
 struct PianoRollEditBuffer {
+    enum Scale: CaseIterable {
+        case chromatic, major, naturalMinor, harmonicMinor, melodicMinor
+        case majorPentatonic, minorPentatonic, dorian, phrygian, lydian, mixolydian, locrian
+
+        var pitchClasses: [Int] {
+            switch self {
+            case .chromatic: Array(0...11)
+            case .major: [0, 2, 4, 5, 7, 9, 11]
+            case .naturalMinor: [0, 2, 3, 5, 7, 8, 10]
+            case .harmonicMinor: [0, 2, 3, 5, 7, 8, 11]
+            case .melodicMinor: [0, 2, 3, 5, 7, 9, 11]
+            case .majorPentatonic: [0, 2, 4, 7, 9]
+            case .minorPentatonic: [0, 3, 5, 7, 10]
+            case .dorian: [0, 2, 3, 5, 7, 9, 10]
+            case .phrygian: [0, 1, 3, 5, 7, 8, 10]
+            case .lydian: [0, 2, 4, 6, 7, 9, 11]
+            case .mixolydian: [0, 2, 4, 5, 7, 9, 10]
+            case .locrian: [0, 1, 3, 5, 6, 8, 10]
+            }
+        }
+    }
+    enum ScaleDirection { case nearest, up, down }
     private(set) var pattern: SequencerPattern
     var selection: Set<UInt64> = []
     private var undoStack: [SequencerPattern] = []
@@ -516,6 +538,56 @@ struct PianoRollEditBuffer {
         let indices = pattern.notes.indices.filter { selection.contains(pattern.notes[$0].id) }
         guard !indices.isEmpty else { throw SceneError.invalid("Select at least one note.") }
         return indices
+    }
+
+    private func operationIndices() -> [Int] {
+        pattern.notes.indices.filter { selection.isEmpty || selection.contains(pattern.notes[$0].id) }
+    }
+
+    mutating func create(start: Int64, pitch: Int, duration: Int64, velocity: Int, output: Bool) throws {
+        guard pattern.notes.count < 1024, nextNoteID < UInt64.max else {
+            throw SceneError.invalid("The pattern has no remaining note capacity or IDs.")
+        }
+        var candidate = pattern
+        candidate.notes.append(SequencerNote(id: nextNoteID, start: start, duration: duration,
+                                             pitch: pitch, velocity: velocity, output: output))
+        try commit(candidate)
+        selection = [nextNoteID]
+        nextNoteID += 1
+    }
+
+    mutating func transpose(by semitones: Int) throws {
+        let indices = operationIndices()
+        guard !indices.isEmpty else { return }
+        let minimum = indices.map { -pattern.notes[$0].pitch }.max()!
+        let maximum = indices.map { 127 - pattern.notes[$0].pitch }.min()!
+        guard (minimum...maximum).contains(semitones) else {
+            throw SceneError.invalid("Transposition would move a note outside MIDI pitches 0–127.")
+        }
+        var candidate = pattern
+        for index in indices { candidate.notes[index].pitch += semitones }
+        try commit(candidate)
+    }
+
+    mutating func conform(root: Int, scale: Scale, direction: ScaleDirection) throws {
+        guard (0...11).contains(root) else { throw SceneError.invalid("Invalid scale root.") }
+        let allowed = Set(scale.pitchClasses.map { ($0 + root) % 12 })
+        let indices = operationIndices()
+        var candidate = pattern
+        for index in indices {
+            let pitch = pattern.notes[index].pitch
+            let options = (0...127).filter { allowed.contains($0 % 12) }
+            let mapped: Int?
+            switch direction {
+            case .up: mapped = options.first { $0 >= pitch }
+            case .down: mapped = options.last { $0 <= pitch }
+            case .nearest:
+                mapped = options.min { abs($0 - pitch) == abs($1 - pitch) ? $0 < $1 : abs($0 - pitch) < abs($1 - pitch) }
+            }
+            guard let mapped else { throw SceneError.invalid("The scale has no valid pitch in the chosen direction.") }
+            candidate.notes[index].pitch = mapped
+        }
+        try commit(candidate)
     }
 
     mutating func move(ticks: Int64, semitones: Int, copying: Bool = false) throws {

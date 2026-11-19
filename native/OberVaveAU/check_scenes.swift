@@ -271,6 +271,30 @@ struct SceneChecks {
         while editor.canUndo { editor.undo(); undoCount += 1 }
         precondition(undoCount == 32)
         print("PASS piano roll edit buffer: additive group edits, common bounds, independent IDs/routing, atomic undo/redo and bounded history")
+        var musicalEditor = try PianoRollEditBuffer(pattern: editPattern)
+        try musicalEditor.create(start: 960, pitch: 61, duration: 240, velocity: 81, output: false)
+        precondition(musicalEditor.selection == [4] && musicalEditor.pattern.notes.last?.output == false)
+        try musicalEditor.conform(root: 0, scale: .major, direction: .nearest)
+        precondition(musicalEditor.pattern.notes.last?.pitch == 60)
+        musicalEditor.undo()
+        try musicalEditor.conform(root: 0, scale: .major, direction: .up)
+        precondition(musicalEditor.pattern.notes.last?.pitch == 62 && !musicalEditor.canRedo)
+        musicalEditor.selection = []
+        try musicalEditor.transpose(by: 12)
+        precondition(musicalEditor.pattern.notes.map(\.pitch) == [72, 76, 79, 74])
+        musicalEditor.selection = [4]
+        try musicalEditor.transpose(by: -12)
+        precondition(musicalEditor.pattern.notes.map(\.pitch) == [72, 76, 79, 62])
+        let beforeInvalid = musicalEditor.pattern
+        do {
+            try musicalEditor.transpose(by: 100)
+            preconditionFailure("Out-of-range transpose must be rejected")
+        } catch { precondition(musicalEditor.pattern == beforeInvalid) }
+        try musicalEditor.conform(root: 3, scale: .dorian, direction: .down)
+        precondition(musicalEditor.pattern.notes.last?.pitch == 61)
+        musicalEditor.undo()
+        precondition(musicalEditor.pattern == beforeInvalid)
+        print("PASS piano roll musical edits: note creation, all/selected transpose, bounds rejection, directional scale mapping and lower-pitch tie break")
         var testedCells = Set<PatternCell>()
         for offset in [CoreGraphics.CGPoint.zero, CoreGraphics.CGPoint(x: -118 * 8, y: 0),
                        CoreGraphics.CGPoint(x: 0, y: -240), CoreGraphics.CGPoint(x: -118 * 8, y: -240)] {
