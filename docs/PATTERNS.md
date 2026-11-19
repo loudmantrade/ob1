@@ -333,8 +333,9 @@ behavior until the user applies Regions; that explicit conversion can change
 their tail behavior. A fresh recording replaces regions with legacy defaults.
 Marker handles have separate ruler rows, even when markers coincide. Dragging
 is enabled after explicit Regions conversion and uses the selected snap grid;
-invalid moves are rejected without changing notes. Bar/beat/tick entry and
-arbitrary positive pattern starts are not yet supported.
+invalid moves are rejected without changing notes. Numeric positions accept
+raw ticks or 4/4 bar:beat:tick notation. Arbitrary positive pattern starts are
+not yet supported.
 Acceptance requires portable timing/ownership and scene-migration regressions,
 the existing sequencer and AU suites, a signed iPad build, and the physical
 iPad gesture/audio checklist from the implementation specification.

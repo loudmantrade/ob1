@@ -24,6 +24,8 @@ struct PianoRollView: View {
     @State private var quantizeStrength = 100
     @State private var quantizeEnds = false
     @State private var showRegions = false
+    @State private var showTranspose = false
+    @State private var transposeAmount = ""
     @State private var lane: Lane = .none
     @State private var laneMode: LaneMode = .points
     @State private var controller = 1
@@ -97,6 +99,7 @@ struct PianoRollView: View {
                     Button("Transpose -1") { command { try $0.transpose(by: -1) } }
                     Button("Octave up") { command { try $0.transpose(by: 12) } }
                     Button("Octave down") { command { try $0.transpose(by: -12) } }
+                    Button("Transpose by semitones…") { transposeAmount = ""; showTranspose = true }
                     Menu("Playback quantize · all notes") {
                         Button("Off") { command { try $0.playbackQuantization(grid: 0) } }
                         Button("1/4") { command { try $0.playbackQuantization(grid: 960) } }
@@ -186,6 +189,16 @@ struct PianoRollView: View {
             PianoRollRegionsSheet(pattern: displayedPattern) { start, loopStart, loopEnd, tailEnd, loop in
                 command { try $0.regions(patternStart: start, loopStart: loopStart, loopEnd: loopEnd,
                                          tailEnd: tailEnd, loop: loop) }
+            }
+            .alert("Transpose by semitones", isPresented: $showTranspose) {
+                TextField("Semitones", text: $transposeAmount).keyboardType(.numbersAndPunctuation)
+                Button("Apply") {
+                    guard let amount = Int(transposeAmount) else {
+                        model.errorMessage = "Enter an integer number of semitones."; return
+                    }
+                    command { try $0.transpose(by: amount) }
+                }
+                Button("Cancel", role: .cancel) {}
             }
         }
         .onAppear {
@@ -643,17 +656,17 @@ struct PianoRollRegionsSheet: View {
 
     init(pattern: SequencerPattern, apply: @escaping (Int64, Int64, Int64, Int64, Bool) -> Void) {
         self.apply = apply
-        _start = State(initialValue: String(-pattern.intro))
-        _loopStart = State(initialValue: String(pattern.hasRegions ? pattern.loopStart : 0))
-        _loopEnd = State(initialValue: String(pattern.hasRegions ? pattern.loopEnd : pattern.length))
-        _tailEnd = State(initialValue: String(pattern.length))
+        _start = State(initialValue: PianoRollPosition.format(-pattern.intro))
+        _loopStart = State(initialValue: PianoRollPosition.format(pattern.hasRegions ? pattern.loopStart : 0))
+        _loopEnd = State(initialValue: PianoRollPosition.format(pattern.hasRegions ? pattern.loopEnd : pattern.length))
+        _tailEnd = State(initialValue: PianoRollPosition.format(pattern.length))
         _loop = State(initialValue: pattern.loop)
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Positions in ticks (960 per beat)") {
+                Section("Positions: bar:beat:tick or raw ticks (960 per beat)") {
                     field("Pattern start", $start)
                     field("Loop start", $loopStart)
                     field("Loop end", $loopEnd)
@@ -671,8 +684,8 @@ struct PianoRollRegionsSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Apply") {
-                        guard let start = Int64(start), let loopStart = Int64(loopStart),
-                              let loopEnd = Int64(loopEnd), let tailEnd = Int64(tailEnd),
+                        guard let start = PianoRollPosition.parse(start), let loopStart = PianoRollPosition.parse(loopStart),
+                              let loopEnd = PianoRollPosition.parse(loopEnd), let tailEnd = PianoRollPosition.parse(tailEnd),
                               (-11520...0).contains(start), loopStart >= 0, loopStart < loopEnd,
                               loopEnd <= tailEnd, tailEnd <= SequencerPattern.maxTicks else {
                             message = "Require -11520 ≤ start ≤ 0 ≤ loop start < loop end ≤ tail end."

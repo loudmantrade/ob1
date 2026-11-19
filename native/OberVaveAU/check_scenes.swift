@@ -291,6 +291,14 @@ struct SceneChecks {
                                              y: -60 + Double(marker.rawValue) * 15 + 7.5)
             precondition(PianoRollMarker.hit(point, pattern: regionPattern, viewport: markerViewport) == marker)
         }
+        for position: Int64 in [-120, 0, 960, 3839, 3840, 1234567, SequencerPattern.maxTicks] {
+            precondition(PianoRollPosition.parse(PianoRollPosition.format(position)) == position)
+        }
+        precondition(PianoRollPosition.parse("1:4:959") == 3839)
+        precondition(PianoRollPosition.parse("0:1:0") == nil &&
+                     PianoRollPosition.parse("1:5:0") == nil &&
+                     PianoRollPosition.parse("1:1:960") == nil &&
+                     PianoRollPosition.parse("9999999999999999999:1:0") == nil)
         let regionJSON = try JSONEncoder().encode(regionPattern)
         let decodedRegion = try JSONDecoder().decode(SequencerPattern.self, from: regionJSON)
         precondition(decodedRegion == regionPattern)

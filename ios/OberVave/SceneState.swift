@@ -618,6 +618,24 @@ enum PianoRollMarker: Int, CaseIterable {
     }
 }
 
+enum PianoRollPosition {
+    static func parse(_ text: String) -> Int64? {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.contains(":") { return Int64(value) }
+        let parts = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3, let bar = Int64(parts[0]), let beat = Int64(parts[1]),
+              let tick = Int64(parts[2]), bar >= 1, (1...4).contains(beat), (0..<960).contains(tick),
+              bar <= SequencerPattern.maxTicks / 3840 + 1 else { return nil }
+        let result = (bar - 1) * 3840 + (beat - 1) * 960 + tick
+        return result <= SequencerPattern.maxTicks ? result : nil
+    }
+
+    static func format(_ tick: Int64) -> String {
+        guard tick >= 0 else { return String(tick) }
+        return "\(tick / 3840 + 1):\(tick % 3840 / 960 + 1):\(tick % 960)"
+    }
+}
+
 struct PianoRollEditBuffer {
     enum Scale: CaseIterable {
         case chromatic, major, naturalMinor, harmonicMinor, melodicMinor
