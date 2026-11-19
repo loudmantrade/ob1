@@ -580,8 +580,9 @@ enum PianoRollTapSequence {
 
 enum PianoRollNoteHit {
     enum Zone: Equatable { case velocity, body, duration }
+    static func edgeWidth(_ width: Double) -> Double { min(12, max(0, width) / 3) }
     static func zone(x: Double, width: Double) -> Zone {
-        let edge = min(12, max(0, width) / 3)
+        let edge = edgeWidth(width)
         if x < edge { return .velocity }
         if x >= width - edge { return .duration }
         return .body
@@ -594,6 +595,10 @@ enum PianoRollNoteHit {
             height: viewport.pitchHeight)
     }
 
+    static func target(_ rect: CoreGraphics.CGRect) -> CoreGraphics.CGRect {
+        rect.insetBy(dx: -max(0, (18 - rect.width) / 2), dy: 0)
+    }
+
     static func pitch(y: Double, viewport: PianoRollViewport) -> Int {
         Int(viewport.pitch(at: y).rounded(.up))
     }
@@ -604,17 +609,25 @@ enum PianoRollNoteHit {
         return min(127, max(1, Int((fraction * 127).rounded())))
     }
 
-    static func hit(point: CoreGraphics.CGPoint, notes: [SequencerNote], viewport: PianoRollViewport)
+    static func hit(point: CoreGraphics.CGPoint, radius: Double = 0,
+                    notes: [SequencerNote], viewport: PianoRollViewport)
         -> (id: UInt64, zone: Zone)? {
+        let radius = max(0, radius)
+        var best: (id: UInt64, zone: Zone, distance: CoreGraphics.CGFloat)?
         for note in notes.reversed() {
             let rect = rectangle(note, viewport: viewport)
-            let target = rect.insetBy(dx: -max(0, (18 - rect.width) / 2), dy: 0)
-            if target.contains(point) {
-                let relative = min(rect.width, max(0, point.x - rect.minX))
-                return (note.id, zone(x: relative, width: rect.width))
-            }
+            let area = target(rect)
+            let dx = max(area.minX - point.x, 0, point.x - area.maxX)
+            let dy = max(area.minY - point.y, 0, point.y - area.maxY)
+            guard hypot(dx, dy) <= radius else { continue }
+            let realX = max(rect.minX - point.x, 0, point.x - rect.maxX)
+            let realY = max(rect.minY - point.y, 0, point.y - rect.maxY)
+            let distance = hypot(realX, realY)
+            if let best, distance >= best.distance { continue }
+            let relative = min(area.width, max(0, point.x - area.minX))
+            best = (note.id, zone(x: relative, width: area.width), distance)
         }
-        return nil
+        return best.map { (id: $0.id, zone: $0.zone) }
     }
 }
 

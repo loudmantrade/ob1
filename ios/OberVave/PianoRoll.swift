@@ -289,7 +289,7 @@ struct PianoRollView: View {
         return Int64(min(Double(SequencerPattern.maxTicks), max(-Double(SequencerPattern.maxTicks), value)))
     }
 
-    private func touch(_ phase: PianoRollNavigationView.EditPhase, _ point: CGPoint) {
+    private func touch(_ phase: PianoRollNavigationView.EditPhase, _ point: CGPoint, _ radius: CGFloat) {
         guard !busy else { return }
         if markerGesture != nil || (phase == .begin && point.y < 0) {
             markerTouch(phase, point)
@@ -306,7 +306,8 @@ struct PianoRollView: View {
         switch phase {
         case .begin:
             guard point.x >= 0, point.y >= 0, let current = editor else { return }
-            let hit = PianoRollNoteHit.hit(point: point, notes: current.pattern.notes, viewport: viewport)
+            let hit = PianoRollNoteHit.hit(point: point, radius: radius,
+                                           notes: current.pattern.notes, viewport: viewport)
             let prefix = hit.map {
                 PianoRollTapSequence.isPrefix(note: $0.id, lastNote: lastTap?.id,
                     elapsed: ProcessInfo.processInfo.systemUptime - (lastTap?.time ?? 0))
@@ -616,6 +617,15 @@ struct PianoRollView: View {
             let color: Color = selected ? .orange : .cyan
             context.fill(Path(roundedRect: rect.intersection(grid), cornerRadius: 3),
                          with: .color(color.opacity(0.35 + 0.65 * Double(note.velocity) / 127)))
+            let area = PianoRollNoteHit.target(rect)
+            let edge = PianoRollNoteHit.edgeWidth(area.width)
+            if area.width > rect.width {
+                context.fill(Path(area.intersection(grid)), with: .color(color.opacity(0.22)))
+            }
+            let velocityArea = CGRect(x: area.minX, y: area.minY, width: edge, height: area.height)
+            let durationArea = CGRect(x: area.maxX - edge, y: area.minY, width: edge, height: area.height)
+            context.fill(Path(velocityArea.intersection(grid)), with: .color(.white.opacity(0.5)))
+            context.fill(Path(durationArea.intersection(grid)), with: .color(.black.opacity(0.55)))
             if let active = gesture, active.moved, active.hit?.id == note.id {
                 let label: String
                 switch active.hit?.zone {
@@ -763,7 +773,7 @@ struct PianoRollNavigationSurface: UIViewRepresentable {
     @Binding var viewport: PianoRollViewport
     let pattern: SequencerPattern
     let gridSize: CGSize
-    let onEdit: (PianoRollNavigationView.EditPhase, CGPoint) -> Void
+    let onEdit: (PianoRollNavigationView.EditPhase, CGPoint, CGFloat) -> Void
 
     func makeUIView(context: Context) -> PianoRollNavigationView { PianoRollNavigationView() }
     func updateUIView(_ view: PianoRollNavigationView, context: Context) {
@@ -782,7 +792,7 @@ struct PianoRollNavigationSurface: UIViewRepresentable {
 final class PianoRollNavigationView: UIView {
     enum EditPhase { case begin, move, hold, end, cancel }
     var onNavigation: ((CGPoint, CGPoint, Bool) -> Void)?
-    var onEdit: ((EditPhase, CGPoint) -> Void)?
+    var onEdit: ((EditPhase, CGPoint, CGFloat) -> Void)?
     var navigation: PianoRollNavigation?
     private var fingers: [UITouch] = []
     private var arbitration = PianoRollTouchArbitration()
@@ -799,26 +809,29 @@ final class PianoRollNavigationView: UIView {
         let point = touch.location(in: self)
         return CGPoint(x: point.x - 54, y: point.y - pianoRollRulerHeight)
     }
+    private func radius(_ touch: UITouch) -> CGFloat {
+        touch.type == .direct ? max(8, touch.majorRadius) : touch.majorRadius
+    }
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches where !fingers.contains(touch) { fingers.append(touch) }
         if fingers.count >= 2 && arbitration.mode == .idle { arbitration.begin() }
         if fingers.count == 1, let finger = fingers.first {
             arbitration.begin()
-            onEdit?(.begin, point(finger))
+            onEdit?(.begin, point(finger), radius(finger))
             holdTimer?.invalidate()
             let timer = Timer(timeInterval: 0.5, repeats: false) { [weak self, weak finger] _ in
                 guard let self, let finger, self.arbitration.mode == .editing else { return }
-                self.onEdit?(.hold, self.point(finger))
+                self.onEdit?(.hold, self.point(finger), self.radius(finger))
             }
             holdTimer = timer
             RunLoop.main.add(timer, forMode: .common)
         }
         if fingers.count == 2 && arbitration.secondFinger() {
             holdTimer?.invalidate()
-            onEdit?(.cancel, .zero)
+            onEdit?(.cancel, .zero, 0)
             onNavigation?(point(fingers[0]), point(fingers[1]), true)
         } else if fingers.count > 2 {
-            holdTimer?.invalidate(); onEdit?(.cancel, .zero)
+            holdTimer?.invalidate(); onEdit?(.cancel, .zero, 0)
             arbitration.fingerLifted(); navigation = nil
         }
     }
@@ -827,17 +840,17 @@ final class PianoRollNavigationView: UIView {
             onNavigation?(point(fingers[0]), point(fingers[1]), false)
         } else if fingers.count == 1 && arbitration.mode == .editing {
             if bounds.contains(fingers[0].location(in: self)) {
-                onEdit?(.move, point(fingers[0]))
+                onEdit?(.move, point(fingers[0]), radius(fingers[0]))
             } else {
                 holdTimer?.invalidate()
-                onEdit?(.cancel, .zero)
+                onEdit?(.cancel, .zero, 0)
                 arbitration.abandonEdit()
             }
         }
     }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         if arbitration.mode == .editing, let finger = fingers.first, touches.contains(finger) {
-            onEdit?(.end, point(finger))
+            onEdit?(.end, point(finger), radius(finger))
         }
         holdTimer?.invalidate()
         fingers.removeAll { touches.contains($0) }
@@ -845,7 +858,7 @@ final class PianoRollNavigationView: UIView {
         if fingers.isEmpty { arbitration.allReleased() }
     }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        holdTimer?.invalidate(); onEdit?(.cancel, .zero)
+        holdTimer?.invalidate(); onEdit?(.cancel, .zero, 0)
         fingers.removeAll(); navigation = nil; arbitration.cancel()
     }
 }

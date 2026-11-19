@@ -298,6 +298,31 @@ struct SceneChecks {
         precondition(PianoRollNoteHit.zone(x: 0, width: 2) == .velocity &&
                      PianoRollNoteHit.zone(x: 1, width: 2) == .body &&
                      PianoRollNoteHit.zone(x: 2, width: 2) == .duration)
+        let isolated = [editPattern.notes[1]]
+        precondition(PianoRollNoteHit.hit(point: .init(x: noteRect.minX - 6, y: y), radius: 6,
+                                          notes: isolated, viewport: hitViewport)?.zone == .velocity)
+        precondition(PianoRollNoteHit.hit(point: .init(x: noteRect.maxX + 6, y: y), radius: 6,
+                                          notes: isolated, viewport: hitViewport)?.zone == .duration)
+        precondition(PianoRollNoteHit.hit(point: .init(x: noteRect.midX, y: noteRect.minY - 5), radius: 5,
+                                          notes: isolated, viewport: hitViewport)?.zone == .body)
+        precondition(PianoRollNoteHit.hit(point: .init(x: noteRect.minX - 4, y: noteRect.minY - 4), radius: 5,
+                                          notes: isolated, viewport: hitViewport) == nil)
+        var short = editPattern.notes[1]
+        short.duration = 1
+        let shortRect = PianoRollNoteHit.rectangle(short, viewport: hitViewport)
+        let shortTarget = PianoRollNoteHit.target(shortRect)
+        precondition(shortTarget.width == 18)
+        precondition(PianoRollNoteHit.hit(point: .init(x: shortTarget.minX + 1, y: shortRect.midY),
+                                          notes: [short], viewport: hitViewport)?.zone == .velocity)
+        precondition(PianoRollNoteHit.hit(point: .init(x: shortTarget.maxX - 1, y: shortRect.midY),
+                                          notes: [short], viewport: hitViewport)?.zone == .duration)
+        var neighbor = editPattern.notes[1]
+        neighbor.id = 99; neighbor.pitch += 1
+        let neighborRect = PianoRollNoteHit.rectangle(neighbor, viewport: hitViewport)
+        precondition(PianoRollNoteHit.hit(point: .init(x: noteRect.midX, y: noteRect.midY), radius: 30,
+                                          notes: [editPattern.notes[1], neighbor], viewport: hitViewport)?.id == editPattern.notes[1].id)
+        precondition(PianoRollNoteHit.hit(point: .init(x: noteRect.midX, y: neighborRect.maxY),
+                                          notes: [editPattern.notes[1], neighbor], viewport: hitViewport)?.id == neighbor.id)
         var pasted = try PianoRollEditBuffer(pattern: editPattern)
         pasted.selection = [1, 3]
         let copiedNotes = try pasted.copySelection()
