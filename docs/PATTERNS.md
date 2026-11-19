@@ -305,8 +305,10 @@ Playback quantization is a separate, non-destructive setting for the entire
 pattern, not the current selection; changing or disabling it retains the
 recorded note timings. Selected-note and end quantization are not yet exposed.
 
-The editor remains incomplete. Controller automation requires bounded,
-versioned events with backward-compatible decoding and audio scheduling.
+The portable player now supports up to 256 ordered step controller points per
+pattern, including MIDI CC and 14-bit channel pitch bend. It schedules them on
+the audio clock, with deterministic ordering for equal ticks. This foundation
+is not yet connected to scene serialization or the editor.
 The Regions command enables version 3 for the edited pattern, with numeric tick
 positions for pattern start, loop start/end and tail end, and LOOP/ONE-SHOT.
 The editor displays these markers and shades the non-triggering tail. Each

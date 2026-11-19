@@ -12,12 +12,13 @@ namespace ob1::music {
 using PatternID = uint32_t;
 constexpr uint32_t patternVersion = 1, patternCapacity = 16, patternNoteCapacity = 1024;
 constexpr uint32_t patternNameBytes = 96;
+constexpr uint32_t patternAutomationCapacity = 256;
 constexpr Tick maxPatternTicks = INT64_C(1) << 38;
 
 enum class PatternError : uint8_t {
     None, InvalidVersion, InvalidName, InvalidLength, InvalidQuantization,
     InvalidNote, InvalidRouting, DuplicateID, InvalidCounter, Unsorted,
-    Full, NotFound, IDExhausted
+    Full, NotFound, IDExhausted, InvalidAutomation
 };
 
 struct PatternQuantization {
@@ -31,6 +32,15 @@ struct PatternNote {
     Tick start = 0, duration = ticksPerQuarter;
     Routing routing {Target::Instruments, 1, Stage::Input};
     uint8_t channel = 0, pitch = 60, velocity = 100;
+};
+
+enum class AutomationKind : uint8_t { ControlChange, PitchBend };
+struct PatternAutomation {
+    uint64_t id = 0;
+    Tick tick = 0;
+    AutomationKind kind = AutomationKind::ControlChange;
+    uint8_t controller = 0;
+    uint16_t value = 0;
 };
 
 struct PatternData {
@@ -47,6 +57,8 @@ struct PatternData {
     // Legacy patterns retain their original unbounded tail behavior.
     bool regionsEnabled = false;
     Tick loopStart = 0, loopEnd = 0;
+    uint32_t automationCount = 0;
+    std::array<PatternAutomation, patternAutomationCapacity> automation {};
     std::array<PatternNote, patternNoteCapacity> notes {};
 };
 
@@ -121,6 +133,21 @@ inline PatternError validatePattern(const PatternData& data)
     const auto quantization = validatePatternQuantization(data.quantization);
     if (quantization != PatternError::None) return quantization;
     if (data.count > patternNoteCapacity) return PatternError::Full;
+    if (data.automationCount > patternAutomationCapacity) return PatternError::Full;
+    for (uint32_t i = 0; i < data.automationCount; ++i) {
+        const auto& point = data.automation[i];
+        if (!point.id || point.id == UINT64_MAX || point.tick < -data.intro || point.tick >= data.length ||
+            (point.kind != AutomationKind::ControlChange && point.kind != AutomationKind::PitchBend) ||
+            point.controller > 127 ||
+            (point.kind == AutomationKind::ControlChange && point.value > 127) ||
+            (point.kind == AutomationKind::PitchBend && (point.controller != 0 || point.value > 16383)))
+            return PatternError::InvalidAutomation;
+        if (i && (point.tick < data.automation[i - 1].tick ||
+                  (point.tick == data.automation[i - 1].tick && point.id < data.automation[i - 1].id)))
+            return PatternError::Unsorted;
+        for (uint32_t j = 0; j < i; ++j)
+            if (data.automation[j].id == point.id) return PatternError::DuplicateID;
+    }
     if (!data.nextNote) return PatternError::InvalidCounter;
     for (uint32_t i = 0; i < data.count; ++i) {
         const auto& note = data.notes[i];

@@ -161,6 +161,50 @@ static void checkRegionTails()
     std::puts("PASS regions: pre-loop once, exclusive loop end, overlapping same-pitch tails, tail release, one-shot endpoint");
 }
 
+static void checkAutomation()
+{
+    auto data = std::make_unique<PatternData>();
+    data->id = 1; data->length = 1440; data->regionsEnabled = true;
+    data->loopStart = 240; data->loopEnd = 960;
+    std::copy_n("Automation", 11, data->name.begin());
+    data->automationCount = 4;
+    data->automation[0] = {1, 0, AutomationKind::ControlChange, 1, 5};
+    data->automation[1] = {2, 480, AutomationKind::ControlChange, 74, 127};
+    data->automation[2] = {3, 480, AutomationKind::PitchBend, 0, 8192};
+    data->automation[3] = {4, 1000, AutomationKind::ControlChange, 1, 99};
+    Pattern pattern;
+    assert(pattern.restore(*data) == PatternError::None);
+    auto invalid = *data;
+    invalid.automation[2].value = 16384;
+    assert(validatePattern(invalid) == PatternError::InvalidAutomation);
+    invalid = *data; invalid.automation[2].id = 2;
+    assert(validatePattern(invalid) == PatternError::DuplicateID);
+    invalid = *data; invalid.automation[2].kind = AutomationKind(9);
+    assert(validatePattern(invalid) == PatternError::InvalidAutomation);
+    ClipPlayer player;
+    std::vector<Event> events;
+    auto sink = [&](const Event& e) { events.push_back(e); return true; };
+    player.queue(0, &pattern, 0, LaunchGrid::Free);
+    for (Tick t = 0; t <= 1250; t += 10) assert(player.process(t * tickUnit, t, 3, 4, sink));
+    assert(events.size() == 5);
+    assert(events[0].kind == Kind::ControlChange && events[0].data1 == 1 && events[0].data2 == 5);
+    assert(events[1].kind == Kind::ControlChange && events[1].data1 == 74 && events[1].data2 == 127);
+    assert(events[2].kind == Kind::PitchBend && events[2].data1 == 0 && events[2].data2 == 64);
+    assert(events[3].kind == Kind::ControlChange && events[3].time.tick == 1200);
+    assert(events[4].kind == Kind::PitchBend && events[4].time.tick == 1200);
+    for (const auto& event : events)
+        assert(event.source.kind == SourceKind::Pattern && event.routing.instruments == (1 << 3) && event.channel == 4);
+    assert(player.stop(1300, sink));
+    events.clear(); player.queue(0, &pattern, 0, LaunchGrid::Free);
+    assert(player.process(0, 0, 3, 4, sink));
+    assert(player.process(1200 * tickUnit, 1, 3, 4, sink));
+    assert(events.size() == 5 && events[1].time.tick == 480 && events[2].time.tick == 480 &&
+           events[3].time.tick == 1200 && events[4].time.tick == 1200);
+    assert(events[1].kind == Kind::ControlChange && events[2].kind == Kind::PitchBend &&
+           events[3].kind == Kind::ControlChange && events[4].kind == Kind::PitchBend);
+    std::puts("PASS automation: bounded validation, CC and 14-bit bend, ordered equal ticks, loop and tail");
+}
+
 static void checkRecording()
 {
     auto recorder = std::make_unique<ClipRecorder>();
@@ -372,5 +416,5 @@ static void checkRecordingClicks()
 
 int main()
 {
-    checkPosition(); checkPlayback(); checkRegionTails(); checkRecording(); checkRecordModes(); checkBarCompletion(); checkRecordingClicks();
+    checkPosition(); checkPlayback(); checkRegionTails(); checkAutomation(); checkRecording(); checkRecordModes(); checkBarCompletion(); checkRecordingClicks();
 }

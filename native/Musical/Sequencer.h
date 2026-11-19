@@ -152,6 +152,66 @@ public:
                 ++iteration;
             }
         }
+        if (data.automationCount) {
+        struct AutomationDue { int64_t onset; uint32_t index; };
+        std::array<AutomationDue, patternAutomationCapacity> due {};
+        uint32_t dueCount = 0;
+        const auto before = [&](const AutomationDue& a, const AutomationDue& b) {
+            return a.onset != b.onset ? a.onset < b.onset :
+                data.automation[a.index].id < data.automation[b.index].id;
+        };
+        const auto push = [&](AutomationDue item) {
+            auto index = dueCount++;
+            while (index) {
+                const auto parent = (index - 1) / 2;
+                if (!before(item, due[parent])) break;
+                due[index] = due[parent]; index = parent;
+            }
+            due[index] = item;
+        };
+        const auto pop = [&]() {
+            const auto result = due[0];
+            const auto last = due[--dueCount];
+            uint32_t index = 0;
+            while (index * 2 + 1 < dueCount) {
+                auto child = index * 2 + 1;
+                if (child + 1 < dueCount && before(due[child + 1], due[child])) ++child;
+                if (!before(due[child], last)) break;
+                due[index] = due[child]; index = child;
+            }
+            if (dueCount) due[index] = last;
+            return result;
+        };
+        for (uint32_t i = 0; i < data.automationCount; ++i) {
+            const auto& point = data.automation[i];
+            if (point.tick < 0 && (!data.introEnabled || !playIntro_)) continue;
+            if (data.regionsEnabled && point.tick * tickUnit >= loopEnd) continue;
+            auto onset = origin + point.tick * tickUnit;
+            const bool repeating = data.loop && (data.regionsEnabled
+                ? point.tick * tickUnit >= loopStart : point.tick >= 0);
+            if (repeating && onset <= previous)
+                onset += ((previous - onset) / period + 1) * period;
+            if (onset > previous && onset <= now) push({onset, i});
+        }
+        uint32_t emittedAutomation = 0;
+        while (dueCount) {
+            if (++emittedAutomation > patternAutomationCapacity) return false;
+            const auto item = pop();
+            const auto& point = data.automation[item.index];
+            Event event {};
+            event.kind = point.kind == AutomationKind::ControlChange ? Kind::ControlChange : Kind::PitchBend;
+            event.channel = channel;
+            event.data1 = point.kind == AutomationKind::ControlChange ? point.controller : point.value & 127;
+            event.data2 = point.kind == AutomationKind::ControlChange ? point.value : point.value >> 7;
+            event.source = {SourceKind::Pattern, slot + 1};
+            event.routing = {Target::Instruments, uint16_t(1u << slot), Stage::Input};
+            event.time = {frame, item.onset / tickUnit, true};
+            if (!sink(event)) return false;
+            const bool repeating = data.loop && (data.regionsEnabled
+                ? point.tick * tickUnit >= loopStart : point.tick >= 0);
+            if (repeating && item.onset + period <= now) push({item.onset + period, item.index});
+        }
+        }
         previous = now;
         if (!data.loop && now >= origin + length) {
             bool sounding = false;
@@ -305,7 +365,7 @@ public:
     }
     bool publish(Pattern& pattern) const
     {
-        if (running || overflow || cancelled) return false;
+        if (running || overflow || cancelled || validatePattern(data) != PatternError::None) return false;
         pattern.data_ = data;
         return true;
     }
